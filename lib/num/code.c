@@ -1069,6 +1069,8 @@ static num_p num_sqr_classic_buffer(num_p num_res, num_p num)
     return num_res;
 }
 
+
+
 // KEEPS NUM_1 NUM_2
 num_p num_mul_classic(num_p num_1, num_p num_2)
 {
@@ -1091,31 +1093,19 @@ num_p num_mul_classic(num_p num_1, num_p num_2)
     const uint64_t * restrict src1 = num_1->chunk;
     const uint64_t * restrict src2 = num_2->chunk;
 
+    #pragma GCC unroll 2
     for(uint64_t i = 0; i < n2; i++)
     {
         uint64_t v2 = src2[i];
-        if (v2 == 0)
-        {
-            continue;
-        }
-
-        uint64_t carry = 0;
+        uint128_t carry = 0;
+        #pragma GCC unroll 32
         for(uint64_t j = 0; j < n1; j++)
         {
-            uint64_t dest_idx = i + j;
-
-            uint128_t u = MUL(src1[j], v2);
-            uint64_t p_low = LOW(u);
-            uint64_t p_high = HIGH(u);
-
-            uint64_t sum;
-            uint64_t c1 = (uint64_t)__builtin_add_overflow(p_low, dest[dest_idx], &sum);
-            uint64_t c2 = (uint64_t)__builtin_add_overflow(sum, carry, &dest[dest_idx]);
-
-            // Carry is mathematically guaranteed to fit cleanly in 64 bits
-            carry = p_high + c1 + c2;
+            carry += dest[i + j] + MUL(src1[j], v2);
+            dest[i + j] = LOW(carry);
+            carry = HIGH(carry);
         }
-        dest[i + n1] = carry;
+        dest[i + n1] = LOW(carry);
     }
 
     return num_normalize(num_res);
@@ -2672,7 +2662,7 @@ static num_p num_div_mod_bz(num_p num_1, num_p num_2)
     return num_q_tmp;
 }
 
-// Forces the biggest chunk of the divident to be > 2^63
+// Forces the biggest chunk of the divident to be >= 2^63
 uint64_t num_div_normalize(num_p *num_1, num_p *num_2) // TODO TEST
 {
     CLU_HANDLER_IS_SAFE(*num_1);
