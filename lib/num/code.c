@@ -1070,7 +1070,7 @@ static num_p num_sqr_classic_buffer(num_p num_res, num_p num)
 }
 
 // KEEPS NUM_1 NUM_2
-STATIC num_p num_mul_classic(num_p num_1, num_p num_2)
+num_p num_mul_classic(num_p num_1, num_p num_2)
 {
     CLU_HANDLER_IS_SAFE(num_1)
     CLU_HANDLER_IS_SAFE(num_2)

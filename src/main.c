@@ -17,6 +17,7 @@
 static int64_t get_arg(int argc, char** argv)
 {
     assert(argc > 1);
+    // NOLINTNEXTLINE(cert-err34-c)
     return atoi(argv[1]);
 }
 
@@ -697,39 +698,9 @@ static void mem_1(uint64_t)
 
 
 
-// int main(int argc, char** argv)
-int main()
+[[maybe_unused]]
+static void time_assembly_benchmark()
 {
-    setvbuf(stdout, nullptr, _IONBF, 0);
-    srand((unsigned int)time(nullptr)); // NOLINT(cert-msc51-cpp, cert-msc32-c)
-    printf("\nbegin\n\n");
-
-    // clu_log_level_set(CLU_LOG_ALL);
-
-    // num_generate(21, 2);
-    // time_1(16, 28);
-    // time_1(16, 17);
-    // time_2(argc, argv, 25, 10000);
-    // time_2_total(argc, argv);
-    // time_3();
-    // time_4();
-    // time_karatsuba();
-
-    // fibonacci();
-    // fibonacci_2(16, 23);
-    // fibonacci_3(16, 40);
-    // sqrt_2();
-    // e();
-    // pi_2();
-    // flt_num_pi_1();
-    // flt_num_pi_2(1000);
-    // flt_num_pi_3(1000);
-    // mem_1(21);
-
-    // printf("\nwaiting");
-    // getchar();
-    // printf("\ngoing");
-
     #ifdef DEBUG
     uint64_t base = 22;
     #else
@@ -763,17 +734,60 @@ int main()
     uint64_t count = clu_get_register_count();
     tprintf("total allocations : " U64P() "", count);
     tprintf("max occupancy     : " U64P() "", clu_get_max_occupancy());
+    assert(clu_mem_is_empty());
     #endif
+}
 
-    // assert(clu_mem_is_empty());
+[[maybe_unused]]
+static void time_mul_classic_benchmark()
+{
+    uint64_t base = 22;
+
+    num_p num_1 = num_generate_1(base, 2);
+    num_p num_2 = num_add(num_copy(num_1), num_wrap(1));
+
+    TIME_SETUP
+    num_p num_res = num_mul_classic(num_1, num_2);
+    TIME_END(t1)
+    tprintf("time mul: %.3f", dtime(t1));
+
+    num_free(num_res);
+}
+
+
+
+// int main(int argc, char** argv)
+int main()
+{
+    setvbuf(stdout, nullptr, _IONBF, 0);
+    srand((unsigned int)time(nullptr)); // NOLINT(cert-msc51-cpp, cert-msc32-c)
+    printf("\nbegin\n\n");
+
+    // clu_log_level_set(CLU_LOG_ALL);
+
+    // num_generate(21, 2);
+    // time_1(16, 28);
+    // time_1(16, 17);
+    // time_2(argc, argv, 25, 10000);
+    // time_2_total(argc, argv);
+    // time_3();
+    // time_4();
+
+    // fibonacci();
+    // fibonacci_2(16, 23);
+    // fibonacci_3(16, 40);
+    // sqrt_2();
+    // e();
+    // pi_2();
+    // flt_num_pi_1();
+    // flt_num_pi_2(1000);
+    // flt_num_pi_3(1000);
+    // mem_1(21);
+    // time_assembly_benchmark();
+    time_mul_classic_benchmark();
 
     printf("\n");
     return 0;
 }
 
-// main    | base: 22
-// main    | max occupancy     : 38976296
-// main    | max occupancy     : 20323888
-// main    | max occupancy     : 15950712
-
-// main    | total allocations : 16488
+// time_mul_classic_benchmark      | time mul: 21.921
