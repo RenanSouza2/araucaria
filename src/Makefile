@@ -22,11 +22,11 @@ debug.out: debug.o $(DBG_FULL_FILE)
 
 main.o: main.c
 	echo "building $(PRJ_NAME) object src main"
-	gcc -c -o $@ $< $(FLAGS) $(FLAGS_PRD) $(FLAGS_CMP)
+	gcc -c -o $@ $< $(FLAGS) $(FLAGS_PRD) $(FLAGS_CMP) $(FLAGS_EXTRA)
 
 debug.o: main.c
 	echo "building $(PRJ_NAME) object src debug"
-	gcc -c -o $@ $< $(FLAGS) $(FLAGS_DBG) $(FLAGS_CMP)
+	gcc -c -o $@ $< $(FLAGS) $(FLAGS_DBG) $(FLAGS_CMP) $(FLAGS_EXTRA)
 
 
 

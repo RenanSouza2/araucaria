@@ -1,4 +1,4 @@
-PRJ_NAME = num
+PRJ_NAME = araucaria
 PRJ_DIR ?= $(shell git rev-parse --show-toplevel)
 LIB_DIR = $(PRJ_DIR)/lib
 DBG_FULL_FILE = $(LIB_DIR)/debug_full.o
