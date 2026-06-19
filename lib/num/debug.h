@@ -28,7 +28,7 @@ bool num_immed(num_p num, uint64_t n, ...);
 
 STATIC uint64_t uint_from_char(char c);
 
-STATIC num_p num_expand_to(num_p num, uint64_t target);
+STATIC num_p num_expand_to(num_p num, uint64_t size);
 
 STATIC num_p num_normalize(num_p num);
 

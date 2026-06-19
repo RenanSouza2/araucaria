@@ -228,22 +228,22 @@ static void test_num_expand_to(bool show)
 {
     TEST_FN_OPEN
 
-    #define TEST_NUM_EXPAND_TO(TAG, NUM, TARGET, SIZE, RES) \
-    {                                                       \
-        TEST_CASE_OPEN(TAG)                                 \
-        {                                                   \
-            num_p num = num_create_immed(ARG_OPEN NUM);     \
-            num = num_expand_to(num, TARGET);               \
-            assert(uint64(num->size, SIZE));                \
-            assert(num_immed(num, ARG_OPEN RES));           \
-        }                                                   \
-        TEST_CASE_CLOSE                                     \
+    #define TEST_NUM_EXPAND_TO(TAG, NUM, SIZE)          \
+    {                                                   \
+        TEST_CASE_OPEN(TAG)                             \
+        {                                               \
+            num_p num = num_create_immed(ARG_OPEN NUM); \
+            num = num_expand_to(num, SIZE);             \
+            assert(uint64(num->size, SIZE));            \
+            assert(num_immed(num, ARG_OPEN NUM));       \
+        }                                               \
+        TEST_CASE_CLOSE                                 \
     }
 
-    TEST_NUM_EXPAND_TO(1, (0), 2, 4, (0))
-    TEST_NUM_EXPAND_TO(2, (2, 1, 2), 2, 2, (2, 1, 2))
-    TEST_NUM_EXPAND_TO(2, (2, 1, 2), 3, 6, (2, 1, 2))
-    TEST_NUM_EXPAND_TO(3, (2, 1, 2), 10, 20, (2, 1, 2))
+    TEST_NUM_EXPAND_TO(1, (0), 2)
+    TEST_NUM_EXPAND_TO(2, (2, 1, 2), 2)
+    TEST_NUM_EXPAND_TO(2, (2, 1, 2), 3)
+    TEST_NUM_EXPAND_TO(3, (2, 1, 2), 10)
 
     #undef TEST_NUM_EXPAND_TO
 
@@ -1809,6 +1809,7 @@ static void test_num_shl(bool show)
     TEST_NUM_SHL(4, (1, 1), 1, (1, 2))
     TEST_NUM_SHL(5, (1, 1), 64, (2, 1, 0))
     TEST_NUM_SHL(6, (1, 1), 65, (2, 2, 0))
+    TEST_NUM_SHL(7, (1, 0x8000000000000000), 1, (2, 1, 0))
 
     #undef TEST_NUM_SHL
 

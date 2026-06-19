@@ -420,24 +420,23 @@ num_p num_create_dirty(CLU_PARAMS(uint64_t size, uint64_t count))
     return num;
 }
 
-STATIC num_p num_expand_to(num_p num, uint64_t target)
+STATIC num_p num_expand_to(num_p num, uint64_t size)
 {
     CLU_HANDLER_IS_SAFE(num);
     assert(num);
 
-    if(target <= num->size)
+    if(size <= num->size)
     {
         return num;
     }
 
     assert(!num->cannot_expand);
 
-    uint64_t size_new = 2 * target;
     uint64_t size_old = num->size;
 
-    num_p num_new = num_create_dirty(CLU_ARGS(size_new, num->count));
+    num_p num_new = num_create_dirty(CLU_ARGS(size, num->count));
     memcpy(num_new->chunk, num->chunk, size_old * sizeof(uint64_t));
-    memset(&num_new->chunk[size_old], 0, (size_new - size_old) * sizeof(uint64_t));
+    memset(&num_new->chunk[size_old], 0, (size - size_old) * sizeof(uint64_t));
     num_free(num);
     return num_new;
 }
@@ -2722,6 +2721,8 @@ num_p num_shl(num_p num, uint64_t bits) // TODO TEST
     }
 
     constexpr uint64_t mask = 0x3f;
+    uint64_t count = bits >> chunk_bits_log_2;
+    num = num_expand_to(num, num->count + count + 1);
     num = num_shl_core(num, bits & mask);
     return num_head_grow(num, bits >> chunk_bits_log_2);
 }
