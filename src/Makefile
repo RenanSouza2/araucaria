@@ -12,7 +12,6 @@ dbg d: debug.out
 main.out: main.o $(LIB_FILE)
 	echo " linking $(PRJ_NAME) exec $(DIR) main"
 	gcc -o $@ $^ $(FLAGS) $(FLAGS_PRD) $(FLAGS_EXE)
-	echo "Finished $(PRJ_NAME) exec $(DIR) debug"
 
 debug.out: debug.o $(DBG_FULL_FILE)
 	echo " linking $(PRJ_NAME) debug $(DIR)"

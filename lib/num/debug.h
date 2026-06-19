@@ -35,14 +35,14 @@ STATIC num_p num_normalize(num_p num);
 STATIC num_p num_wrap_dec(const char str[]);
 STATIC num_p num_wrap_hex(const char str[]);
 
-STATIC num_p num_shl_core(num_p num, uint64_t bits);
-STATIC num_p num_shr_core(num_p num, uint64_t bits);
+STATIC void num_shl_core(num_p num, uint64_t bits);
+STATIC void num_shr_core(num_p num, uint64_t bits);
 
-STATIC num_p num_add_uint_offset(num_p num, uint64_t pos, uint64_t value);
-STATIC num_p num_sub_uint_offset(num_p num, uint64_t pos, uint64_t value);
+STATIC void num_add_uint_offset(num_p num, uint64_t pos, uint64_t value);
+STATIC void num_sub_uint_offset(num_p num, uint64_t pos, uint64_t value);
 
 STATIC int64_t num_cmp_offset(num_p num_1, uint64_t pos_1, num_p num_2);
-STATIC num_p num_sub_offset(num_p num_1, uint64_t pos_1, num_p num_2);
+STATIC void num_sub_offset(num_p num_1, uint64_t pos_1, num_p num_2);
 
 STATIC void num_display_span_full(const char tag[], num_p num, uint64_t n, uint64_t k);
 STATIC uint64_t ssm_bit_inv(uint64_t i, uint64_t K);

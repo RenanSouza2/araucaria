@@ -734,16 +734,10 @@ void num_free(num_p num)
 
 
 
-// TODO BEFORE PR: RETURN VOID
-STATIC num_p num_add_uint_offset(num_p num, uint64_t pos, uint64_t value)
+STATIC void num_add_uint_offset(num_p num, uint64_t pos, uint64_t value)
 {
     CLU_HANDLER_IS_SAFE(num);
     assert(num);
-
-// printf("\n");
-// tprintf("pos: %lu", pos);
-// tprintf("num->count: %lu", num->count);
-
     assert(pos <= num->count);
 
     uint64_t carry = value;
@@ -758,11 +752,9 @@ STATIC num_p num_add_uint_offset(num_p num, uint64_t pos, uint64_t value)
         num->chunk[num->count] = carry;
         num->count++;
     }
-
-    return num;
 }
 
-STATIC num_p num_sub_uint_offset(num_p num, uint64_t pos, uint64_t value)
+STATIC void num_sub_uint_offset(num_p num, uint64_t pos, uint64_t value)
 {
     CLU_HANDLER_IS_SAFE(num);
     assert(num);
@@ -775,10 +767,10 @@ STATIC num_p num_sub_uint_offset(num_p num, uint64_t pos, uint64_t value)
     assert(borrow == 0);
 
     num_normalize(num);
-    return num;
 }
 
 // keeps NUM
+// before pr remove expand here
 static num_p num_add_mul_uint_offset(
     num_p num_res, uint64_t pos_res,
     num_p num, uint64_t pos,
@@ -827,14 +819,14 @@ static num_p num_add_mul_uint_offset(
 
     if(carry)
     {
-        num_res = num_add_uint_offset(num_res, target_count, carry);
+        num_add_uint_offset(num_res, target_count, carry);
     }
 
     return num_res;
 }
 
 // BITS shoud be less than 64
-STATIC num_p num_shl_core(num_p num, uint64_t bits) // TODO test
+STATIC void num_shl_core(num_p num, uint64_t bits) // TODO test
 {
     CLU_HANDLER_IS_SAFE(num);
     assert(num);
@@ -842,7 +834,7 @@ STATIC num_p num_shl_core(num_p num, uint64_t bits) // TODO test
 
     if(bits == 0)
     {
-        return num;
+        return;
     }
 
     uint64_t carry = 0;
@@ -859,12 +851,10 @@ STATIC num_p num_shl_core(num_p num, uint64_t bits) // TODO test
         num->chunk[num->count] = carry;
         num->count++;
     }
-
-    return num;
 }
 
 // BITS shoud be less than 64
-STATIC num_p num_shr_core(num_p num, uint64_t bits) // TODO test
+STATIC void num_shr_core(num_p num, uint64_t bits) // TODO test
 {
     CLU_HANDLER_IS_SAFE(num);
     assert(num);
@@ -872,7 +862,7 @@ STATIC num_p num_shr_core(num_p num, uint64_t bits) // TODO test
 
     if(bits == 0)
     {
-        return num;
+        return;
     }
 
     uint64_t carry = 0;
@@ -884,7 +874,7 @@ STATIC num_p num_shr_core(num_p num, uint64_t bits) // TODO test
     }
     num_normalize(num);
 
-    return num;
+    return;
 }
 
 
@@ -927,7 +917,7 @@ STATIC int64_t num_cmp_offset(num_p num_1, uint64_t pos_1, num_p num_2) // TODO 
 
 // keeps NUM_2
 // TODO TEST
-static num_p num_add_offset(num_p num_1, uint64_t pos_1, num_p num_2, uint64_t pos_2)
+static void num_add_offset(num_p num_1, uint64_t pos_1, num_p num_2, uint64_t pos_2)
 {
     CLU_HANDLER_IS_SAFE(num_1)
     CLU_HANDLER_IS_SAFE(num_2)
@@ -954,15 +944,13 @@ static num_p num_add_offset(num_p num_1, uint64_t pos_1, num_p num_2, uint64_t p
 
     if(carry)
     {
-        num_1 = num_add_uint_offset(num_1, count_max, carry);
+        num_add_uint_offset(num_1, count_max, carry);
     }
-
-    return num_1;
 }
 
 // keeps NUM2
 // TODO: improve efficiency
-STATIC num_p num_sub_offset(num_p num_1, uint64_t pos_1, num_p num_2)
+STATIC void num_sub_offset(num_p num_1, uint64_t pos_1, num_p num_2)
 {
     CLU_HANDLER_IS_SAFE(num_1)
     CLU_HANDLER_IS_SAFE(num_2)
@@ -986,7 +974,7 @@ STATIC num_p num_sub_offset(num_p num_1, uint64_t pos_1, num_p num_2)
     }
     assert(borrow == 0);
 
-    return num_normalize(num_1);
+    num_normalize(num_1);
 }
 
 
@@ -1013,7 +1001,7 @@ static num_p num_mul_uint_buffer(num_p num_res, num_p num, uint64_t value) // TO
     {
         uint128_t u = MUL(num->chunk[i], value);
         num_res->chunk[i+1] = HIGH(u);
-        num_res = num_add_uint_offset(num_res, i, LOW(u));
+        num_add_uint_offset(num_res, i, LOW(u));
     }
     return num_normalize(num_res);
 }
@@ -1033,15 +1021,15 @@ static num_p num_sqr_classic_buffer(num_p num_res, num_p num)
         uint64_t value = num->chunk[i];
 
         uint128_t u = MUL(value, value);
-        num_res = num_add_uint_offset(num_res, (2 * i), LOW(u));
-        num_res = num_add_uint_offset(num_res, (2 * i) + 1, HIGH(u));
+        num_add_uint_offset(num_res, (2 * i), LOW(u));
+        num_add_uint_offset(num_res, (2 * i) + 1, HIGH(u));
 
         num_res = num_add_mul_uint_offset(num_res, (2 * i) + 1, num, i + 1, value << 1);
 
         constexpr uint64_t msb_set = 0x8000000000000000;
         if(value >= msb_set)
         {
-            num_res = num_add_offset(num_res, (2 * i) + 2, num, i + 1);
+            num_add_offset(num_res, (2 * i) + 2, num, i + 1);
         }
     }
     return num_normalize(num_res);
@@ -2277,7 +2265,7 @@ STATIC num_p num_ssm_depad_no_wrap(num_p num, ssm_params_p p)
     {
         num_t block;
         num_span(&block, num, p->n * i, p->n * (i + 1));
-        num_res = num_add_offset(num_res, p->M * i, &block, 0);
+        num_add_offset(num_res, p->M * i, &block, 0);
     }
 
     num_free(num);
@@ -2426,15 +2414,15 @@ num_p num_div_mod_uint(num_p num, uint64_t value)
         {
             uint64_t r = num->chunk[i] / value;
             num_q->chunk[i] = r;
-            num = num_sub_uint_offset(num, i, r * value);
+            num_sub_uint_offset(num, i, r * value);
             continue;
         }
 
         uint128_t value_1 = U128HL(num->chunk[i + 1], num->chunk[i]);
         uint64_t r = (uint64_t)(value_1 / value);
         value_1 = MUL(r, value);
-        num = num_sub_uint_offset(num, i+1, HIGH(value_1));
-        num = num_sub_uint_offset(num, i  , LOW(value_1));
+        num_sub_uint_offset(num, i+1, HIGH(value_1));
+        num_sub_uint_offset(num, i  , LOW(value_1));
         num_q->chunk[i] = r;
     }
     num_normalize(num_q);
@@ -2469,7 +2457,7 @@ static num_p num_div_mod_classic(num_p num_aux, num_p num_1, num_p num_2)
         if(num_1->count == num_2->count + i)
         {
             num_q->chunk[i] = 1;
-            num_1 = num_sub_offset(num_1, i, num_2);
+            num_sub_offset(num_1, i, num_2);
             continue;
         }
 
@@ -2477,7 +2465,7 @@ static num_p num_div_mod_classic(num_p num_aux, num_p num_1, num_p num_2)
         {
             num_q->chunk[i] = UINT64_MAX;
             num_aux = num_mul_uint_buffer(num_aux, num_2, UINT64_MAX);
-            num_1 = num_sub_offset(num_1, i, num_aux);
+            num_sub_offset(num_1, i, num_aux);
             continue;
         }
 
@@ -2487,11 +2475,11 @@ static num_p num_div_mod_classic(num_p num_aux, num_p num_1, num_p num_2)
         while(num_cmp_offset(num_1, i, num_aux) < 0)
         {
             r--;
-            num_aux = num_sub_offset(num_aux, 0, num_2);
+            num_sub_offset(num_aux, 0, num_2);
         }
 
         num_q->chunk[i] = r;
-        num_1 = num_sub_offset(num_1, i, num_aux);
+        num_sub_offset(num_1, i, num_aux);
     }
 
     num_normalize(num_q);
@@ -2585,18 +2573,18 @@ static num_p num_div_mod_bz_rec(
         while(num_cmp_offset(num_1, k * i, num_aux_2) < 0)
         {
             num_q_tmp = num_sub_uint(num_q_tmp, 1);
-            num_1 = num_add_offset(num_1, k * i, num_2, 0);
+            num_add_offset(num_1, k * i, num_2, 0);
         }
-        num_1 = num_sub_offset(num_1, k * i, num_aux_2);
+        num_sub_offset(num_1, k * i, num_aux_2);
         num_free(num_aux_2);
 
         num_q[i] = num_q_tmp;
     }
     num_q[0] = num_expand_to(num_q[0], k + num_q[1]->count);
-    num_p num_res = num_add_offset(num_q[0], k, num_q[1], 0);
-    num_free(num_q[1]);
+    num_add_offset(num_q[0], k, num_q[1], 0);
 
-    return num_res;
+    num_free(num_q[1]);
+    return num_q[0];
 }
 
 // Input expected to be normalized
@@ -2628,17 +2616,17 @@ static num_p num_div_mod_bz(num_p num_1, num_p num_2)
         num_p num_q_tmp = num_div_mod_bz_rec(num_aux, &num_1_1, num_2, f, true);
         num_normalize(num_1);
         num_q_tmp = num_expand_to(num_q_tmp, n_2 + num_q->count);
-        num_p num_tmp = num_add_offset(num_q_tmp, n_2, num_q, 0);
+        num_add_offset(num_q_tmp, n_2, num_q, 0);
         num_free(num_q);
-        num_q = num_tmp;
+        num_q = num_q_tmp;
     }
 
     num_p num_q_tmp = num_div_mod_bz_rec(num_aux, num_1, num_2, f, false);
     num_q_tmp = num_expand_to(num_q_tmp, n_1 - n_2 + num_q->count);
-    num_q_tmp = num_add_offset(num_q_tmp, n_1 - n_2, num_q, 0);
+    num_add_offset(num_q_tmp, n_1 - n_2, num_q, 0);
+
     num_free(num_aux);
     num_free(num_q);
-
     return num_q_tmp;
 }
 
@@ -2651,10 +2639,10 @@ uint64_t num_div_normalize(num_p *num_1, num_p *num_2) // TODO TEST
     assert(*num_2);
 
     uint64_t bits = chunk_bits - stdc_bit_width((*num_2)->chunk[(*num_2)->count-1]);
-    num_p num_1_tmp = num_expand_to((*num_1), (*num_1)->count + 1);
-    num_p num_2_tmp = num_expand_to((*num_2), (*num_2)->count + 1);
-    *num_1 = num_shl_core(num_1_tmp, bits);
-    *num_2 = num_shl_core(num_2_tmp, bits);
+    (*num_1) = num_expand_to((*num_1), (*num_1)->count + 1);
+    (*num_2) = num_expand_to((*num_2), (*num_2)->count + 1);
+    num_shl_core(*num_1, bits);
+    num_shl_core(*num_2, bits);
     return bits;
 }
 
@@ -2681,7 +2669,7 @@ static void num_div_mod_finalize(
 
     if(out_num_r)
     {
-        num_1 = num_shr_core(num_1, bits);
+        num_shr_core(num_1, bits);
         *out_num_r = num_1;
     }
     else
@@ -2723,7 +2711,7 @@ num_p num_shl(num_p num, uint64_t bits) // TODO TEST
     constexpr uint64_t mask = 0x3f;
     uint64_t count = bits >> chunk_bits_log_2;
     num = num_expand_to(num, num->count + count + 1);
-    num = num_shl_core(num, bits & mask);
+    num_shl_core(num, bits & mask);
     return num_head_grow(num, bits >> chunk_bits_log_2);
 }
 
@@ -2739,7 +2727,8 @@ num_p num_shr(num_p num, uint64_t bits) // TODO TEST
 
     num_head_trim(num, bits >> chunk_bits_log_2);
     constexpr uint64_t mask = 0x3f;
-    return num_shr_core(num, bits & mask);
+    num_shr_core(num, bits & mask);
+    return num;
 }
 
 num_p num_add_uint(num_p num, uint64_t value)
@@ -2747,7 +2736,9 @@ num_p num_add_uint(num_p num, uint64_t value)
     CLU_HANDLER_IS_SAFE(num)
     assert(num)
 
-    return num_add_uint_offset(num, 0, value);
+    num = num_expand_to(num, num->count + 1);
+    num_add_uint_offset(num, 0, value);
+    return num;
 }
 
 num_p num_sub_uint(num_p num, uint64_t value)
@@ -2755,7 +2746,8 @@ num_p num_sub_uint(num_p num, uint64_t value)
     CLU_HANDLER_IS_SAFE(num)
     assert(num)
 
-    return num_sub_uint_offset(num, 0, value);
+    num_sub_uint_offset(num, 0, value);
+    return num;
 }
 
 num_p num_mul_uint(num_p num, uint64_t value)
@@ -2780,8 +2772,8 @@ num_p num_add(num_p num_1, num_p num_2)
 
     uint64_t count = num_1->count > num_2->count ? num_1->count : num_2->count;
     num_1 = num_expand_to(num_1, count + 1);
+    num_add_offset(num_1, 0, num_2, 0);
 
-    num_1 = num_add_offset(num_1, 0, num_2, 0);
     num_free(num_2);
     return num_1;
 }
@@ -2793,7 +2785,8 @@ num_p num_sub(num_p num_1, num_p num_2)
     assert(num_1)
     assert(num_2)
 
-    num_1 = num_sub_offset(num_1, 0, num_2);
+    num_sub_offset(num_1, 0, num_2);
+
     num_free(num_2);
     return num_1;
 }
@@ -2945,7 +2938,7 @@ static num_p num_base_to_rec(num_p num, num_p num_bases[], uint64_t i)
     num_q = num_base_to_rec(num_q, num_bases, i - 1);
     num_r = num_base_to_rec(num_r, num_bases, i - 1);
     num_r = num_expand_to(num_r, B(i) + num_q->count);
-    num_r = num_add_offset(num_r, B(i), num_q, 0);
+    num_add_offset(num_r, B(i), num_q, 0);
     num_free(num_q);
     return num_r;
 }

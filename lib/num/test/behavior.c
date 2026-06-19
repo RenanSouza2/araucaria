@@ -677,7 +677,7 @@ static void test_num_add_uint_offset(bool show)
         {                                                           \
             num_p num = num_create_immed(ARG_OPEN NUM);             \
             num = num_expand_to(num, num->count + 1);               \
-            num = num_add_uint_offset(num, OFFSET, VALUE);          \
+            num_add_uint_offset(num, OFFSET, VALUE);                \
             assert(num_immed(num, ARG_OPEN RES));                   \
         }                                                           \
         TEST_CASE_CLOSE                                             \
@@ -724,7 +724,7 @@ static void test_num_sub_uint_offset(bool show)
         TEST_CASE_OPEN(TAG)                                     \
         {                                                       \
             num_p num = num_create_immed(ARG_OPEN NUM);         \
-            num = num_sub_uint_offset(num, POS, VALUE);         \
+            num_sub_uint_offset(num, POS, VALUE);               \
             assert(num_immed(num, ARG_OPEN RES));               \
         }                                                       \
         TEST_CASE_CLOSE                                         \
@@ -784,7 +784,7 @@ static void test_num_sub_offset(bool show)
         {                                                       \
             num_p num_1 = num_create_immed(ARG_OPEN NUM_1);     \
             num_p num_2 = num_create_immed(ARG_OPEN NUM_2);     \
-            num_1 = num_sub_offset(num_1, POS, num_2);          \
+            num_sub_offset(num_1, POS, num_2);                  \
             assert(num_immed(num_1, ARG_OPEN RES));             \
             num_free(num_2);                                    \
         }                                                       \
@@ -838,7 +838,7 @@ static void test_num_shl_core(bool show)
         {                                                   \
             num_p num = num_create_immed(ARG_OPEN NUM_BEF); \
             num = num_expand_to(num, num->count + 1);       \
-            num = num_shl_core(num, BITS);                  \
+            num_shl_core(num, BITS);                        \
             assert(num_immed(num, ARG_OPEN NUM_AFT));       \
         }                                                   \
         TEST_CASE_CLOSE                                     \
@@ -861,7 +861,7 @@ static void test_num_shl_core(bool show)
             num_p num = num_create_immed(ARG_OPEN NUM_BEF); \
             TEST_REVERT_OPEN                                \
             {                                               \
-                num = num_shl_core(num, BITS);              \
+                num_shl_core(num, BITS);              \
             }                                               \
             TEST_REVERT_CLOSE                               \
         }                                                   \
@@ -884,7 +884,7 @@ static void test_num_shr_core(bool show)
         TEST_CASE_OPEN(TAG)                                 \
         {                                                   \
             num_p num = num_create_immed(ARG_OPEN NUM_BEF); \
-            num = num_shr_core(num, BITS);                  \
+            num_shr_core(num, BITS);                  \
             assert(num_immed(num, ARG_OPEN NUM_AFT));       \
         }                                                   \
         TEST_CASE_CLOSE                                     \
