@@ -451,30 +451,6 @@ static void num_set_count(num_p num, uint64_t count)
     memset(&num->chunk[count], 0, (num->size - count) * sizeof(uint64_t));
 }
 
-STATIC num_p num_chunk_set(num_p num, uint64_t pos, uint64_t value)
-{
-    CLU_HANDLER_IS_SAFE(num);
-    assert(num);
-
-    if(pos >= num->count && value == 0)
-    {
-        return num;
-    }
-
-    if(pos >= num->size)
-    {
-        num = num_expand_to(num, pos + 1);
-    }
-
-    num->chunk[pos] = value;
-    if(pos >= num->count)
-    {
-        num->count = pos + 1;
-    }
-
-    return num;
-}
-
 STATIC num_p num_normalize(num_p num)
 {
     CLU_HANDLER_IS_SAFE(num);
@@ -624,19 +600,19 @@ STATIC num_p num_wrap_dec(const char str[])
     uint64_t len = strlen(str);
     uint64_t pos = len / chunk_len;
     uint64_t extra = len % chunk_len != 0;
-    num_p num = num_create(CLU_ARGS(pos + extra, 0));
+    num_p num = num_create(CLU_ARGS(pos + extra, pos + extra));
 
     if(extra)
     {
         uint64_t value = uint_from_str(str, len % chunk_len, dec_base);
-        num = num_chunk_set(num, pos, value);
+        num->chunk[pos] = value;
     }
 
     for(uint64_t i=len % chunk_len; i<len; i+=chunk_len)
     {
         uint64_t value = uint_from_str(&str[i], chunk_len, dec_base);
         pos--;
-        num = num_chunk_set(num, pos, value);
+        num->chunk[pos] = value;
     }
 
     num_normalize(num);
@@ -651,19 +627,19 @@ STATIC num_p num_wrap_hex(const char str[])
     constexpr uint64_t chars_per_chunk = 16;
     uint64_t pos = (len - 2) / chars_per_chunk;
     uint64_t extra = (len - 2) % chars_per_chunk != 0;
-    num_p num = num_create(CLU_ARGS(pos + extra, 0));
+    num_p num = num_create(CLU_ARGS(pos + extra, pos + extra));
 
     if(extra)
     {
         uint64_t value = uint_from_str(&str[2], (len - 2) % chars_per_chunk, chars_per_chunk);
-        num = num_chunk_set(num, pos, value);
+        num->chunk[pos] = value;
     }
 
     for(uint64_t i = 2 + ((len - 2) % chars_per_chunk); i < len; i += chars_per_chunk)
     {
         uint64_t value = uint_from_str(&str[i], chars_per_chunk, chars_per_chunk);
         pos--;
-        num = num_chunk_set(num, pos, value);
+        num->chunk[pos] = value;
     }
 
     num_normalize(num);
@@ -699,18 +675,18 @@ num_p num_read_dec(const char file_name[])
     uint64_t pos = size / chunk_len;
     uint64_t extra = size % chunk_len;
 
-    num_p num = num_create(CLU_ARGS(pos + extra, 0));
+    num_p num = num_create(CLU_ARGS(pos + extra, pos + extra));
     if(extra)
     {
         uint64_t value = uint_read(fp, size % chunk_len, dec_base);
-        num = num_chunk_set(num, pos, value);
+        num->chunk[pos] = value;
     }
 
     while(get_ftell(fp) < size)
     {
         uint64_t value = uint_read(fp, chunk_len, dec_base);
         pos--;
-        num = num_chunk_set(num, pos, value);
+        num->chunk[pos] = value;
     }
     fclose(fp);
 
@@ -759,10 +735,17 @@ void num_free(num_p num)
 
 
 
+// TODO BEFORE PR: RETURN VOID
 STATIC num_p num_add_uint_offset(num_p num, uint64_t pos, uint64_t value)
 {
     CLU_HANDLER_IS_SAFE(num);
     assert(num);
+
+// printf("\n");
+// tprintf("pos: %lu", pos);
+// tprintf("num->count: %lu", num->count);
+
+    assert(pos <= num->count);
 
     uint64_t carry = value;
     for(uint64_t i=pos; i<num->count && carry; i++)
@@ -772,8 +755,9 @@ STATIC num_p num_add_uint_offset(num_p num, uint64_t pos, uint64_t value)
 
     if(carry)
     {
-        pos = pos > num->count ? pos : num->count;
-        num = num_chunk_set(num, pos , LOW(carry));
+        assert(num->size > num->count);
+        num->chunk[num->count] = carry;
+        num->count++;
     }
 
     return num;
@@ -847,7 +831,7 @@ static num_p num_add_mul_uint_offset(
         num_res = num_add_uint_offset(num_res, target_count, carry);
     }
 
-    return num_normalize(num_res);
+    return num_res;
 }
 
 // BITS shoud be less than 64
@@ -872,7 +856,9 @@ STATIC num_p num_shl_core(num_p num, uint64_t bits) // TODO test
 
     if(carry)
     {
-        num = num_chunk_set(num, num->count, carry);
+        assert(num->size > num->count);
+        num->chunk[num->count] = carry;
+        num->count++;
     }
 
     return num;
@@ -949,15 +935,14 @@ static num_p num_add_offset(num_p num_1, uint64_t pos_1, num_p num_2, uint64_t p
     assert(num_1)
     assert(num_2)
 
-    if(num_2->count == 0)
-    {
-        return num_1;
-    }
-
     uint64_t delta = pos_1 - pos_2;
     uint64_t count_max = delta + num_2->count;
+    assert(num_1->size >= count_max);
 
-    num_1 = num_expand_to(num_1, count_max);
+    if(num_1->count < count_max)
+    {
+        num_1->count = count_max;
+    }
 
     uint64_t carry = 0;
     for(uint64_t i=pos_2; i<num_2->count; i++)
@@ -971,13 +956,6 @@ static num_p num_add_offset(num_p num_1, uint64_t pos_1, num_p num_2, uint64_t p
     if(carry)
     {
         num_1 = num_add_uint_offset(num_1, count_max, carry);
-    }
-    else
-    {
-        if(num_1->count < count_max)
-        {
-            num_1->count = count_max;
-        }
     }
 
     return num_1;
@@ -1049,7 +1027,8 @@ static num_p num_sqr_classic_buffer(num_p num_res, num_p num)
     assert(num)
     assert(num_res->size >= 2 * num->count)
 
-    num_set_count(num_res, 0);
+    memset(num_res->chunk, 0, num_res->size * sizeof(uint64_t));
+    num_res->count = 2 * num->count;
     for(uint64_t i=0; i<num->count; i++)
     {
         uint64_t value = num->chunk[i];
@@ -1066,7 +1045,7 @@ static num_p num_sqr_classic_buffer(num_p num_res, num_p num)
             num_res = num_add_offset(num_res, (2 * i) + 2, num, i + 1);
         }
     }
-    return num_res;
+    return num_normalize(num_res);
 }
 
 
@@ -2303,7 +2282,7 @@ STATIC num_p num_ssm_depad_no_wrap(num_p num, ssm_params_p p)
     }
 
     num_free(num);
-    return num_res;
+    return num_normalize(num_res);
 }
 
 // num_aux->size >= 2 * n
@@ -2614,7 +2593,7 @@ static num_p num_div_mod_bz_rec(
 
         num_q[i] = num_q_tmp;
     }
-
+    num_q[0] = num_expand_to(num_q[0], k + num_q[1]->count);
     num_p num_res = num_add_offset(num_q[0], k, num_q[1], 0);
     num_free(num_q[1]);
 
@@ -2649,12 +2628,14 @@ static num_p num_div_mod_bz(num_p num_1, num_p num_2)
 
         num_p num_q_tmp = num_div_mod_bz_rec(num_aux, &num_1_1, num_2, f, true);
         num_normalize(num_1);
+        num_q_tmp = num_expand_to(num_q_tmp, n_2 + num_q->count);
         num_p num_tmp = num_add_offset(num_q_tmp, n_2, num_q, 0);
         num_free(num_q);
         num_q = num_tmp;
     }
 
     num_p num_q_tmp = num_div_mod_bz_rec(num_aux, num_1, num_2, f, false);
+    num_q_tmp = num_expand_to(num_q_tmp, n_1 - n_2 + num_q->count);
     num_q_tmp = num_add_offset(num_q_tmp, n_1 - n_2, num_q, 0);
     num_free(num_aux);
     num_free(num_q);
@@ -2671,8 +2652,10 @@ uint64_t num_div_normalize(num_p *num_1, num_p *num_2) // TODO TEST
     assert(*num_2);
 
     uint64_t bits = chunk_bits - stdc_bit_width((*num_2)->chunk[(*num_2)->count-1]);
-    *num_1 = num_shl_core((*num_1), bits);
-    *num_2 = num_shl_core((*num_2), bits);
+    num_p num_1_tmp = num_expand_to((*num_1), (*num_1)->count + 1);
+    num_p num_2_tmp = num_expand_to((*num_2), (*num_2)->count + 1);
+    *num_1 = num_shl_core(num_1_tmp, bits);
+    *num_2 = num_shl_core(num_2_tmp, bits);
     return bits;
 }
 
@@ -2793,6 +2776,9 @@ num_p num_add(num_p num_1, num_p num_2)
     CLU_HANDLER_IS_SAFE(num_2)
     assert(num_1)
     assert(num_2)
+
+    uint64_t count = num_1->count > num_2->count ? num_1->count : num_2->count;
+    num_1 = num_expand_to(num_1, count + 1);
 
     num_1 = num_add_offset(num_1, 0, num_2, 0);
     num_free(num_2);
@@ -2957,6 +2943,7 @@ static num_p num_base_to_rec(num_p num, num_p num_bases[], uint64_t i)
     num_div_mod(&num_q, &num_r, num, num_copy(num_bases[i]));
     num_q = num_base_to_rec(num_q, num_bases, i - 1);
     num_r = num_base_to_rec(num_r, num_bases, i - 1);
+    num_r = num_expand_to(num_r, B(i) + num_q->count);
     num_r = num_add_offset(num_r, B(i), num_q, 0);
     num_free(num_q);
     return num_r;

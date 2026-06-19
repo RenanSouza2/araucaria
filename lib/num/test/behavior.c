@@ -38,15 +38,15 @@ static void test_uint_from_char(bool show)
         TEST_CASE_CLOSE                             \
     }
 
-    TEST_UINT_FROM_CHAR(1, '0',  0);
-    TEST_UINT_FROM_CHAR(2, '1',  1);
-    TEST_UINT_FROM_CHAR(3, '9',  9);
-    TEST_UINT_FROM_CHAR(4, 'a', 10);
-    TEST_UINT_FROM_CHAR(5, 'b', 11);
-    TEST_UINT_FROM_CHAR(6, 'f', 15);
-    TEST_UINT_FROM_CHAR(7, 'A', 10);
-    TEST_UINT_FROM_CHAR(8, 'B', 11);
-    TEST_UINT_FROM_CHAR(9, 'F', 15);
+    TEST_UINT_FROM_CHAR(1, '0',  0)
+    TEST_UINT_FROM_CHAR(2, '1',  1)
+    TEST_UINT_FROM_CHAR(3, '9',  9)
+    TEST_UINT_FROM_CHAR(4, 'a', 10)
+    TEST_UINT_FROM_CHAR(5, 'b', 11)
+    TEST_UINT_FROM_CHAR(6, 'f', 15)
+    TEST_UINT_FROM_CHAR(7, 'A', 10)
+    TEST_UINT_FROM_CHAR(8, 'B', 11)
+    TEST_UINT_FROM_CHAR(9, 'F', 15)
 
     #undef TEST_UINT_FROM_CHAR
 
@@ -204,10 +204,10 @@ static void test_num_create(bool show)
         TEST_CASE_CLOSE                                     \
     }
 
-    TEST_NUM_CREATE(1, 0, 0, 1);
-    TEST_NUM_CREATE(2, 1, 1, 1);
-    TEST_NUM_CREATE(3, 2, 2, 2);
-    TEST_NUM_CREATE(4, 3, 2, 3);
+    TEST_NUM_CREATE(1, 0, 0, 1)
+    TEST_NUM_CREATE(2, 1, 1, 1)
+    TEST_NUM_CREATE(3, 2, 2, 2)
+    TEST_NUM_CREATE(4, 3, 2, 3)
 
     #undef TEST_NUM_CREATE
 
@@ -240,38 +240,12 @@ static void test_num_expand_to(bool show)
         TEST_CASE_CLOSE                                     \
     }
 
-    TEST_NUM_EXPAND_TO(1, (0), 2, 4, (0));
-    TEST_NUM_EXPAND_TO(2, (2, 1, 2), 2, 2, (2, 1, 2));
-    TEST_NUM_EXPAND_TO(2, (2, 1, 2), 3, 6, (2, 1, 2));
-    TEST_NUM_EXPAND_TO(3, (2, 1, 2), 10, 20, (2, 1, 2));
+    TEST_NUM_EXPAND_TO(1, (0), 2, 4, (0))
+    TEST_NUM_EXPAND_TO(2, (2, 1, 2), 2, 2, (2, 1, 2))
+    TEST_NUM_EXPAND_TO(2, (2, 1, 2), 3, 6, (2, 1, 2))
+    TEST_NUM_EXPAND_TO(3, (2, 1, 2), 10, 20, (2, 1, 2))
 
     #undef TEST_NUM_EXPAND_TO
-
-    TEST_FN_CLOSE
-}
-
-static void test_num_chunk_set(bool show)
-{
-    TEST_FN_OPEN
-
-    #define TEST_NUM_CHUNK_SET(TAG, NUM, POS, VALUE, RES)   \
-    {                                                       \
-        TEST_CASE_OPEN(TAG)                                 \
-        {                                                   \
-            num_p num = num_create_immed(ARG_OPEN NUM);     \
-            num = num_chunk_set(num, POS, VALUE);           \
-            assert(num_immed(num, ARG_OPEN RES));           \
-        }                                                   \
-        TEST_CASE_CLOSE                                     \
-    }
-
-    TEST_NUM_CHUNK_SET(1, (0), 0, 0, (0));
-    TEST_NUM_CHUNK_SET(2, (0), 0, 1, (1, 1));
-    TEST_NUM_CHUNK_SET(3, (1, 1), 0, 2, (1, 2));
-    // TEST_NUM_CHUNK_SET(4, (1, 1), 5, 2, (6, 2, 0, 0, 0, 0, 1));
-    // TEST_NUM_CHUNK_SET(5, (1, 1), 5, 0, (1, 1));
-
-    #undef TEST_NUM_CHUNK_SET
 
     TEST_FN_CLOSE
 }
@@ -294,27 +268,27 @@ static void test_num_normalize(bool show)
     TEST_NUM_NORMALIZE(1,
         (0),
         (0)
-    );
+    )
     TEST_NUM_NORMALIZE(2,
         (1, 1),
         (1, 1)
-    );
+    )
     TEST_NUM_NORMALIZE(3,
         (1, 0),
         (0)
-    );
+    )
     TEST_NUM_NORMALIZE(4,
         (2, 0, 1),
         (1, 1)
-    );
+    )
     TEST_NUM_NORMALIZE(5,
         (2, 0, 0),
         (0)
-    );
+    )
     TEST_NUM_NORMALIZE(6,
         (3, 0, 0, 1),
         (1, 1)
-    );
+    )
 
     #undef TEST_NUM_NORMALIZE
 
@@ -342,67 +316,67 @@ static void test_num_break(bool show)
         0,
         (0),
         (0)
-    );
+    )
     TEST_NUM_BREAK(2,
         (0),
         1,
         (0),
         (0)
-    );
+    )
     TEST_NUM_BREAK(3,
         (1, 1),
         0,
         (1, 1),
         (0)
-    );
+    )
     TEST_NUM_BREAK(4,
         (1, 1),
         1,
         (0),
         (1, 1)
-    );
+    )
     TEST_NUM_BREAK(5,
         (1, 1),
         2,
         (0),
         (1, 1)
-    );
+    )
     TEST_NUM_BREAK(6,
         (2, 1, 2),
         0,
         (2, 1, 2),
         (0)
-    );
+    )
     TEST_NUM_BREAK(7,
         (2, 1, 2),
         1,
         (1, 1),
         (1, 2)
-    );
+    )
     TEST_NUM_BREAK(8,
         (2, 1, 2),
         2,
         (0),
         (2, 1, 2)
-    );
+    )
     TEST_NUM_BREAK(9,
         (2, 1, 2),
         3,
         (0),
         (2, 1, 2)
-    );
+    )
     TEST_NUM_BREAK(10,
         (3, 1, 0, 2),
         2,
         (1, 1),
         (1, 2)
-    );
+    )
     TEST_NUM_BREAK(11,
         (3, 1, 0, 0),
         2,
         (1, 1),
         (0)
-    );
+    )
 
     #undef TEST_NUM_BREAK
 
@@ -425,9 +399,9 @@ static void test_num_wrap(bool show)
         TEST_CASE_CLOSE                             \
     }
 
-    TEST_NUM_WRAP(1, 0, 0);
-    TEST_NUM_WRAP(2, 2, 1, 2);
-    TEST_NUM_WRAP(3, UINT64_MAX, 1, UINT64_MAX);
+    TEST_NUM_WRAP(1, 0, 0)
+    TEST_NUM_WRAP(2, 2, 1, 2)
+    TEST_NUM_WRAP(3, UINT64_MAX, 1, UINT64_MAX)
 
     #undef TEST_NUM_WRAP
 
@@ -448,15 +422,15 @@ static void test_num_wrap_dec(bool show)
         TEST_CASE_CLOSE                             \
     }
 
-    TEST_NUM_WRAP_DEC(1, "0", 0);
-    TEST_NUM_WRAP_DEC(2, "1", 1, 1);
-    TEST_NUM_WRAP_DEC(3, "9", 1, 9);
-    TEST_NUM_WRAP_DEC(4, "10", 1, 10);
-    TEST_NUM_WRAP_DEC(5, "18446744073709551615", 1, UINT64_MAX);
-    TEST_NUM_WRAP_DEC(6, "18446744073709551616", 2, 1, 0);
-    TEST_NUM_WRAP_DEC(7, "0000", 0);
-    TEST_NUM_WRAP_DEC(8, "00001", 1, 1);
-    TEST_NUM_WRAP_DEC(9, "", 0);
+    TEST_NUM_WRAP_DEC(1, "0", 0)
+    TEST_NUM_WRAP_DEC(2, "1", 1, 1)
+    TEST_NUM_WRAP_DEC(3, "9", 1, 9)
+    TEST_NUM_WRAP_DEC(4, "10", 1, 10)
+    TEST_NUM_WRAP_DEC(5, "18446744073709551615", 1, UINT64_MAX)
+    TEST_NUM_WRAP_DEC(6, "18446744073709551616", 2, 1, 0)
+    TEST_NUM_WRAP_DEC(7, "0000", 0)
+    TEST_NUM_WRAP_DEC(8, "00001", 1, 1)
+    TEST_NUM_WRAP_DEC(9, "", 0)
 
     #undef TEST_NUM_WRAP_DEC
 
@@ -477,17 +451,17 @@ static void test_num_wrap_hex(bool show)
         TEST_CASE_CLOSE                             \
     }
 
-    TEST_NUM_WRAP_HEX( 1, "0x0", 0);
-    TEST_NUM_WRAP_HEX( 2, "0x1", 1, 1);
-    TEST_NUM_WRAP_HEX( 3, "0x9", 1, 9);
-    TEST_NUM_WRAP_HEX( 4, "0xa", 1, 10);
-    TEST_NUM_WRAP_HEX( 5, "0xA", 1, 10);
-    TEST_NUM_WRAP_HEX( 6, "0x10", 1, 16);
-    TEST_NUM_WRAP_HEX( 7, "0xffffffffffffffff", 1, UINT64_MAX);
-    TEST_NUM_WRAP_HEX( 8, "0x10000000000000000", 2, 1, 0);
-    TEST_NUM_WRAP_HEX( 9, "0x0000", 0);
-    TEST_NUM_WRAP_HEX(10, "0x00001", 1, 1);
-    TEST_NUM_WRAP_HEX(11, "0x", 0);
+    TEST_NUM_WRAP_HEX( 1, "0x0", 0)
+    TEST_NUM_WRAP_HEX( 2, "0x1", 1, 1)
+    TEST_NUM_WRAP_HEX( 3, "0x9", 1, 9)
+    TEST_NUM_WRAP_HEX( 4, "0xa", 1, 10)
+    TEST_NUM_WRAP_HEX( 5, "0xA", 1, 10)
+    TEST_NUM_WRAP_HEX( 6, "0x10", 1, 16)
+    TEST_NUM_WRAP_HEX( 7, "0xffffffffffffffff", 1, UINT64_MAX)
+    TEST_NUM_WRAP_HEX( 8, "0x10000000000000000", 2, 1, 0)
+    TEST_NUM_WRAP_HEX( 9, "0x0000", 0)
+    TEST_NUM_WRAP_HEX(10, "0x00001", 1, 1)
+    TEST_NUM_WRAP_HEX(11, "0x", 0)
 
     #undef TEST_NUM_WRAP_HEX
 
@@ -504,10 +478,10 @@ static void test_num_wrap_hex(bool show)
         TEST_CASE_CLOSE                 \
     }
 
-    TEST_NUM_WRAP_HEX(12, "");
-    TEST_NUM_WRAP_HEX(13, "0");
-    TEST_NUM_WRAP_HEX(14, "ab");
-    TEST_NUM_WRAP_HEX(14, "0b");
+    TEST_NUM_WRAP_HEX(12, "")
+    TEST_NUM_WRAP_HEX(13, "0")
+    TEST_NUM_WRAP_HEX(14, "ab")
+    TEST_NUM_WRAP_HEX(14, "0b")
 
     #undef TEST_NUM_WRAP_HEX
 
@@ -528,24 +502,24 @@ static void test_num_wrap_str(bool show)
         TEST_CASE_CLOSE                             \
     }
 
-    TEST_NUM_WRAP_STR( 1, "0", 0);
-    TEST_NUM_WRAP_STR( 2, "1", 1, 1);
-    TEST_NUM_WRAP_STR( 3, "9", 1, 9);
-    TEST_NUM_WRAP_STR( 4, "10", 1, 10);
-    TEST_NUM_WRAP_STR( 5, "18446744073709551615", 1, UINT64_MAX);
-    TEST_NUM_WRAP_STR( 6, "18446744073709551616", 2, 1, 0);
-    TEST_NUM_WRAP_STR( 7, "0000", 0);
-    TEST_NUM_WRAP_STR( 8, "00001", 1, 1);
-    TEST_NUM_WRAP_STR( 9, "0x0", 0);
-    TEST_NUM_WRAP_STR(10, "0x1", 1, 1);
-    TEST_NUM_WRAP_STR(11, "0x9", 1, 9);
-    TEST_NUM_WRAP_STR(12, "0xa", 1, 10);
-    TEST_NUM_WRAP_STR(13, "0xA", 1, 10);
-    TEST_NUM_WRAP_STR(14, "0x10", 1, 16);
-    TEST_NUM_WRAP_STR(15, "0xffffffffffffffff", 1, UINT64_MAX);
-    TEST_NUM_WRAP_STR(16, "0x10000000000000000", 2, 1, 0);
-    TEST_NUM_WRAP_STR(17, "0x0000", 0);
-    TEST_NUM_WRAP_STR(18, "0x00001", 1, 1);
+    TEST_NUM_WRAP_STR( 1, "0", 0)
+    TEST_NUM_WRAP_STR( 2, "1", 1, 1)
+    TEST_NUM_WRAP_STR( 3, "9", 1, 9)
+    TEST_NUM_WRAP_STR( 4, "10", 1, 10)
+    TEST_NUM_WRAP_STR( 5, "18446744073709551615", 1, UINT64_MAX)
+    TEST_NUM_WRAP_STR( 6, "18446744073709551616", 2, 1, 0)
+    TEST_NUM_WRAP_STR( 7, "0000", 0)
+    TEST_NUM_WRAP_STR( 8, "00001", 1, 1)
+    TEST_NUM_WRAP_STR( 9, "0x0", 0)
+    TEST_NUM_WRAP_STR(10, "0x1", 1, 1)
+    TEST_NUM_WRAP_STR(11, "0x9", 1, 9)
+    TEST_NUM_WRAP_STR(12, "0xa", 1, 10)
+    TEST_NUM_WRAP_STR(13, "0xA", 1, 10)
+    TEST_NUM_WRAP_STR(14, "0x10", 1, 16)
+    TEST_NUM_WRAP_STR(15, "0xffffffffffffffff", 1, UINT64_MAX)
+    TEST_NUM_WRAP_STR(16, "0x10000000000000000", 2, 1, 0)
+    TEST_NUM_WRAP_STR(17, "0x0000", 0)
+    TEST_NUM_WRAP_STR(18, "0x00001", 1, 1)
 
     #undef TEST_NUM_WRAP_STR
 
@@ -566,13 +540,13 @@ static void test_num_read_dec(bool show)
         TEST_CASE_CLOSE                                             \
     }
 
-    TEST_NUM_READ_DEC(1, 0);
-    TEST_NUM_READ_DEC(2, 1, 1);
-    TEST_NUM_READ_DEC(3, 1, 10);
-    TEST_NUM_READ_DEC(4, 1, 12345678901234567);
-    TEST_NUM_READ_DEC(5, 1, 123456789012345678);
-    TEST_NUM_READ_DEC(6, 1, 1234567890123456789);
-    TEST_NUM_READ_DEC(7, 2, 6, 0xb14e9f812f366c35);
+    TEST_NUM_READ_DEC(1, 0)
+    TEST_NUM_READ_DEC(2, 1, 1)
+    TEST_NUM_READ_DEC(3, 1, 10)
+    TEST_NUM_READ_DEC(4, 1, 12345678901234567)
+    TEST_NUM_READ_DEC(5, 1, 123456789012345678)
+    TEST_NUM_READ_DEC(6, 1, 1234567890123456789)
+    TEST_NUM_READ_DEC(7, 2, 6, 0xb14e9f812f366c35)
 
     #undef TEST_NUM_READ_DEC
 
@@ -604,9 +578,9 @@ static void test_num_unwrap(bool show)
         TEST_CASE_CLOSE                                 \
     }
 
-    TEST_NUM_UNWRAP(1, 0, (0));
-    TEST_NUM_UNWRAP(2, 1, (1, 1));
-    TEST_NUM_UNWRAP(3, UINT64_MAX, (1, UINT64_MAX));
+    TEST_NUM_UNWRAP(1, 0, (0))
+    TEST_NUM_UNWRAP(2, 1, (1, 1))
+    TEST_NUM_UNWRAP(3, UINT64_MAX, (1, UINT64_MAX))
 
     #undef TEST_NUM_UNWRAP
 
@@ -639,9 +613,9 @@ static void test_num_copy(bool show)
         TEST_CASE_CLOSE                                 \
     }
 
-    TEST_NUM_COPY(1, (0));
-    TEST_NUM_COPY(2, (1, 1));
-    TEST_NUM_COPY(3, (2, 1, 2));
+    TEST_NUM_COPY(1, (0))
+    TEST_NUM_COPY(2, (1, 1))
+    TEST_NUM_COPY(3, (2, 1, 2))
 
     #undef TEST_NUM_COPY
 
@@ -668,25 +642,25 @@ static void test_num_cmp_offset(bool show)
         TEST_CASE_CLOSE                                         \
     }
 
-    TEST_NUM_CMP(1, (0), 0, ==, (0));
-    TEST_NUM_CMP(2, (1, 1), 0, >, (0));
-    TEST_NUM_CMP(3, (0), 0, <, (1, 1));
-    TEST_NUM_CMP(4, (1, 1), 0, <, (1, 2));
-    TEST_NUM_CMP(5, (1, 2), 0, ==, (1, 2));
-    TEST_NUM_CMP(6, (1, 3), 0, >, (1, 2));
-    TEST_NUM_CMP(7, (2, 2, 0), 0, >, (2, 1, 0));
-    TEST_NUM_CMP(8, (2, 2, 0), 0, ==, (2, 2, 0));
-    TEST_NUM_CMP(9, (2, 2, 0), 0, <, (2, 3, 0));
+    TEST_NUM_CMP(1, (0), 0, ==, (0))
+    TEST_NUM_CMP(2, (1, 1), 0, >, (0))
+    TEST_NUM_CMP(3, (0), 0, <, (1, 1))
+    TEST_NUM_CMP(4, (1, 1), 0, <, (1, 2))
+    TEST_NUM_CMP(5, (1, 2), 0, ==, (1, 2))
+    TEST_NUM_CMP(6, (1, 3), 0, >, (1, 2))
+    TEST_NUM_CMP(7, (2, 2, 0), 0, >, (2, 1, 0))
+    TEST_NUM_CMP(8, (2, 2, 0), 0, ==, (2, 2, 0))
+    TEST_NUM_CMP(9, (2, 2, 0), 0, <, (2, 3, 0))
     TEST_NUM_CMP(10,
         (2, 0x8000000000000000, 0), 0,
         <,
         (2, 0x8000000000000000, UINT64_MAX >> 1)
-    );
+    )
     TEST_NUM_CMP(11,
         (3, 0x8000000000000000, 0, 0), 0,
         <,
         (3, 0x8000000000000000, UINT64_MAX >> 1, 0x8000000000000000)
-    );
+    )
 
     #undef TEST_NUM_CMP
 
@@ -702,20 +676,39 @@ static void test_num_add_uint_offset(bool show)
         TEST_CASE_OPEN(TAG)                                         \
         {                                                           \
             num_p num = num_create_immed(ARG_OPEN NUM);             \
+            num = num_expand_to(num, num->count + 1);               \
             num = num_add_uint_offset(num, OFFSET, VALUE);          \
             assert(num_immed(num, ARG_OPEN RES));                   \
         }                                                           \
         TEST_CASE_CLOSE                                             \
     }
 
-    TEST_NUM_ADD_UINT_OFFSET(1, (0), 0, 0, (0));
-    TEST_NUM_ADD_UINT_OFFSET(2, (0), 0, 1, (1, 1));
-    TEST_NUM_ADD_UINT_OFFSET(3, (1, 1), 0, 2, (1, 3));
-    TEST_NUM_ADD_UINT_OFFSET(4, (1, UINT64_MAX), 0, 3, (2, 1, 2));
-    TEST_NUM_ADD_UINT_OFFSET(5, (0), 1, 0, (0));
-    TEST_NUM_ADD_UINT_OFFSET(6, (0), 1, 1, (2, 1, 0));
-    TEST_NUM_ADD_UINT_OFFSET(7, (1, 1), 1, 2, (2, 2, 1));
-    TEST_NUM_ADD_UINT_OFFSET(8, (1, UINT64_MAX), 1, 3, (2, 3, UINT64_MAX));
+    TEST_NUM_ADD_UINT_OFFSET(1, (0), 0, 0, (0))
+    TEST_NUM_ADD_UINT_OFFSET(2, (0), 0, 1, (1, 1))
+    TEST_NUM_ADD_UINT_OFFSET(3, (1, 1), 0, 2, (1, 3))
+    TEST_NUM_ADD_UINT_OFFSET(4, (1, UINT64_MAX), 0, 3, (2, 1, 2))
+    TEST_NUM_ADD_UINT_OFFSET(5, (1, 1), 1, 2, (2, 2, 1))
+    TEST_NUM_ADD_UINT_OFFSET(6, (1, UINT64_MAX), 1, 3, (2, 3, UINT64_MAX))
+
+    #undef TEST_NUM_ADD_UINT_OFFSET
+
+    #define TEST_NUM_ADD_UINT_OFFSET(TAG, NUM, OFFSET, VALUE)   \
+    {                                                           \
+        TEST_CASE_OPEN(TAG)                                     \
+        {                                                       \
+            num_p num = num_create_immed(ARG_OPEN NUM);         \
+            TEST_REVERT_OPEN                                    \
+            {                                                   \
+                num_add_uint_offset(num, OFFSET, VALUE);        \
+            }                                                   \
+            TEST_REVERT_CLOSE                                   \
+        }                                                       \
+        TEST_CASE_CLOSE                                         \
+    }
+
+    TEST_NUM_ADD_UINT_OFFSET(7, (1, UINT64_MAX), 0, 3)
+    TEST_NUM_ADD_UINT_OFFSET(8, (0), 1, 0)
+    TEST_NUM_ADD_UINT_OFFSET(9, (0), 1, 1)
 
     #undef TEST_NUM_ADD_UINT_OFFSET
 
@@ -737,24 +730,24 @@ static void test_num_sub_uint_offset(bool show)
         TEST_CASE_CLOSE                                         \
     }
 
-    TEST_NUM_SUB_UINT_OFFSET(1, (0), 0, 0, (0));
-    TEST_NUM_SUB_UINT_OFFSET(2, (1, 1), 0, 0, (1, 1));
-    TEST_NUM_SUB_UINT_OFFSET(3, (1, 1), 0, 1, (0));
-    TEST_NUM_SUB_UINT_OFFSET(4, (1, 2), 0, 1, (1, 1));
-    TEST_NUM_SUB_UINT_OFFSET(5, (2, 1, 0), 0, 1, (1, UINT64_MAX));
+    TEST_NUM_SUB_UINT_OFFSET(1, (0), 0, 0, (0))
+    TEST_NUM_SUB_UINT_OFFSET(2, (1, 1), 0, 0, (1, 1))
+    TEST_NUM_SUB_UINT_OFFSET(3, (1, 1), 0, 1, (0))
+    TEST_NUM_SUB_UINT_OFFSET(4, (1, 2), 0, 1, (1, 1))
+    TEST_NUM_SUB_UINT_OFFSET(5, (2, 1, 0), 0, 1, (1, UINT64_MAX))
     TEST_NUM_SUB_UINT_OFFSET(6,
         (5, 1, 0, 0, 0, 0), 0,
         0x8000000000000000,
         (4, UINT64_MAX, UINT64_MAX, UINT64_MAX, 0x8000000000000000)
-    );
-    TEST_NUM_SUB_UINT_OFFSET(7, (2, 2, 3), 0, 1, (2, 2, 2));
-    TEST_NUM_SUB_UINT_OFFSET(8, (2, 2, 3), 1, 1, (2, 1, 3));
-    TEST_NUM_SUB_UINT_OFFSET(9, (2, 1, 3), 1, 1, (1, 3));
-    TEST_NUM_SUB_UINT_OFFSET(10, (2, 1, 0), 1, 1, (0));
-    TEST_NUM_SUB_UINT_OFFSET(11, (3, 1, 0, 1), 2, 1, (1, 1));
-    TEST_NUM_SUB_UINT_OFFSET(12, (3, 1, 0, 1), 1, 1, (2, UINT64_MAX, 1));
-    TEST_NUM_SUB_UINT_OFFSET(13, (2, 1, 0), 1, 1, (0));
-    TEST_NUM_SUB_UINT_OFFSET(14, (0), 0, 0, (0));
+    )
+    TEST_NUM_SUB_UINT_OFFSET(7, (2, 2, 3), 0, 1, (2, 2, 2))
+    TEST_NUM_SUB_UINT_OFFSET(8, (2, 2, 3), 1, 1, (2, 1, 3))
+    TEST_NUM_SUB_UINT_OFFSET(9, (2, 1, 3), 1, 1, (1, 3))
+    TEST_NUM_SUB_UINT_OFFSET(10, (2, 1, 0), 1, 1, (0))
+    TEST_NUM_SUB_UINT_OFFSET(11, (3, 1, 0, 1), 2, 1, (1, 1))
+    TEST_NUM_SUB_UINT_OFFSET(12, (3, 1, 0, 1), 1, 1, (2, UINT64_MAX, 1))
+    TEST_NUM_SUB_UINT_OFFSET(13, (2, 1, 0), 1, 1, (0))
+    TEST_NUM_SUB_UINT_OFFSET(14, (0), 0, 0, (0))
 
     #undef TEST_NUM_SUB_UINT_OFFSET
 
@@ -772,9 +765,9 @@ static void test_num_sub_uint_offset(bool show)
         TEST_CASE_CLOSE                                     \
     }
 
-    TEST_NUM_SUB_UINT_OFFSET(15, (0), 0, 1);
-    TEST_NUM_SUB_UINT_OFFSET(16, (1, 2), 0, 3);
-    TEST_NUM_SUB_UINT_OFFSET(17, (1, 2), 1, 1);
+    TEST_NUM_SUB_UINT_OFFSET(15, (0), 0, 1)
+    TEST_NUM_SUB_UINT_OFFSET(16, (1, 2), 0, 3)
+    TEST_NUM_SUB_UINT_OFFSET(17, (1, 2), 1, 1)
 
     #undef TEST_NUM_SUB_UINT_OFFSET
 
@@ -798,12 +791,12 @@ static void test_num_sub_offset(bool show)
         TEST_CASE_CLOSE                                         \
     }
 
-    TEST_NUM_SUB_OFFSET(1, (0), 0, (0), (0));
-    TEST_NUM_SUB_OFFSET(2, (0), 0, (0), (0));
-    TEST_NUM_SUB_OFFSET(3, (2, 1, 2), 1, (1, 1), (1, 2));
-    TEST_NUM_SUB_OFFSET(4, (2, 1, 0), 1, (1, 1), (0));
-    TEST_NUM_SUB_OFFSET(5, (3, 1, 2, 3), 1, (2, 1, 2), (1, 3));
-    TEST_NUM_SUB_OFFSET(6, (3, 1, 2, 3), 1, (2, 1, 1), (2, 1, 3));
+    TEST_NUM_SUB_OFFSET(1, (0), 0, (0), (0))
+    TEST_NUM_SUB_OFFSET(2, (0), 0, (0), (0))
+    TEST_NUM_SUB_OFFSET(3, (2, 1, 2), 1, (1, 1), (1, 2))
+    TEST_NUM_SUB_OFFSET(4, (2, 1, 0), 1, (1, 1), (0))
+    TEST_NUM_SUB_OFFSET(5, (3, 1, 2, 3), 1, (2, 1, 2), (1, 3))
+    TEST_NUM_SUB_OFFSET(6, (3, 1, 2, 3), 1, (2, 1, 1), (2, 1, 3))
 
     #undef TEST_NUM_SUB_OFFSET
 
@@ -815,7 +808,7 @@ static void test_num_sub_offset(bool show)
             num_p num_2 = num_create_immed(ARG_OPEN NUM_2); \
             TEST_REVERT_OPEN                                \
             {                                               \
-                num_sub_offset(num_1, POS, num_2);         \
+                num_sub_offset(num_1, POS, num_2);          \
             }                                               \
             TEST_REVERT_CLOSE                               \
             num_free(num_1);                                \
@@ -824,9 +817,9 @@ static void test_num_sub_offset(bool show)
         TEST_CASE_CLOSE                                     \
     }
 
-    TEST_NUM_SUB_OFFSET(7, (0), 0, (1, 1));
-    TEST_NUM_SUB_OFFSET(8, (2, 2, 1), 1, (1, 3));
-    TEST_NUM_SUB_OFFSET(9, (2, 2, 1), 1, (2, 1, 2));
+    TEST_NUM_SUB_OFFSET(7, (0), 0, (1, 1))
+    TEST_NUM_SUB_OFFSET(8, (2, 2, 1), 1, (1, 3))
+    TEST_NUM_SUB_OFFSET(9, (2, 2, 1), 1, (2, 1, 2))
 
     #undef TEST_NUM_SUB_OFFSET
 
@@ -839,38 +832,45 @@ static void test_num_shl_core(bool show)
 {
     TEST_FN_OPEN
 
-    #define TEST_NUM_SHL_CORE(TAG, NUM_BEF, BITS, NUM_AFT) \
+    #define TEST_NUM_SHL_CORE(TAG, NUM_BEF, BITS, NUM_AFT)  \
     {                                                       \
         TEST_CASE_OPEN(TAG)                                 \
         {                                                   \
             num_p num = num_create_immed(ARG_OPEN NUM_BEF); \
-            num = num_shl_core(num, BITS);                 \
+            num = num_expand_to(num, num->count + 1);       \
+            num = num_shl_core(num, BITS);                  \
             assert(num_immed(num, ARG_OPEN NUM_AFT));       \
         }                                                   \
         TEST_CASE_CLOSE                                     \
     }
 
-    TEST_NUM_SHL_CORE(1, (0), 0, (0));
-    TEST_NUM_SHL_CORE(2, (0), 63, (0));
-    TEST_NUM_SHL_CORE(3, (1, 1), 1, (1, 2));
-    TEST_NUM_SHL_CORE(4, (1, 1), 1, (1, 2));
-    TEST_NUM_SHL_CORE(5, (1, 1), 63, (1, 0x8000000000000000));
-    TEST_NUM_SHL_CORE(6, (1, 2), 63, (2, 1, 0));
-    TEST_NUM_SHL_CORE(7, (2, 1, 2), 63, (2, 0x8000000000000001, 0));
+    TEST_NUM_SHL_CORE(1, (0), 0, (0))
+    TEST_NUM_SHL_CORE(2, (0), 63, (0))
+    TEST_NUM_SHL_CORE(3, (1, 1), 1, (1, 2))
+    TEST_NUM_SHL_CORE(4, (1, 1), 1, (1, 2))
+    TEST_NUM_SHL_CORE(5, (1, 1), 63, (1, 0x8000000000000000))
+    TEST_NUM_SHL_CORE(6, (1, 2), 63, (2, 1, 0))
+    TEST_NUM_SHL_CORE(7, (2, 1, 2), 63, (2, 0x8000000000000001, 0))
 
     #undef TEST_NUM_SHL_CORE
 
-    TEST_CASE_OPEN(8)
-    {
-        num_p num = num_create_immed(1, 1);
-        TEST_REVERT_OPEN
-        {
-            num_shl_core(num, 64);
-        }
-        TEST_REVERT_CLOSE
-        num_free(num);
+    #define TEST_NUM_SHL_CORE(TAG, NUM_BEF, BITS)           \
+    {                                                       \
+        TEST_CASE_OPEN(TAG)                                 \
+        {                                                   \
+            num_p num = num_create_immed(ARG_OPEN NUM_BEF); \
+            TEST_REVERT_OPEN                                \
+            {                                               \
+                num = num_shl_core(num, BITS);              \
+            }                                               \
+            TEST_REVERT_CLOSE                               \
+        }                                                   \
+        TEST_CASE_CLOSE                                     \
     }
-    TEST_CASE_CLOSE
+
+    TEST_NUM_SHL_CORE(8, (1, 1), 64)
+
+    #undef TEST_NUM_SHL_CORE
 
     TEST_FN_CLOSE
 }
@@ -879,27 +879,27 @@ static void test_num_shr_core(bool show)
 {
     TEST_FN_OPEN
 
-    #define TEST_NUM_SHR_CORE(TAG, NUM_BEF, BITS, NUM_AFT) \
+    #define TEST_NUM_SHR_CORE(TAG, NUM_BEF, BITS, NUM_AFT)  \
     {                                                       \
         TEST_CASE_OPEN(TAG)                                 \
         {                                                   \
             num_p num = num_create_immed(ARG_OPEN NUM_BEF); \
-            num = num_shr_core(num, BITS);                 \
+            num = num_shr_core(num, BITS);                  \
             assert(num_immed(num, ARG_OPEN NUM_AFT));       \
         }                                                   \
         TEST_CASE_CLOSE                                     \
     }
 
-    TEST_NUM_SHR_CORE(1, (0), 1, (0));
-    TEST_NUM_SHR_CORE(2, (1, 1), 0, (1, 1));
-    TEST_NUM_SHR_CORE(3, (1, 1), 1, (0));
-    TEST_NUM_SHR_CORE(4, (1, 2), 1, (1, 1));
-    TEST_NUM_SHR_CORE(5, (1, UINT64_MAX), 63, (1, 1));
-    TEST_NUM_SHR_CORE(6, (2, 1, 0x8000000000000000), 63, (1, 3));
+    TEST_NUM_SHR_CORE(1, (0), 1, (0))
+    TEST_NUM_SHR_CORE(2, (1, 1), 0, (1, 1))
+    TEST_NUM_SHR_CORE(3, (1, 1), 1, (0))
+    TEST_NUM_SHR_CORE(4, (1, 2), 1, (1, 1))
+    TEST_NUM_SHR_CORE(5, (1, UINT64_MAX), 63, (1, 1))
+    TEST_NUM_SHR_CORE(6, (2, 1, 0x8000000000000000), 63, (1, 3))
     TEST_NUM_SHR_CORE(7,
         (4, 4, UINT64_MAX, UINT64_MAX, UINT64_MAX - 3), 0,
         (4, 4, UINT64_MAX, UINT64_MAX, UINT64_MAX - 3)
-    );
+    )
 
     #undef TEST_NUM_SHR_CORE
 
@@ -998,27 +998,27 @@ static void test_num_ssm_add_mod(bool show)
     TEST_SSM_ADD_MOD(1,
         (6, 0, 0, 1, 0, 0, 2), 3,
         (6, 0, 0, 1, 0, 0, 3)
-    );
+    )
     TEST_SSM_ADD_MOD(2,
         (6, 0, B(63), 0, 0, B(63), 0), 3,
         (6, 0, B(63), 0, 1, 0, 0)
-    );
+    )
     TEST_SSM_ADD_MOD(3,
         (6, 1, 0, 0, 0, 0, 1), 3,
         (6, 1, 0, 0, 0, 0, 0)
-    );
+    )
     TEST_SSM_ADD_MOD(4,
         (6, 1, 0, 0, 1, 0, 0), 3,
         (6, 1, 0, 0, 0, UINT64_MAX, UINT64_MAX)
-    );
+    )
     TEST_SSM_ADD_MOD(5,
         (6, 0, UINT64_MAX, UINT64_MAX, 1, 0, 0), 3,
         (6, 0, UINT64_MAX, UINT64_MAX, 0, UINT64_MAX, UINT64_MAX - 1)
-    );
+    )
     TEST_SSM_ADD_MOD(6,
         (6, 0, UINT64_MAX, UINT64_MAX, 0, UINT64_MAX, UINT64_MAX), 3,
         (6, 0, UINT64_MAX, UINT64_MAX, 0, UINT64_MAX, UINT64_MAX - 2)
-    );
+    )
 
     #undef TEST_SSM_ADD_MOD
 
@@ -1045,31 +1045,31 @@ static void test_num_ssm_sub_mod(bool show)
     TEST_SSM_SUB_MOD(1,
         (6, 0, 0, 1, 0, 0, 2), 0, 3, 3,
         (3, 0, 0, 1)
-    );
+    )
     TEST_SSM_SUB_MOD(2,
         (6, 0, 0, 2, 0, 0, 2), 0, 3, 3,
         (3, 0, 0, 0)
-    );
+    )
     TEST_SSM_SUB_MOD(3,
         (6, 0, 0, 3, 0, 0, 2), 0, 3, 3,
         (3, 1, 0, 0)
-    );
+    )
     TEST_SSM_SUB_MOD(4,
         (6, 0, 0, 1, 1, 0, 0), 0, 3, 3,
         (3, 0, UINT64_MAX, UINT64_MAX)
-    );
+    )
     TEST_SSM_SUB_MOD(5,
         (6, 1, 0, 0, 0, 0, 1), 0, 3, 3,
         (3, 0, 0, 2)
-    );
+    )
     TEST_SSM_SUB_MOD(6,
         (6, 0, 0, 1, 0, 0, 0), 0, 3, 3,
         (3, 1, 0, 0)
-    );
+    )
     TEST_SSM_SUB_MOD(7,
         (6, 1, 0, 0, 0, UINT64_MAX, UINT64_MAX), 0, 3, 3,
         (3, 1, 0, 0)
-    );
+    )
 
     #undef TEST_SSM_SUB_MOD
 
@@ -1218,51 +1218,51 @@ static void test_num_ssm_shl(bool show)
     TEST_SSM_SHL(1,
         (3, 0, 0, 1), 0, 3, 0,
         (3, 0, 0, 1)
-    );
+    )
     TEST_SSM_SHL(2,
         (3, 0, 0, 1), 0, 3, 1,
         (3, 0, 0, 2)
-    );
+    )
     TEST_SSM_SHL(3,
         (3, 0, 0, 1), 0, 3, 64,
         (3, 0, 1, 0)
-    );
+    )
     TEST_SSM_SHL(4,
         (3, 0, 0, 1), 0, 3, 65,
         (3, 0, 2, 0)
-    );
+    )
     TEST_SSM_SHL(5,
         (3, UINT64_MAX, UINT64_MAX, UINT64_MAX), 0, 3, 0,
         (3, UINT64_MAX, UINT64_MAX, UINT64_MAX)
-    );
+    )
     TEST_SSM_SHL(6,
         (3, UINT64_MAX, UINT64_MAX, UINT64_MAX), 0, 3, 1,
         (3, UINT64_MAX, UINT64_MAX, UINT64_MAX << 1)
-    );
+    )
     TEST_SSM_SHL(7,
         (3, UINT64_MAX, UINT64_MAX, UINT64_MAX), 0, 3, 64,
         (3, UINT64_MAX, UINT64_MAX, 0)
-    );
+    )
     TEST_SSM_SHL(8,
         (3, UINT64_MAX, UINT64_MAX, UINT64_MAX), 0, 3, 65,
         (3, UINT64_MAX, UINT64_MAX << 1, 0)
-    );
+    )
     TEST_SSM_SHL(9,
         (3, 0x3333333333333333, 0x2222222222222222, 0x1111111111111111), 0, 3, 0,
         (3, 0x3333333333333333, 0x2222222222222222, 0x1111111111111111)
-    );
+    )
     TEST_SSM_SHL(10,
         (3, 0x3333333333333333, 0x2222222222222222, 0x1111111111111111), 0, 3, 4,
         (3, 0x3333333333333332, 0x2222222222222221, 0x1111111111111110)
-    );
+    )
     TEST_SSM_SHL(11,
         (3, 0x3333333333333333, 0x2222222222222222, 0x1111111111111111), 0, 3, 64,
         (3, 0x2222222222222222, 0x1111111111111111, 0)
-    );
+    )
     TEST_SSM_SHL(12,
         (3, 0x3333333333333333, 0x2222222222222222, 0x1111111111111111), 0, 3, 68,
         (3, 0x2222222222222221, 0x1111111111111110, 0)
-    );
+    )
 
     #undef TEST_SSM_SHL
 
@@ -1289,51 +1289,51 @@ static void test_num_ssm_shr(bool show)
     TEST_SSM_SHR(1,
         (3, 2, 0, 0), 0, 3, 0,
         (3, 2, 0, 0)
-    );
+    )
     TEST_SSM_SHR(2,
         (3, 2, 0, 0), 0, 3, 1,
         (3, 1, 0, 0)
-    );
+    )
     TEST_SSM_SHR(3,
         (3, 2, 0, 0), 0, 3, 64,
         (3, 0, 2, 0)
-    );
+    )
     TEST_SSM_SHR(4,
         (3, 2, 0, 0), 0, 3, 65,
         (3, 0, 1, 0)
-    );
+    )
     TEST_SSM_SHR(5,
         (3, UINT64_MAX, UINT64_MAX, UINT64_MAX), 0, 3, 0,
         (3, UINT64_MAX, UINT64_MAX, UINT64_MAX)
-    );
+    )
     TEST_SSM_SHR(6,
         (3, UINT64_MAX, UINT64_MAX, UINT64_MAX), 0, 3, 1,
         (3, UINT64_MAX >> 1, UINT64_MAX, UINT64_MAX)
-    );
+    )
     TEST_SSM_SHR(7,
         (3, UINT64_MAX, UINT64_MAX, UINT64_MAX), 0, 3, 64,
         (3, 0, UINT64_MAX, UINT64_MAX)
-    );
+    )
     TEST_SSM_SHR(8,
         (3, UINT64_MAX, UINT64_MAX, UINT64_MAX), 0, 3, 65,
         (3, 0, UINT64_MAX >> 1, UINT64_MAX)
-    );
+    )
     TEST_SSM_SHR(9,
         (3, 0x3333333333333333, 0x2222222222222222, 0x1111111111111111), 0, 3, 0,
         (3, 0x3333333333333333, 0x2222222222222222, 0x1111111111111111)
-    );
+    )
     TEST_SSM_SHR(10,
         (3, 0x3333333333333333, 0x2222222222222222, 0x1111111111111111), 0, 3, 4,
         (3, 0x0333333333333333, 0x3222222222222222, 0x2111111111111111)
-    );
+    )
     TEST_SSM_SHR(11,
         (3, 0x3333333333333333, 0x2222222222222222, 0x1111111111111111), 0, 3, 64,
         (3, 0, 0x3333333333333333, 0x2222222222222222)
-    );
+    )
     TEST_SSM_SHR(12,
         (3, 0x3333333333333333, 0x2222222222222222, 0x1111111111111111), 0, 3, 68,
         (3, 0, 0x0333333333333333, 0x3222222222222222)
-    );
+    )
 
     #undef TEST_SSM_SHR
 
@@ -1777,9 +1777,9 @@ static void test_num_is_zero(bool show)
         TEST_CASE_CLOSE                                 \
     }
 
-    TEST_NUM_IS_ZERO(1, (0), true);
-    TEST_NUM_IS_ZERO(2, (1, 1), false);
-    TEST_NUM_IS_ZERO(3, (2, 1, 2), false);
+    TEST_NUM_IS_ZERO(1, (0), true)
+    TEST_NUM_IS_ZERO(2, (1, 1), false)
+    TEST_NUM_IS_ZERO(3, (2, 1, 2), false)
 
     #undef TEST_NUM_IS_ZERO
 
@@ -1803,12 +1803,12 @@ static void test_num_shl(bool show)
         TEST_CASE_CLOSE                                     \
     }
 
-    TEST_NUM_SHL(1, (0), 0, (0));
-    TEST_NUM_SHL(2, (0), 1, (0));
-    TEST_NUM_SHL(3, (0), 64, (0));
-    TEST_NUM_SHL(4, (1, 1), 1, (1, 2));
-    TEST_NUM_SHL(5, (1, 1), 64, (2, 1, 0));
-    TEST_NUM_SHL(6, (1, 1), 65, (2, 2, 0));
+    TEST_NUM_SHL(1, (0), 0, (0))
+    TEST_NUM_SHL(2, (0), 1, (0))
+    TEST_NUM_SHL(3, (0), 64, (0))
+    TEST_NUM_SHL(4, (1, 1), 1, (1, 2))
+    TEST_NUM_SHL(5, (1, 1), 64, (2, 1, 0))
+    TEST_NUM_SHL(6, (1, 1), 65, (2, 2, 0))
 
     #undef TEST_NUM_SHL
 
@@ -1830,13 +1830,13 @@ static void test_num_shr(bool show)
         TEST_CASE_CLOSE                                     \
     }
 
-    TEST_NUM_SHR(1, (0), 0, (0));
-    TEST_NUM_SHR(2, (0), 1, (0));
-    TEST_NUM_SHR(3, (1, 1), 1, (0));
-    TEST_NUM_SHR(4, (1, 2), 1, (1, 1));
-    TEST_NUM_SHR(5, (2, 1, 0), 64, (1, 1));
-    TEST_NUM_SHR(6, (2, 1, 0), 65, (0));
-    TEST_NUM_SHR(7, (2, 2, 0), 65, (1, 1));
+    TEST_NUM_SHR(1, (0), 0, (0))
+    TEST_NUM_SHR(2, (0), 1, (0))
+    TEST_NUM_SHR(3, (1, 1), 1, (0))
+    TEST_NUM_SHR(4, (1, 2), 1, (1, 1))
+    TEST_NUM_SHR(5, (2, 1, 0), 64, (1, 1))
+    TEST_NUM_SHR(6, (2, 1, 0), 65, (0))
+    TEST_NUM_SHR(7, (2, 2, 0), 65, (1, 1))
 
     #undef TEST_NUM_SHR
 
@@ -1865,42 +1865,42 @@ static void test_num_add(bool show)
         (0),
         (0),
         (0)
-    );
+    )
     TEST_NUM_ADD(2,
         (1, 1),
         (0),
         (1, 1)
-    );
+    )
     TEST_NUM_ADD(3,
         (0),
         (1, 1),
         (1, 1)
-    );
+    )
     TEST_NUM_ADD(4,
         (1, 1),
         (1, 2),
         (1, 3)
-    );
+    )
     TEST_NUM_ADD(5,
         (2, 2, 1),
         (1, 2),
         (2, 2, 3)
-    );
+    )
     TEST_NUM_ADD(6,
         (1, 1),
         (2, 2, 3),
         (2, 2, 4)
-    );
+    )
     TEST_NUM_ADD(7,
         (2, UINT64_MAX, UINT64_MAX),
         (1, 1),
         (3, 1, 0, 0)
-    );
+    )
     TEST_NUM_ADD(8,
         (1, 1),
         (2, UINT64_MAX, UINT64_MAX),
         (3, 1, 0, 0)
-    );
+    )
 
     #undef TEST_NUM_ADD
 
@@ -1927,42 +1927,42 @@ static void test_num_sub(bool show)
         (0),
         (0),
         (0)
-    );
+    )
     TEST_NUM_SUB(2,
         (1, 1),
         (0),
         (1, 1)
-    );
+    )
     TEST_NUM_SUB(3,
         (1, 2),
         (1, 1),
         (1, 1)
-    );
+    )
     TEST_NUM_SUB(4,
         (1, 2),
         (1, 2),
         (0)
-    );
+    )
     TEST_NUM_SUB(5,
         (2, 1, 0),
         (1, 1),
         (1, UINT64_MAX)
-    );
+    )
     TEST_NUM_SUB(6,
         (2, 4, 3),
         (2, 1, 2),
         (2, 3, 1)
-    );
+    )
     TEST_NUM_SUB(7,
         (2, 1, 0),
         (2, 1, 0),
         (0)
-    );
+    )
     TEST_NUM_SUB(8,
         (5, 1, 0, 0, 0, 0),
         (4, 0x8000000000000000, 0, 0, 0x8000000000000000),
         (4, UINT64_MAX >> 1, UINT64_MAX, UINT64_MAX, 0x8000000000000000)
-    );
+    )
 
     #undef TEST_NUM_SUB
 
@@ -2158,35 +2158,35 @@ static void test_num_sqr(bool show)
     TEST_NUM_SQR(1,
         (0),
         (0)
-    );
+    )
     TEST_NUM_SQR(2,
         (1, 1),
         (1, 1)
-    );
+    )
     TEST_NUM_SQR(3,
         (1, 2),
         (1, 4)
-    );
+    )
     TEST_NUM_SQR(4,
         (1, (uint64_t)(UINT32_MAX)),
         (1, 0xfffffffe00000001)
-    );
+    )
     TEST_NUM_SQR(5,
         (1, B(32)),
         (2, 1, 0)
-    );
+    )
     TEST_NUM_SQR(6,
         (2, 1, 0),
         (3, 1, 0, 0)
-    );
+    )
     TEST_NUM_SQR(7,
         (2, 2, 3),
         (3, 4, 12, 9)
-    );
+    )
     TEST_NUM_SQR(8,
         (2, UINT64_MAX, UINT64_MAX),
         (4, UINT64_MAX, UINT64_MAX - 1, 0, 1)
-    );
+    )
 
     #undef TEST_NUM_SQR
 
@@ -2414,17 +2414,17 @@ static void test_num_gcd(bool show)
         (1, 3),
         (1, 2),
         (1, 1)
-    );
+    )
     TEST_NUM_GDC(2,
         (1, 4),
         (1, 2),
         (1, 2)
-    );
+    )
     TEST_NUM_GDC(3,
         (1, 6),
         (1, 4),
         (1, 2)
-    );
+    )
 
     #undef TEST_NUM_GDC
 
@@ -2454,49 +2454,49 @@ static void test_num_div_mod_uint(bool show)
         1,
         (0),
         0
-    );
+    )
     TEST_NUM_DIV_MOD_UINT(2,
         (1, 4),
         2,
         (1, 2),
         (0)
-    );
+    )
     TEST_NUM_DIV_MOD_UINT(3,
         (1, 5),
         2,
         (1, 2),
         1
-    );
+    )
     TEST_NUM_DIV_MOD_UINT(4,
         (1, 5),
         5,
         (1, 1),
         0
-    );
+    )
     TEST_NUM_DIV_MOD_UINT(5,
         (1, 9),
         3,
         (1, 3),
         0
-    );
+    )
     TEST_NUM_DIV_MOD_UINT(6,
         (2, 1, 0),
         UINT64_MAX,
         (1, 1),
         1
-    );
+    )
     TEST_NUM_DIV_MOD_UINT(7,
         (3, UINT64_MAX, 0, UINT64_MAX),
         UINT64_MAX,
         (3, 1, 0, 1),
         0
-    );
+    )
     TEST_NUM_DIV_MOD_UINT(8,
         (5, UINT64_MAX, 0, 0, 0, UINT64_MAX),
         UINT64_MAX,
         (5, 1, 0, 0, 0, 1),
         0
-    );
+    )
 
     #undef TEST_NUM_DIV_MOD_UINT
 
@@ -2596,23 +2596,23 @@ static void test_num_base_from(bool show)
     TEST_NUM_BASE_FROM(1,
         (0),
         (0)
-    );
+    )
     TEST_NUM_BASE_FROM(2,
         (1, 1),
         (1, 1)
-    );
+    )
     TEST_NUM_BASE_FROM(3,
         (1, 9),
         (1, 9)
-    );
+    )
     TEST_NUM_BASE_FROM(4,
         (2, 1, 0),
         (1, 10)
-    );
+    )
     TEST_NUM_BASE_FROM(5,
         (21, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
         (2, 5, 0x6bc75e2d63100000)
-    );
+    )
 
     #undef TEST_NUM_BASE_FROM
 
@@ -2720,11 +2720,11 @@ static void test_fuzz_num_ssm_pad_wrap_round_trip(bool show)
         TEST_FUZZ_CASE_CLOSE                                    \
     }
 
-    TEST_FUZZ_NUM_SSM_PAD_WRAP_ROUND_TRIP(2, 9, 100);
-    TEST_FUZZ_NUM_SSM_PAD_WRAP_ROUND_TRIP(3, 17, 100);
-    TEST_FUZZ_NUM_SSM_PAD_WRAP_ROUND_TRIP(4, 257, 100);
-    TEST_FUZZ_NUM_SSM_PAD_WRAP_ROUND_TRIP(5, 1025, 100);
-    TEST_FUZZ_NUM_SSM_PAD_WRAP_ROUND_TRIP(6, 1048577, 10);
+    TEST_FUZZ_NUM_SSM_PAD_WRAP_ROUND_TRIP(2, 9, 100)
+    TEST_FUZZ_NUM_SSM_PAD_WRAP_ROUND_TRIP(3, 17, 100)
+    TEST_FUZZ_NUM_SSM_PAD_WRAP_ROUND_TRIP(4, 257, 100)
+    TEST_FUZZ_NUM_SSM_PAD_WRAP_ROUND_TRIP(5, 1025, 100)
+    TEST_FUZZ_NUM_SSM_PAD_WRAP_ROUND_TRIP(6, 1048577, 10)
 
     TEST_FN_CLOSE
 }
@@ -2820,9 +2820,9 @@ static void test_fuzz_num_ssm_mul(bool show)
         TEST_FUZZ_CASE_CLOSE                                        \
     }
 
-    TEST_FUZZ_NUM_SSM_MUL(5, 10, 20, 100);
-    TEST_FUZZ_NUM_SSM_MUL(6, 50, 100, 100);
-    TEST_FUZZ_NUM_SSM_MUL(7, 500, 5000, 100);
+    TEST_FUZZ_NUM_SSM_MUL(5, 10, 20, 100)
+    TEST_FUZZ_NUM_SSM_MUL(6, 50, 100, 100)
+    TEST_FUZZ_NUM_SSM_MUL(7, 500, 5000, 100)
 
     #undef TEST_FUZZ_NUM_SSM_MUL
 
@@ -2911,19 +2911,11 @@ static void test_fuzz_num_bz_div(bool show)
 [[maybe_unused]]
 static void test_all(bool show)
 {
-    // show = true;
-
-    // test_fuzz_num_ssm_pad_wrap_round_trip(show);
-    // test_fuzz_num_ssm_mul(show);
-
-    // return;
-
     test_uint_from_char(show);
     test_uint128(show);
 
     test_num_create(show);
     test_num_expand_to(show);
-    test_num_chunk_set(show);
 
     test_num_normalize(show);
     test_num_break(show);
