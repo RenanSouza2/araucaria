@@ -873,8 +873,6 @@ STATIC void num_shr_core(num_p num, uint64_t bits) // TODO test
         carry = value << (chunk_bits - bits);
     }
     num_normalize(num);
-
-    return;
 }
 
 
@@ -1073,9 +1071,10 @@ num_p num_mul_classic(num_p num_1, num_p num_2)
 
         "loop_1_begin%=:                                \n\t"
 
-        "mov rdx, %[src_1]                              \n\t" // D = *src_1
+        "mov rdx, [%[src_1]]                            \n\t" // D = *src_1
         "mov %[j], %[count_2]                           \n\t" // j = count_2
         "mov %[pos], 0                                  \n\t" // pos = 0
+        "mov %[carry], 0                                \n\t" // carry = 0
 
         "loop_2_begin%=:                                \n\t"
 
@@ -1090,6 +1089,9 @@ num_p num_mul_classic(num_p num_1, num_p num_2)
         "lea %[pos], [%[pos] + 8]                       \n\t" // pos += 8
         "dec %[j]                                       \n\t" // j--
         "jnz loop_2_begin%=                             \n\t"
+
+        "adcx %[carry], %[zero]                         \n\t" // carry += CF
+        "mov [%[dest] + %[pos]], %[carry]               \n\t" // *(dest + pos) = carry
 
         "lea %[src_1], [%[src_1] + 8]                   \n\t" // src_1 += 8
         "lea %[dest], [%[dest] + 8]                     \n\t" // dest += 8
@@ -1120,16 +1122,16 @@ num_p num_mul_classic(num_p num_1, num_p num_2)
 
     for(uint64_t i = 0; i < count_1; i++)
     {
-        uint64_t v2 = src_2[i];
+        uint64_t v1 = src_1[i];
         uint128_t carry = 0;
         #pragma GCC unroll 32
         for(uint64_t j = 0; j < count_2; j++)
         {
-            carry += dest[i + j] + MUL(src_1[j], v2);
+            carry += dest[i + j] + MUL(v1, src_2[j]);
             dest[i + j] = LOW(carry);
             carry = HIGH(carry);
         }
-        dest[i + count_1] = LOW(carry);
+        dest[i + count_2] = LOW(carry);
     }
 
     #endif

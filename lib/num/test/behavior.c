@@ -1974,8 +1974,6 @@ static void test_num_mul(bool show)
 {
     TEST_FN_OPEN
 
-    #define NUM_FREE
-
     #define TEST_NUM_MUL(TAG, FN, NUM_1, NUM_2, RES)        \
     {                                                       \
         TEST_CASE_OPEN(TAG)                                 \
@@ -1984,35 +1982,11 @@ static void test_num_mul(bool show)
             num_p num_2 = num_create_immed(ARG_OPEN NUM_2); \
             num_p num_res = FN(num_1, num_2);               \
             assert(num_immed(num_res, ARG_OPEN RES))        \
-            NUM_FREE                                        \
+            num_free(num_1);                                \
+            num_free(num_2);                                \
         }                                                   \
         TEST_CASE_CLOSE                                     \
     }                                                       \
-
-    TEST_NUM_MUL(1,
-        num_mul,
-        (0),
-        (0),
-        (0)
-    )
-    TEST_NUM_MUL(2,
-        num_mul,
-        (1, 1),
-        (0),
-        (0)
-    )
-    TEST_NUM_MUL(3,
-        num_mul,
-        (0),
-        (1, 1),
-        (0)
-    )
-
-    #undef NUM_FREE
-
-    #define NUM_FREE        \
-        num_free(num_1);    \
-        num_free(num_2);
 
     #define TEST_NUM_MUL_BATCH(TAG, NUM_1, NUM_2, RES)                          \
     {                                                                           \
@@ -2021,6 +1995,21 @@ static void test_num_mul(bool show)
         TEST_NUM_MUL((10 * (TAG)) + 3, num_mul_core, NUM_1, NUM_2, RES)         \
     }
 
+    TEST_NUM_MUL_BATCH(1,
+        (0),
+        (0),
+        (0)
+    )
+    TEST_NUM_MUL_BATCH(2,
+        (1, 1),
+        (0),
+        (0)
+    )
+    TEST_NUM_MUL_BATCH(3,
+        (0),
+        (1, 1),
+        (0)
+    )
     TEST_NUM_MUL_BATCH(4,
         (1, 2),
         (1, 3),
