@@ -1044,35 +1044,95 @@ num_p num_mul_classic(num_p num_1, num_p num_2)
     CLU_HANDLER_IS_SAFE(num_2)
     assert(num_1 && num_2)
 
-    uint64_t n1 = num_1->count;
-    uint64_t n2 = num_2->count;
+    uint64_t count_1 = num_1->count;
+    uint64_t count_2 = num_2->count;
 
-    if (n1 == 0 || n2 == 0)
+    if (count_1 == 0 || count_2 == 0)
     {
         return num_create(CLU_ARGS(0, 0));
     }
 
-    uint64_t target_count = n1 + n2;
-
+    uint64_t target_count = count_1 + count_2;
     num_p num_res = num_create(CLU_ARGS(target_count, target_count));
     uint64_t * restrict dest = num_res->chunk;
-    const uint64_t * restrict src1 = num_1->chunk;
-    const uint64_t * restrict src2 = num_2->chunk;
+    const uint64_t * restrict src_1 = num_1->chunk;
+    const uint64_t * restrict src_2 = num_2->chunk;
 
-    #pragma GCC unroll 2
-    for(uint64_t i = 0; i < n2; i++)
+    #if !defined(NO_ASSEMBLY) && defined(__linux__)
+
+    uint64_t high, low;
+    uint64_t carry, pos;
+    uint64_t j;
+    uint64_t i=count_1;
+    uint64_t zero = 0;
+
+    __asm__ __volatile__ (
+        ".intel_syntax noprefix                         \n\t"
+
+        "xor %[zero], %[zero]                           \n\t"
+
+        "loop_1_begin%=:                                \n\t"
+
+        "mov rdx, %[src_1]                              \n\t" // D = *src_1
+        "mov %[j], %[count_2]                           \n\t" // j = count_2
+        "mov %[pos], 0                                  \n\t" // pos = 0
+
+        "loop_2_begin%=:                                \n\t"
+
+        "mulx %[high], %[low], [%[src_2] + %[pos]]      \n\t" // (high, low) = MUL(D, *(src_2 + pos))
+        "adcx %[low], [%[dest] + %[pos]]                \n\t" // low += *(dest + pos) + CF
+        "adox %[low], %[carry]                          \n\t" // low += carry
+        "mov [%[dest] + %[pos]], %[low]                 \n\t" // *(dest + pos) = low
+
+        "mov %[carry], %[high]                          \n\t" // carry = high
+        "adox %[carry], %[zero]                         \n\t" // carry += OF
+
+        "lea %[pos], [%[pos] + 8]                       \n\t" // pos += 8
+        "dec %[j]                                       \n\t" // j--
+        "jnz loop_2_begin%=                             \n\t"
+
+        "lea %[src_1], [%[src_1] + 8]                   \n\t" // src_1 += 8
+        "lea %[dest], [%[dest] + 8]                     \n\t" // dest += 8
+        "dec %[i]                                       \n\t" // i--
+        "jnz loop_1_begin%=                             \n\t"
+
+        ".att_syntax prefix         \n\t"
+        // out
+        :   [high] "=&r" (high),
+            [low] "=&r" (low),
+            [carry] "=&r" (carry),
+            [pos] "=&r" (pos),
+            [j] "=&r" (j),
+            [i] "+&r" (i),
+            [src_1] "+&r" (src_1),
+            [src_2] "+&r" (src_2),
+            [dest] "+&r" (dest)
+        // in
+        :   [zero] "r" (zero),
+            [count_2] "r" (count_2)
+        // clobber
+        :   "cc",
+            "memory",
+            "rdx"
+    );
+
+    #else
+
+    for(uint64_t i = 0; i < count_1; i++)
     {
-        uint64_t v2 = src2[i];
+        uint64_t v2 = src_2[i];
         uint128_t carry = 0;
         #pragma GCC unroll 32
-        for(uint64_t j = 0; j < n1; j++)
+        for(uint64_t j = 0; j < count_2; j++)
         {
-            carry += dest[i + j] + MUL(src1[j], v2);
+            carry += dest[i + j] + MUL(src_1[j], v2);
             dest[i + j] = LOW(carry);
             carry = HIGH(carry);
         }
-        dest[i + n1] = LOW(carry);
+        dest[i + count_1] = LOW(carry);
     }
+
+    #endif
 
     return num_normalize(num_res);
 }
