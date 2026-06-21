@@ -1991,8 +1991,8 @@ static void test_num_mul(bool show)
     #define TEST_NUM_MUL_BATCH(TAG, NUM_1, NUM_2, RES)                          \
     {                                                                           \
         TEST_NUM_MUL((10 * (TAG)) + 1, num_mul_classic, NUM_1, NUM_2, RES)      \
-        TEST_NUM_MUL((10 * (TAG)) + 2, num_mul_ssm, NUM_1, NUM_2, RES)          \
-        TEST_NUM_MUL((10 * (TAG)) + 3, num_mul_core, NUM_1, NUM_2, RES)         \
+        TEST_NUM_MUL((10 * (TAG)) + 2, num_mul_ssm    , NUM_1, NUM_2, RES)      \
+        TEST_NUM_MUL((10 * (TAG)) + 3, num_mul_core   , NUM_1, NUM_2, RES)      \
     }
 
     TEST_NUM_MUL_BATCH(1,

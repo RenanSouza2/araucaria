@@ -1035,6 +1035,16 @@ static num_p num_sqr_classic_buffer(num_p num_res, num_p num)
 
 
 
+#if !defined(NO_ASSEMBLY) && defined(__linux__)
+
+#define MUL_CLASSIC_STEP(OFF, HIGH, CARRY)                                                                            \
+    "mulx %[" #HIGH "], %[low], [%[src_2] + %[pos] + " #OFF "]  \n\t" /* (HIGH, low) = MUL(D, *(src_2 + pos + OFF)) */\
+    "adcx %[low], [%[dest] + %[pos] + " #OFF "]                 \n\t" /* low += *(dest + pos + OFF) + CF            */\
+    "adox %[low], %[" #CARRY "]                                 \n\t" /* low += carry                               */\
+    "mov [%[dest] + %[pos] + " #OFF "], %[low]                  \n\t" /* *(dest + pos + OFF) = low                  */\
+
+#endif
+
 // KEEPS NUM_1 NUM_2
 num_p num_mul_classic(num_p num_1, num_p num_2)
 {
@@ -1056,7 +1066,7 @@ num_p num_mul_classic(num_p num_1, num_p num_2)
     const uint64_t * restrict src_1 = num_1->chunk;
     const uint64_t * restrict src_2 = num_2->chunk;
 
-    #if !defined(NO_ASSEMBLY) && defined(__linux__)
+#if !defined(NO_ASSEMBLY) && defined(__linux__)
 
     uint64_t high, low;
     uint64_t carry, pos;
@@ -1067,28 +1077,49 @@ num_p num_mul_classic(num_p num_1, num_p num_2)
     __asm__ __volatile__ (
         ".intel_syntax noprefix                         \n\t"
 
-        "xor %[zero], %[zero]                           \n\t"
-
         "loop_1_begin%=:                                \n\t"
 
         "mov rdx, [%[src_1]]                            \n\t" // D = *src_1
-        "mov %[j], %[count_2]                           \n\t" // j = count_2
-        "mov %[pos], 0                                  \n\t" // pos = 0
         "mov %[carry], 0                                \n\t" // carry = 0
 
-        "loop_2_begin%=:                                \n\t"
+        "mov %[j], %[count_2]                           \n\t" // j = count_2 / 2
+        "shr %[j], 1                                    \n\t" // j = count_2 / 2
+        "xor %[pos], %[pos]                             \n\t" // pos = 0
+        "test %[j], %[j]                                \n\t"
 
-        "mulx %[high], %[low], [%[src_2] + %[pos]]      \n\t" // (high, low) = MUL(D, *(src_2 + pos))
-        "adcx %[low], [%[dest] + %[pos]]                \n\t" // low += *(dest + pos) + CF
-        "adox %[low], %[carry]                          \n\t" // low += carry
-        "mov [%[dest] + %[pos]], %[low]                 \n\t" // *(dest + pos) = low
+        "loop_2_begin%=:                                \n\t"
+        "jz loop_2_tail%=                               \n\t"
+
+        MUL_CLASSIC_STEP(0, high, carry)
+        MUL_CLASSIC_STEP(8, carry, high)
+
+        "adox %[carry], %[zero]                         \n\t" // carry += OF
+
+        "lea %[pos], [%[pos] + 16]                      \n\t" // pos += 16
+        "dec %[j]                                       \n\t" // j--
+        "jmp loop_2_begin%=                             \n\t"
+
+        "loop_2_tail%=:                                 \n\t"
+
+        "adcx %[carry], %[zero]                         \n\t" // carry += CF
+
+        "mov %[j], %[count_2]                           \n\t" // j = count_2
+        "and %[j], 1                                    \n\t" // j = j & 1
+        "test %[j], %[j]                                \n\t"
+
+        "loop_2_tail_begin%=:                           \n\t"
+        "jz loop_2_end%=                                \n\t"
+
+        MUL_CLASSIC_STEP(0, high, carry)
 
         "mov %[carry], %[high]                          \n\t" // carry = high
         "adox %[carry], %[zero]                         \n\t" // carry += OF
 
         "lea %[pos], [%[pos] + 8]                       \n\t" // pos += 8
         "dec %[j]                                       \n\t" // j--
-        "jnz loop_2_begin%=                             \n\t"
+        "jmp loop_2_tail_begin%=                        \n\t"
+
+        "loop_2_end%=:                                  \n\t"
 
         "adcx %[carry], %[zero]                         \n\t" // carry += CF
         "mov [%[dest] + %[pos]], %[carry]               \n\t" // *(dest + pos) = carry
@@ -1098,7 +1129,7 @@ num_p num_mul_classic(num_p num_1, num_p num_2)
         "dec %[i]                                       \n\t" // i--
         "jnz loop_1_begin%=                             \n\t"
 
-        ".att_syntax prefix         \n\t"
+        ".att_syntax prefix                             \n\t"
         // out
         :   [high] "=&r" (high),
             [low] "=&r" (low),
@@ -1118,7 +1149,7 @@ num_p num_mul_classic(num_p num_1, num_p num_2)
             "rdx"
     );
 
-    #else
+#else
 
     for(uint64_t i = 0; i < count_1; i++)
     {
@@ -1134,7 +1165,7 @@ num_p num_mul_classic(num_p num_1, num_p num_2)
         dest[i + count_2] = LOW(carry);
     }
 
-    #endif
+#endif
 
     return num_normalize(num_res);
 }
