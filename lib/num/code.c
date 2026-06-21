@@ -1082,20 +1082,50 @@ num_p num_mul_classic(num_p num_1, num_p num_2)
         "mov rdx, [%[src_1]]                            \n\t" // D = *src_1
         "mov %[carry], 0                                \n\t" // carry = 0
 
-        "mov %[j], %[count_2]                           \n\t" // j = count_2 / 2
-        "shr %[j], 1                                    \n\t" // j = count_2 / 2
+        "mov %[j], %[count_2]                           \n\t" // j = count_2
+        "shr %[j], 5                                    \n\t" // j = count_2 / 32
         "xor %[pos], %[pos]                             \n\t" // pos = 0
         "test %[j], %[j]                                \n\t"
 
         "loop_2_begin%=:                                \n\t"
         "jz loop_2_tail%=                               \n\t"
 
-        MUL_CLASSIC_STEP(0, high, carry)
-        MUL_CLASSIC_STEP(8, carry, high)
+        MUL_CLASSIC_STEP(  0, high, carry)
+        MUL_CLASSIC_STEP(  8, carry, high)
+        MUL_CLASSIC_STEP( 16, high, carry)
+        MUL_CLASSIC_STEP( 24, carry, high)
+        MUL_CLASSIC_STEP( 32, high, carry)
+        MUL_CLASSIC_STEP( 40, carry, high)
+        MUL_CLASSIC_STEP( 48, high, carry)
+        MUL_CLASSIC_STEP( 56, carry, high)
+        MUL_CLASSIC_STEP( 64, high, carry)
+        MUL_CLASSIC_STEP( 72, carry, high)
+        MUL_CLASSIC_STEP( 80, high, carry)
+        MUL_CLASSIC_STEP( 88, carry, high)
+        MUL_CLASSIC_STEP( 96, high, carry)
+        MUL_CLASSIC_STEP(104, carry, high)
+        MUL_CLASSIC_STEP(112, high, carry)
+        MUL_CLASSIC_STEP(120, carry, high)
+        MUL_CLASSIC_STEP(128, high, carry)
+        MUL_CLASSIC_STEP(136, carry, high)
+        MUL_CLASSIC_STEP(144, high, carry)
+        MUL_CLASSIC_STEP(152, carry, high)
+        MUL_CLASSIC_STEP(160, high, carry)
+        MUL_CLASSIC_STEP(168, carry, high)
+        MUL_CLASSIC_STEP(176, high, carry)
+        MUL_CLASSIC_STEP(184, carry, high)
+        MUL_CLASSIC_STEP(192, high, carry)
+        MUL_CLASSIC_STEP(200, carry, high)
+        MUL_CLASSIC_STEP(208, high, carry)
+        MUL_CLASSIC_STEP(216, carry, high)
+        MUL_CLASSIC_STEP(224, high, carry)
+        MUL_CLASSIC_STEP(232, carry, high)
+        MUL_CLASSIC_STEP(240, high, carry)
+        MUL_CLASSIC_STEP(248, carry, high)
 
         "adox %[carry], %[zero]                         \n\t" // carry += OF
 
-        "lea %[pos], [%[pos] + 16]                      \n\t" // pos += 16
+        "lea %[pos], [%[pos] + 256]                     \n\t" // pos += 256
         "dec %[j]                                       \n\t" // j--
         "jmp loop_2_begin%=                             \n\t"
 
@@ -1104,7 +1134,7 @@ num_p num_mul_classic(num_p num_1, num_p num_2)
         "adcx %[carry], %[zero]                         \n\t" // carry += CF
 
         "mov %[j], %[count_2]                           \n\t" // j = count_2
-        "and %[j], 1                                    \n\t" // j = j & 1
+        "and %[j], 31                                   \n\t" // j = j % 32
         "test %[j], %[j]                                \n\t"
 
         "loop_2_tail_begin%=:                           \n\t"
