@@ -1248,12 +1248,12 @@ num_p num_mul_classic(num_p num_1, num_p num_2)
             [carry] "=&r" (carry),
             [pos] "=&r" (pos),
             [j] "=&r" (j),
-            [i] "+&r" (i),
-            [src_1] "+&r" (src_1),
-            [src_2] "+&r" (src_2),
-            [dest] "+&r" (dest)
+            [i] "+&r" (i)
         // in
-        :   [zero] "r" (zero),
+        :   [src_1] "+&r" (src_1),
+            [src_2] "+&r" (src_2),
+            [dest] "+&r" (dest),
+            [zero] "r" (zero),
             [count_2] "r" (count_2)
         // clobber
         :   "cc",
@@ -1263,10 +1263,21 @@ num_p num_mul_classic(num_p num_1, num_p num_2)
 
 #else
 
-    for(uint64_t i = 0; i < count_1; i++)
+    uint128_t carry = 0;
+    uint64_t v1 = src_1[0];
+    #pragma GCC unroll 32
+    for(uint64_t j = 0; j < count_2; j++)
     {
-        uint64_t v1 = src_1[i];
-        uint128_t carry = 0;
+        carry += MUL(v1, src_2[j]);
+        dest[j] = LOW(carry);
+        carry = HIGH(carry);
+    }
+    dest[count_2] = LOW(carry);
+
+    for(uint64_t i = 1; i < count_1; i++)
+    {
+        v1 = src_1[i];
+        carry = 0;
         #pragma GCC unroll 32
         for(uint64_t j = 0; j < count_2; j++)
         {

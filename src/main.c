@@ -745,6 +745,8 @@ static void time_mul_classic_benchmark()
 
     num_p num_1 = num_generate_1(base, 0x9E3779B97F4A7C15);
     num_p num_2 = num_generate_1(base, 0xBF58476D1CE4E5B9);
+    num_1->count = num_1->count - (num_1->count % 32) + 31;
+    num_2->count = num_2->count - (num_2->count % 32) + 31;
 
     uint64_t time = 0;
     for(uint64_t i=0; i<1000000; i++)
