@@ -1250,9 +1250,9 @@ num_p num_mul_classic(num_p num_1, num_p num_2)
             [j] "=&r" (j),
             [i] "+&r" (i)
         // in
-        :   [src_1] "+&r" (src_1),
-            [src_2] "+&r" (src_2),
-            [dest] "+&r" (dest),
+        :   [src_1] "r" (src_1),
+            [src_2] "r" (src_2),
+            [dest] "r" (dest),
             [zero] "r" (zero),
             [count_2] "r" (count_2)
         // clobber
