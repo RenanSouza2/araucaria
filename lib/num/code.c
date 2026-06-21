@@ -1045,6 +1045,8 @@ static num_p num_sqr_classic_buffer(num_p num_res, num_p num)
 
 #endif
 
+// time_mul_classic_benchmark      | time mul: 34.397
+
 // KEEPS NUM_1 NUM_2
 num_p num_mul_classic(num_p num_1, num_p num_2)
 {
@@ -1061,7 +1063,7 @@ num_p num_mul_classic(num_p num_1, num_p num_2)
     }
 
     uint64_t target_count = count_1 + count_2;
-    num_p num_res = num_create(CLU_ARGS(target_count, target_count));
+    num_p num_res = num_create_dirty(CLU_ARGS(target_count, target_count));
     uint64_t * restrict dest = num_res->chunk;
     const uint64_t * restrict src_1 = num_1->chunk;
     const uint64_t * restrict src_2 = num_2->chunk;
@@ -1077,13 +1079,37 @@ num_p num_mul_classic(num_p num_1, num_p num_2)
     __asm__ __volatile__ (
         ".intel_syntax noprefix                         \n\t"
 
-        "loop_1_begin%=:                                \n\t"
-
+        "mov %[j], %[count_2]                           \n\t" // j = count_2
         "mov rdx, [%[src_1]]                            \n\t" // D = *src_1
         "mov %[carry], 0                                \n\t" // carry = 0
+        "xor %[pos], %[pos]                             \n\t" // pos = 0
+
+        "loop_0_begin%=:                                \n\t"
+
+        "mulx %[high], %[low], [%[src_2] + %[pos]]      \n\t" // (high, low) = MUL(D, *(src_2 + pos))
+        "adcx %[low], %[carry]                          \n\t" // low += carry + CF
+        "mov [%[dest] + %[pos]], %[low]                 \n\t" // *(dest + pos) = low
+
+        "mov %[carry], %[high]                          \n\t" // carry = high
+
+        "lea %[pos], [%[pos] + 8]                       \n\t" // pos += 8
+        "dec %[j]                                       \n\t" // j--
+        "jnz loop_0_begin%=                             \n\t"
+
+        "adcx %[carry], %[zero]                         \n\t" // carry += CF
+        "mov [%[dest] + %[pos]], %[carry]               \n\t" // *(dest + pos) = carry
+
+        "lea %[src_1], [%[src_1] + 8]                   \n\t" // src_1 += 8
+        "lea %[dest], [%[dest] + 8]                     \n\t" // dest += 8
+        "dec %[i]                                       \n\t" // i--
+        "jz loop_1_end%=                                \n\t"
+
+        "loop_1_begin%=:                                \n\t"
 
         "mov %[j], %[count_2]                           \n\t" // j = count_2
+        "mov rdx, [%[src_1]]                            \n\t" // D = *src_1
         "shr %[j], 5                                    \n\t" // j = count_2 / 32
+        "mov %[carry], 0                                \n\t" // carry = 0
         "xor %[pos], %[pos]                             \n\t" // pos = 0
         "test %[j], %[j]                                \n\t"
 
@@ -1158,6 +1184,8 @@ num_p num_mul_classic(num_p num_1, num_p num_2)
         "lea %[dest], [%[dest] + 8]                     \n\t" // dest += 8
         "dec %[i]                                       \n\t" // i--
         "jnz loop_1_begin%=                             \n\t"
+
+        "loop_1_end%=:                                  \n\t"
 
         ".att_syntax prefix                             \n\t"
         // out
