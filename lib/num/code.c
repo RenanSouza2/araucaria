@@ -1037,13 +1037,13 @@ static num_p num_sqr_classic_buffer(num_p num_res, num_p num)
 
 #if !defined(NO_ASSEMBLY) && defined(__linux__)
 
-#define MUL_CLASSIC_STEP_ZERO(OFF, HIGH, CARRY) \
+#define MUL_CLASSIC_STEP_ZERO(OFF, HIGH, CARRY)                                                                       \
     "mulx %[" #HIGH "], %[low], [%[src_2] + %[pos] + " #OFF "]  \n\t" /* (HIGH, low) = MUL(D, *(src_2 + pos + OFF)) */\
     "adcx %[low], %[" #CARRY "]                                 \n\t" /* low += carry + CF                          */\
     "mov [%[dest] + %[pos] + " #OFF "], %[low]                  \n\t" /* *(dest + pos + OFF) = low                  */\
 
-#define MUL_CLASSIC_STEP(OFF, HIGH, CARRY, SRC)                                                                            \
-    "mulx %[" #HIGH "], %[low], [%[" #SRC "] + %[pos] + " #OFF "]   \n\t" /* (HIGH, low) = MUL(D, *(src + pos + OFF)) */\
+#define MUL_CLASSIC_STEP(OFF, HIGH, CARRY, SRC)                                                                           \
+    "mulx %[" #HIGH "], %[low], [%[" #SRC "] + %[pos] + " #OFF "]   \n\t" /* (HIGH, low) = MUL(D, *(src + pos + OFF))   */\
     "adcx %[low], [%[dest] + %[pos] + " #OFF "]                     \n\t" /* low += *(dest + pos + OFF) + CF            */\
     "adox %[low], %[" #CARRY "]                                     \n\t" /* low += carry + OF                          */\
     "mov [%[dest] + %[pos] + " #OFF "], %[low]                      \n\t" /* *(dest + pos + OFF) = low                  */\
@@ -1230,20 +1230,44 @@ num_p num_mul_classic(num_p num_1, num_p num_2)
 
         "loop_tail_1_begin%=:                           \n\t"
         "mov %[i], %[count_1]                           \n\t" // i = count_1
+        "shr %[i], 1                                    \n\t" // i /= 2
         "mov %[carry], 0                                \n\t" // carry = 0
         "xor %[pos], %[pos]                             \n\t" // pos = 0;
         "mov rdx, [%[src_2]]                            \n\t" // D = *src_2
+        "test %[i], %[i]                                \n\t"
+        "jz loop_tail_2_tail_prepare%=                  \n\t"
 
         "loop_tail_2_begin%=:                           \n\t"
 
         MUL_CLASSIC_STEP(0, high, carry, src_1)
+        MUL_CLASSIC_STEP(8, carry, high, src_1)
 
+        "adox %[carry], %[zero]                         \n\t" // carry += OF
+
+        "lea %[pos], [%[pos] + 16]                      \n\t" // pos += 16
+        "dec %[i]                                       \n\t" // i--"
+        "jnz loop_tail_2_begin%=                        \n\t"
+
+        "adcx %[carry], %[zero]                         \n\t" // carry += CF
+
+        "loop_tail_2_tail_prepare%=:                    \n\t"
+        "adcx %[carry], %[zero]                         \n\t" // carry += CF
+        "mov %[i], %[count_1]                           \n\t" // i = count_1
+        "and %[i], 1                                    \n\t" // i = i % 2
+        "test %[i], %[i]                                \n\t"
+        "jz loop_tail_2_skip%=                          \n\t"
+
+        "loop_tail_2_tail_begin%=:                      \n\t"
+
+        MUL_CLASSIC_STEP(0, high, carry, src_1)
         "mov %[carry], %[high]                          \n\t" // carry = high
         "adox %[carry], %[zero]                         \n\t" // carry += OF
 
         "lea %[pos], [%[pos] + 8]                       \n\t" // pos += 8
-        "dec %[i]                                       \n\t" // i--"
-        "jnz loop_tail_2_begin%=                        \n\t"
+        "dec %[i]                                       \n\t" // i--
+        "jnz loop_tail_2_tail_begin%=                   \n\t"
+
+        "loop_tail_2_skip%=:                            \n\t"
 
         "adcx %[carry], %[zero]                         \n\t" // carry += CF
         "mov [%[dest] + %[pos]], %[carry]               \n\t" // *(dest + pos) = carry
@@ -1253,7 +1277,7 @@ num_p num_mul_classic(num_p num_1, num_p num_2)
         "dec %[j]                                       \n\t"
         "jnz loop_tail_1_begin%=                        \n\t"
 
-        "loop_tail_skip%=:                             \n\t"
+        "loop_tail_skip%=:                              \n\t"
 
         ".att_syntax prefix                             \n\t"
         // out
