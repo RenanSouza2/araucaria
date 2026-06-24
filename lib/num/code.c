@@ -1334,27 +1334,42 @@ num_p num_mul_classic(num_p num_1, num_p num_2)
 
     uint128_t carry = 0;
     uint64_t v1 = src_1[0];
+    uint64_t loop_2_max = count_2 & ~U64(31);
     #pragma GCC unroll 32
-    for(uint64_t j = 0; j < count_2; j++)
+    for(uint64_t j = 0; j < loop_2_max; j++)
     {
         carry += MUL(v1, src_2[j]);
         dest[j] = LOW(carry);
         carry = HIGH(carry);
     }
-    dest[count_2] = LOW(carry);
+    dest[loop_2_max] = LOW(carry);
 
     for(uint64_t i = 1; i < count_1; i++)
     {
         v1 = src_1[i];
         carry = 0;
         #pragma GCC unroll 32
-        for(uint64_t j = 0; j < count_2; j++)
+        for(uint64_t j = 0; j < loop_2_max; j++)
         {
             carry += dest[i + j] + MUL(v1, src_2[j]);
             dest[i + j] = LOW(carry);
             carry = HIGH(carry);
         }
-        dest[i + count_2] = LOW(carry);
+        dest[i + loop_2_max] = LOW(carry);
+    }
+
+    for(uint64_t j=loop_2_max; j<count_2; j++)
+    {
+        uint64_t v2 = src_2[j];
+        carry = 0;
+        #pragma GCC unroll 32
+        for(uint64_t i=0; i<count_1; i++)
+        {
+            carry += dest[i + j] + MUL(v2, src_1[i]);
+            dest[i + j] = LOW(carry);
+            carry = HIGH(carry);
+        }
+        dest[count_1 + j] = LOW(carry);
     }
 
 #endif
