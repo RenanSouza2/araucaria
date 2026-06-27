@@ -129,12 +129,6 @@ STATIC bool num_keep(num_p num_1, num_p num_2)
     assert(num_1)
     assert(num_2)
 
-    if(num_1->cannot_expand)
-    {
-        printf("\n\n\tNUMBER ASSERT ERROR\t| NUM CANNOT EXPAND");
-        return false;
-    }
-
     if(num_1->count > num_1->size)
     {
         printf("\n\n\tNUMBER ASSERT ERROR\t| COUNT BIGGER THAN SIZE | " U64P() " " U64P() "", num_1->count, num_1->size);
@@ -430,8 +424,6 @@ STATIC num_p num_expand_to(num_p num, uint64_t size)
         return num;
     }
 
-    assert(!num->cannot_expand);
-
     uint64_t size_old = num->size;
 
     num_p num_new = num_create_dirty(CLU_ARGS(size, num->count));
@@ -556,8 +548,7 @@ static void num_span(num_p num_res, num_p num, uint64_t pos_init, uint64_t pos_m
     {
         .size = size,
         .count = size,
-        .chunk = &num->chunk[pos_init],
-        .cannot_expand = true
+        .chunk = &num->chunk[pos_init]
     };
     num_normalize(num_res);
 }
@@ -771,7 +762,7 @@ STATIC void num_sub_uint_offset(num_p num, uint64_t pos, uint64_t value)
 
 // keeps NUM
 // before pr remove expand here
-static num_p num_add_mul_uint_offset(
+static void num_add_mul_uint_offset(
     num_p num_res, uint64_t pos_res,
     num_p num, uint64_t pos,
     uint64_t value
@@ -784,16 +775,12 @@ static num_p num_add_mul_uint_offset(
 
     if(value == 0 || pos >= num->count)
     {
-        return num_res;
+        return;
     }
 
     uint64_t iter_count = num->count - pos;
     uint64_t target_count = pos_res + iter_count;
-
-    if(num_res->size <= target_count)
-    {
-        num_res = num_expand_to(num_res, target_count + 1);
-    }
+    assert(num_res->size >= target_count);
 
     if(num_res->count < target_count)
     {
@@ -821,8 +808,6 @@ static num_p num_add_mul_uint_offset(
     {
         num_add_uint_offset(num_res, target_count, carry);
     }
-
-    return num_res;
 }
 
 // BITS shoud be less than 64
@@ -1004,7 +989,7 @@ static num_p num_mul_uint_buffer(num_p num_res, num_p num, uint64_t value) // TO
     return num_normalize(num_res);
 }
 
-static num_p num_sqr_classic_buffer(num_p num_res, num_p num)
+static void num_sqr_classic_buffer(num_p num_res, num_p num)
 {
     CLU_HANDLER_IS_SAFE(num_res)
     CLU_HANDLER_IS_SAFE(num)
@@ -1022,7 +1007,7 @@ static num_p num_sqr_classic_buffer(num_p num_res, num_p num)
         num_add_uint_offset(num_res, (2 * i), LOW(u));
         num_add_uint_offset(num_res, (2 * i) + 1, HIGH(u));
 
-        num_res = num_add_mul_uint_offset(num_res, (2 * i) + 1, num, i + 1, value << 1);
+        num_add_mul_uint_offset(num_res, (2 * i) + 1, num, i + 1, value << 1);
 
         constexpr uint64_t msb_set = 0x8000000000000000;
         if(value >= msb_set)
@@ -1030,7 +1015,7 @@ static num_p num_sqr_classic_buffer(num_p num_res, num_p num)
             num_add_offset(num_res, (2 * i) + 2, num, i + 1);
         }
     }
-    return num_normalize(num_res);
+    num_normalize(num_res);
 }
 
 
@@ -1380,9 +1365,7 @@ num_p num_mul_classic(num_p num_1, num_p num_2)
 STATIC num_p num_sqr_classic(num_p num)
 {
     num_p num_res = num_create(CLU_ARGS(2 * num->count, 0));
-    num_res->cannot_expand = true;
-    num_res = num_sqr_classic_buffer(num_res, num);
-    num_res->cannot_expand = false;
+    num_sqr_classic_buffer(num_res, num);
     num_free(num);
     return num_res;
 }
@@ -2904,7 +2887,6 @@ static num_p num_div_mod_bz(num_p num_1, num_p num_2)
     uint64_t count = stdc_bit_ceil(8 * num_2->count);
     num_p num_aux = num_create(CLU_ARGS(count, 0));
     num_p num_q = num_create(CLU_ARGS(num_1->count - num_2->count + 1, 0));
-    num_aux->cannot_expand = true;
 
     uint64_t n_1 = num_1->count;
     uint64_t n_2 = num_2->count;
@@ -3056,10 +3038,8 @@ num_p num_mul_uint(num_p num, uint64_t value)
     assert(num)
 
     num_p num_res = num_create(CLU_ARGS(num->count + 1, 0));
-    num_res->cannot_expand = true;
-    num_res = num_add_mul_uint_offset(num_res, 0, num, 0, value);
+    num_add_mul_uint_offset(num_res, 0, num, 0, value);
     num_free(num);
-    num_res->cannot_expand = false;
     return num_res;
 }
 
