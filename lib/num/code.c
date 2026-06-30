@@ -1022,16 +1022,16 @@ static void num_sqr_classic_buffer(num_p num_res, num_p num)
 
 #if !defined(NO_ASSEMBLY) && defined(__linux__)
 
-#define MUL_CLASSIC_STEP_ZERO(OFF, HIGH, CARRY)                                                                       \
-    "mulx %[" #HIGH "], %[low], [%[src_2] + %[pos] + " #OFF "]  \n\t" /* (HIGH, low) = MUL(D, *(src_2 + pos + OFF)) */\
-    "adcx %[low], %[" #CARRY "]                                 \n\t" /* low += carry + CF                          */\
-    "mov [%[dest] + %[pos] + " #OFF "], %[low]                  \n\t" /* *(dest + pos + OFF) = low                  */\
+#define MUL_CLASSIC_STEP_ZERO(OFF, HIGH, CARRY, POS)                                                                      \
+    "mulx %[" #HIGH "], %[low], [%[src_2] + %[" #POS "] + " #OFF "] \n\t" /* (HIGH, low) = MUL(D, *(src_2 + POS + OFF)) */\
+    "adcx %[low], %[" #CARRY "]                                     \n\t" /* low += carry + CF                          */\
+    "mov [%[dest] + %[" #POS "] + " #OFF "], %[low]                 \n\t" /* *(dest + POS + OFF) = low                  */\
 
-#define MUL_CLASSIC_STEP(OFF, HIGH, CARRY, SRC)                                                                           \
-    "mulx %[" #HIGH "], %[low], [%[" #SRC "] + %[pos] + " #OFF "]   \n\t" /* (HIGH, low) = MUL(D, *(src + pos + OFF))   */\
-    "adcx %[low], [%[dest] + %[pos] + " #OFF "]                     \n\t" /* low += *(dest + pos + OFF) + CF            */\
-    "adox %[low], %[" #CARRY "]                                     \n\t" /* low += carry + OF                          */\
-    "mov [%[dest] + %[pos] + " #OFF "], %[low]                      \n\t" /* *(dest + pos + OFF) = low                  */\
+#define MUL_CLASSIC_STEP(OFF, HIGH, CARRY, SRC, POS)                                                                          \
+    "mulx %[" #HIGH "], %[low], [%[" #SRC "] + %[" #POS "] + " #OFF "]  \n\t" /* (HIGH, low) = MUL(D, *(src + POS + OFF))   */\
+    "adcx %[low], [%[dest] + %[" #POS "] + " #OFF "]                    \n\t" /* low += *(dest + POS + OFF) + CF            */\
+    "adox %[low], %[" #CARRY "]                                         \n\t" /* low += carry + OF                          */\
+    "mov [%[dest] + %[" #POS "] + " #OFF "], %[low]                     \n\t" /* *(dest + POS + OFF) = low                  */\
 
 #endif
 
@@ -1079,38 +1079,38 @@ num_p num_mul_classic(num_p num_1, num_p num_2)
 
         "loop_0_begin%=:                                \n\t" // LOOP_0_BEGIN
 
-        MUL_CLASSIC_STEP_ZERO(  0, high, carry)
-        MUL_CLASSIC_STEP_ZERO(  8, carry, high)
-        MUL_CLASSIC_STEP_ZERO( 16, high, carry)
-        MUL_CLASSIC_STEP_ZERO( 24, carry, high)
-        MUL_CLASSIC_STEP_ZERO( 32, high, carry)
-        MUL_CLASSIC_STEP_ZERO( 40, carry, high)
-        MUL_CLASSIC_STEP_ZERO( 48, high, carry)
-        MUL_CLASSIC_STEP_ZERO( 56, carry, high)
-        MUL_CLASSIC_STEP_ZERO( 64, high, carry)
-        MUL_CLASSIC_STEP_ZERO( 72, carry, high)
-        MUL_CLASSIC_STEP_ZERO( 80, high, carry)
-        MUL_CLASSIC_STEP_ZERO( 88, carry, high)
-        MUL_CLASSIC_STEP_ZERO( 96, high, carry)
-        MUL_CLASSIC_STEP_ZERO(104, carry, high)
-        MUL_CLASSIC_STEP_ZERO(112, high, carry)
-        MUL_CLASSIC_STEP_ZERO(120, carry, high)
-        MUL_CLASSIC_STEP_ZERO(128, high, carry)
-        MUL_CLASSIC_STEP_ZERO(136, carry, high)
-        MUL_CLASSIC_STEP_ZERO(144, high, carry)
-        MUL_CLASSIC_STEP_ZERO(152, carry, high)
-        MUL_CLASSIC_STEP_ZERO(160, high, carry)
-        MUL_CLASSIC_STEP_ZERO(168, carry, high)
-        MUL_CLASSIC_STEP_ZERO(176, high, carry)
-        MUL_CLASSIC_STEP_ZERO(184, carry, high)
-        MUL_CLASSIC_STEP_ZERO(192, high, carry)
-        MUL_CLASSIC_STEP_ZERO(200, carry, high)
-        MUL_CLASSIC_STEP_ZERO(208, high, carry)
-        MUL_CLASSIC_STEP_ZERO(216, carry, high)
-        MUL_CLASSIC_STEP_ZERO(224, high, carry)
-        MUL_CLASSIC_STEP_ZERO(232, carry, high)
-        MUL_CLASSIC_STEP_ZERO(240, high, carry)
-        MUL_CLASSIC_STEP_ZERO(248, carry, high)
+        MUL_CLASSIC_STEP_ZERO(  0, high, carry, pos)
+        MUL_CLASSIC_STEP_ZERO(  8, carry, high, pos)
+        MUL_CLASSIC_STEP_ZERO( 16, high, carry, pos)
+        MUL_CLASSIC_STEP_ZERO( 24, carry, high, pos)
+        MUL_CLASSIC_STEP_ZERO( 32, high, carry, pos)
+        MUL_CLASSIC_STEP_ZERO( 40, carry, high, pos)
+        MUL_CLASSIC_STEP_ZERO( 48, high, carry, pos)
+        MUL_CLASSIC_STEP_ZERO( 56, carry, high, pos)
+        MUL_CLASSIC_STEP_ZERO( 64, high, carry, pos)
+        MUL_CLASSIC_STEP_ZERO( 72, carry, high, pos)
+        MUL_CLASSIC_STEP_ZERO( 80, high, carry, pos)
+        MUL_CLASSIC_STEP_ZERO( 88, carry, high, pos)
+        MUL_CLASSIC_STEP_ZERO( 96, high, carry, pos)
+        MUL_CLASSIC_STEP_ZERO(104, carry, high, pos)
+        MUL_CLASSIC_STEP_ZERO(112, high, carry, pos)
+        MUL_CLASSIC_STEP_ZERO(120, carry, high, pos)
+        MUL_CLASSIC_STEP_ZERO(128, high, carry, pos)
+        MUL_CLASSIC_STEP_ZERO(136, carry, high, pos)
+        MUL_CLASSIC_STEP_ZERO(144, high, carry, pos)
+        MUL_CLASSIC_STEP_ZERO(152, carry, high, pos)
+        MUL_CLASSIC_STEP_ZERO(160, high, carry, pos)
+        MUL_CLASSIC_STEP_ZERO(168, carry, high, pos)
+        MUL_CLASSIC_STEP_ZERO(176, high, carry, pos)
+        MUL_CLASSIC_STEP_ZERO(184, carry, high, pos)
+        MUL_CLASSIC_STEP_ZERO(192, high, carry, pos)
+        MUL_CLASSIC_STEP_ZERO(200, carry, high, pos)
+        MUL_CLASSIC_STEP_ZERO(208, high, carry, pos)
+        MUL_CLASSIC_STEP_ZERO(216, carry, high, pos)
+        MUL_CLASSIC_STEP_ZERO(224, high, carry, pos)
+        MUL_CLASSIC_STEP_ZERO(232, carry, high, pos)
+        MUL_CLASSIC_STEP_ZERO(240, high, carry, pos)
+        MUL_CLASSIC_STEP_ZERO(248, carry, high, pos)
 
         "lea %[pos], [%[pos] + 256]                     \n\t" // pos += 256
         "dec %[j]                                       \n\t" // j--
@@ -1135,38 +1135,38 @@ num_p num_mul_classic(num_p num_1, num_p num_2)
 
         "loop_2_begin%=:                                \n\t"
 
-        MUL_CLASSIC_STEP(  0, high, carry, src_2)
-        MUL_CLASSIC_STEP(  8, carry, high, src_2)
-        MUL_CLASSIC_STEP( 16, high, carry, src_2)
-        MUL_CLASSIC_STEP( 24, carry, high, src_2)
-        MUL_CLASSIC_STEP( 32, high, carry, src_2)
-        MUL_CLASSIC_STEP( 40, carry, high, src_2)
-        MUL_CLASSIC_STEP( 48, high, carry, src_2)
-        MUL_CLASSIC_STEP( 56, carry, high, src_2)
-        MUL_CLASSIC_STEP( 64, high, carry, src_2)
-        MUL_CLASSIC_STEP( 72, carry, high, src_2)
-        MUL_CLASSIC_STEP( 80, high, carry, src_2)
-        MUL_CLASSIC_STEP( 88, carry, high, src_2)
-        MUL_CLASSIC_STEP( 96, high, carry, src_2)
-        MUL_CLASSIC_STEP(104, carry, high, src_2)
-        MUL_CLASSIC_STEP(112, high, carry, src_2)
-        MUL_CLASSIC_STEP(120, carry, high, src_2)
-        MUL_CLASSIC_STEP(128, high, carry, src_2)
-        MUL_CLASSIC_STEP(136, carry, high, src_2)
-        MUL_CLASSIC_STEP(144, high, carry, src_2)
-        MUL_CLASSIC_STEP(152, carry, high, src_2)
-        MUL_CLASSIC_STEP(160, high, carry, src_2)
-        MUL_CLASSIC_STEP(168, carry, high, src_2)
-        MUL_CLASSIC_STEP(176, high, carry, src_2)
-        MUL_CLASSIC_STEP(184, carry, high, src_2)
-        MUL_CLASSIC_STEP(192, high, carry, src_2)
-        MUL_CLASSIC_STEP(200, carry, high, src_2)
-        MUL_CLASSIC_STEP(208, high, carry, src_2)
-        MUL_CLASSIC_STEP(216, carry, high, src_2)
-        MUL_CLASSIC_STEP(224, high, carry, src_2)
-        MUL_CLASSIC_STEP(232, carry, high, src_2)
-        MUL_CLASSIC_STEP(240, high, carry, src_2)
-        MUL_CLASSIC_STEP(248, carry, high, src_2)
+        MUL_CLASSIC_STEP(  0, high, carry, src_2, pos)
+        MUL_CLASSIC_STEP(  8, carry, high, src_2, pos)
+        MUL_CLASSIC_STEP( 16, high, carry, src_2, pos)
+        MUL_CLASSIC_STEP( 24, carry, high, src_2, pos)
+        MUL_CLASSIC_STEP( 32, high, carry, src_2, pos)
+        MUL_CLASSIC_STEP( 40, carry, high, src_2, pos)
+        MUL_CLASSIC_STEP( 48, high, carry, src_2, pos)
+        MUL_CLASSIC_STEP( 56, carry, high, src_2, pos)
+        MUL_CLASSIC_STEP( 64, high, carry, src_2, pos)
+        MUL_CLASSIC_STEP( 72, carry, high, src_2, pos)
+        MUL_CLASSIC_STEP( 80, high, carry, src_2, pos)
+        MUL_CLASSIC_STEP( 88, carry, high, src_2, pos)
+        MUL_CLASSIC_STEP( 96, high, carry, src_2, pos)
+        MUL_CLASSIC_STEP(104, carry, high, src_2, pos)
+        MUL_CLASSIC_STEP(112, high, carry, src_2, pos)
+        MUL_CLASSIC_STEP(120, carry, high, src_2, pos)
+        MUL_CLASSIC_STEP(128, high, carry, src_2, pos)
+        MUL_CLASSIC_STEP(136, carry, high, src_2, pos)
+        MUL_CLASSIC_STEP(144, high, carry, src_2, pos)
+        MUL_CLASSIC_STEP(152, carry, high, src_2, pos)
+        MUL_CLASSIC_STEP(160, high, carry, src_2, pos)
+        MUL_CLASSIC_STEP(168, carry, high, src_2, pos)
+        MUL_CLASSIC_STEP(176, high, carry, src_2, pos)
+        MUL_CLASSIC_STEP(184, carry, high, src_2, pos)
+        MUL_CLASSIC_STEP(192, high, carry, src_2, pos)
+        MUL_CLASSIC_STEP(200, carry, high, src_2, pos)
+        MUL_CLASSIC_STEP(208, high, carry, src_2, pos)
+        MUL_CLASSIC_STEP(216, carry, high, src_2, pos)
+        MUL_CLASSIC_STEP(224, high, carry, src_2, pos)
+        MUL_CLASSIC_STEP(232, carry, high, src_2, pos)
+        MUL_CLASSIC_STEP(240, high, carry, src_2, pos)
+        MUL_CLASSIC_STEP(248, carry, high, src_2, pos)
 
         "adox %[carry], %[zero]                         \n\t" // carry += OF
 
@@ -1224,38 +1224,38 @@ num_p num_mul_classic(num_p num_1, num_p num_2)
 
         "loop_tail_2_begin%=:                           \n\t"
 
-        MUL_CLASSIC_STEP(  0, high, carry, src_1)
-        MUL_CLASSIC_STEP(  8, carry, high, src_1)
-        MUL_CLASSIC_STEP( 16, high, carry, src_1)
-        MUL_CLASSIC_STEP( 24, carry, high, src_1)
-        MUL_CLASSIC_STEP( 32, high, carry, src_1)
-        MUL_CLASSIC_STEP( 40, carry, high, src_1)
-        MUL_CLASSIC_STEP( 48, high, carry, src_1)
-        MUL_CLASSIC_STEP( 56, carry, high, src_1)
-        MUL_CLASSIC_STEP( 64, high, carry, src_1)
-        MUL_CLASSIC_STEP( 72, carry, high, src_1)
-        MUL_CLASSIC_STEP( 80, high, carry, src_1)
-        MUL_CLASSIC_STEP( 88, carry, high, src_1)
-        MUL_CLASSIC_STEP( 96, high, carry, src_1)
-        MUL_CLASSIC_STEP(104, carry, high, src_1)
-        MUL_CLASSIC_STEP(112, high, carry, src_1)
-        MUL_CLASSIC_STEP(120, carry, high, src_1)
-        MUL_CLASSIC_STEP(128, high, carry, src_1)
-        MUL_CLASSIC_STEP(136, carry, high, src_1)
-        MUL_CLASSIC_STEP(144, high, carry, src_1)
-        MUL_CLASSIC_STEP(152, carry, high, src_1)
-        MUL_CLASSIC_STEP(160, high, carry, src_1)
-        MUL_CLASSIC_STEP(168, carry, high, src_1)
-        MUL_CLASSIC_STEP(176, high, carry, src_1)
-        MUL_CLASSIC_STEP(184, carry, high, src_1)
-        MUL_CLASSIC_STEP(192, high, carry, src_1)
-        MUL_CLASSIC_STEP(200, carry, high, src_1)
-        MUL_CLASSIC_STEP(208, high, carry, src_1)
-        MUL_CLASSIC_STEP(216, carry, high, src_1)
-        MUL_CLASSIC_STEP(224, high, carry, src_1)
-        MUL_CLASSIC_STEP(232, carry, high, src_1)
-        MUL_CLASSIC_STEP(240, high, carry, src_1)
-        MUL_CLASSIC_STEP(248, carry, high, src_1)
+        MUL_CLASSIC_STEP(  0, high, carry, src_1, pos)
+        MUL_CLASSIC_STEP(  8, carry, high, src_1, pos)
+        MUL_CLASSIC_STEP( 16, high, carry, src_1, pos)
+        MUL_CLASSIC_STEP( 24, carry, high, src_1, pos)
+        MUL_CLASSIC_STEP( 32, high, carry, src_1, pos)
+        MUL_CLASSIC_STEP( 40, carry, high, src_1, pos)
+        MUL_CLASSIC_STEP( 48, high, carry, src_1, pos)
+        MUL_CLASSIC_STEP( 56, carry, high, src_1, pos)
+        MUL_CLASSIC_STEP( 64, high, carry, src_1, pos)
+        MUL_CLASSIC_STEP( 72, carry, high, src_1, pos)
+        MUL_CLASSIC_STEP( 80, high, carry, src_1, pos)
+        MUL_CLASSIC_STEP( 88, carry, high, src_1, pos)
+        MUL_CLASSIC_STEP( 96, high, carry, src_1, pos)
+        MUL_CLASSIC_STEP(104, carry, high, src_1, pos)
+        MUL_CLASSIC_STEP(112, high, carry, src_1, pos)
+        MUL_CLASSIC_STEP(120, carry, high, src_1, pos)
+        MUL_CLASSIC_STEP(128, high, carry, src_1, pos)
+        MUL_CLASSIC_STEP(136, carry, high, src_1, pos)
+        MUL_CLASSIC_STEP(144, high, carry, src_1, pos)
+        MUL_CLASSIC_STEP(152, carry, high, src_1, pos)
+        MUL_CLASSIC_STEP(160, high, carry, src_1, pos)
+        MUL_CLASSIC_STEP(168, carry, high, src_1, pos)
+        MUL_CLASSIC_STEP(176, high, carry, src_1, pos)
+        MUL_CLASSIC_STEP(184, carry, high, src_1, pos)
+        MUL_CLASSIC_STEP(192, high, carry, src_1, pos)
+        MUL_CLASSIC_STEP(200, carry, high, src_1, pos)
+        MUL_CLASSIC_STEP(208, high, carry, src_1, pos)
+        MUL_CLASSIC_STEP(216, carry, high, src_1, pos)
+        MUL_CLASSIC_STEP(224, high, carry, src_1, pos)
+        MUL_CLASSIC_STEP(232, carry, high, src_1, pos)
+        MUL_CLASSIC_STEP(240, high, carry, src_1, pos)
+        MUL_CLASSIC_STEP(248, carry, high, src_1, pos)
 
         "adox %[carry], %[zero]                         \n\t" // carry += OF
 
@@ -1274,7 +1274,7 @@ num_p num_mul_classic(num_p num_1, num_p num_2)
 
         "loop_tail_2_tail_begin%=:                      \n\t"
 
-        MUL_CLASSIC_STEP(0, high, carry, src_1)
+        MUL_CLASSIC_STEP(0, high, carry, src_1, pos)
         "mov %[carry], %[high]                          \n\t" // carry = high
         "adox %[carry], %[zero]                         \n\t" // carry += OF
 
@@ -2126,24 +2126,165 @@ static void num_ssm_mul_mod_span(
     uint64_t * restrict src_1 = &num_1->chunk[pos];
     const uint64_t * restrict src_2 = &num_2->chunk[pos];
 
-    if(src_1[n-1] == 1)
+    uint64_t count = n - 1;
+    if(src_1[count] == 1)
     {
         memcpy(src_1, src_2, n);
         num_ssm_opposite(num_1, pos, n);
         return;
     }
 
-    if(src_2[n-1] == 1)
+    if(src_2[count] == 1)
     {
         num_ssm_opposite(num_1, pos, n);
         return;
     }
 
-// #if !defined(NO_ASSEMBLY) && defined(__linux__)
+#if !defined(NO_ASSEMBLY) && defined(__linux__)
 
-// #else
+    uint64_t high, low;
+    uint64_t carry, _pos;
+    uint64_t j;
+    uint64_t i=count;
+    uint64_t zero = 0;
 
-    uint64_t count = n - 1;
+    __asm__ __volatile__ (
+        ".intel_syntax noprefix                         \n\t"
+
+        "mov %[j], %[count]                             \n\t" // j = count
+        "shr %[j], 5                                    \n\t" // j /= 32
+        "mov rdx, [%[src_1]]                            \n\t" // D = *src_1
+        "mov %[carry], 0                                \n\t" // carry = 0
+        "xor %[_pos], %[_pos]                           \n\t" // _pos = 0
+        "test %[j], %[j]                                \n\t"
+
+        "loop_0_begin%=:                                \n\t" // LOOP_0_BEGIN
+
+        MUL_CLASSIC_STEP_ZERO(  0, high, carry, _pos)
+        MUL_CLASSIC_STEP_ZERO(  8, carry, high, _pos)
+        MUL_CLASSIC_STEP_ZERO( 16, high, carry, _pos)
+        MUL_CLASSIC_STEP_ZERO( 24, carry, high, _pos)
+        MUL_CLASSIC_STEP_ZERO( 32, high, carry, _pos)
+        MUL_CLASSIC_STEP_ZERO( 40, carry, high, _pos)
+        MUL_CLASSIC_STEP_ZERO( 48, high, carry, _pos)
+        MUL_CLASSIC_STEP_ZERO( 56, carry, high, _pos)
+        MUL_CLASSIC_STEP_ZERO( 64, high, carry, _pos)
+        MUL_CLASSIC_STEP_ZERO( 72, carry, high, _pos)
+        MUL_CLASSIC_STEP_ZERO( 80, high, carry, _pos)
+        MUL_CLASSIC_STEP_ZERO( 88, carry, high, _pos)
+        MUL_CLASSIC_STEP_ZERO( 96, high, carry, _pos)
+        MUL_CLASSIC_STEP_ZERO(104, carry, high, _pos)
+        MUL_CLASSIC_STEP_ZERO(112, high, carry, _pos)
+        MUL_CLASSIC_STEP_ZERO(120, carry, high, _pos)
+        MUL_CLASSIC_STEP_ZERO(128, high, carry, _pos)
+        MUL_CLASSIC_STEP_ZERO(136, carry, high, _pos)
+        MUL_CLASSIC_STEP_ZERO(144, high, carry, _pos)
+        MUL_CLASSIC_STEP_ZERO(152, carry, high, _pos)
+        MUL_CLASSIC_STEP_ZERO(160, high, carry, _pos)
+        MUL_CLASSIC_STEP_ZERO(168, carry, high, _pos)
+        MUL_CLASSIC_STEP_ZERO(176, high, carry, _pos)
+        MUL_CLASSIC_STEP_ZERO(184, carry, high, _pos)
+        MUL_CLASSIC_STEP_ZERO(192, high, carry, _pos)
+        MUL_CLASSIC_STEP_ZERO(200, carry, high, _pos)
+        MUL_CLASSIC_STEP_ZERO(208, high, carry, _pos)
+        MUL_CLASSIC_STEP_ZERO(216, carry, high, _pos)
+        MUL_CLASSIC_STEP_ZERO(224, high, carry, _pos)
+        MUL_CLASSIC_STEP_ZERO(232, carry, high, _pos)
+        MUL_CLASSIC_STEP_ZERO(240, high, carry, _pos)
+        MUL_CLASSIC_STEP_ZERO(248, carry, high, _pos)
+
+        "lea %[_pos], [%[_pos] + 256]                   \n\t" // _pos += 256
+        "dec %[j]                                       \n\t" // j--
+        "jnz loop_0_begin%=                             \n\t"
+
+        "adcx %[carry], %[zero]                         \n\t" // carry += CF
+        "mov [%[dest] + %[_pos]], %[carry]              \n\t" // *(dest + _pos) = carry
+
+        "lea %[src_1], [%[src_1] + 8]                   \n\t" // src_1 += 8
+        "lea %[dest], [%[dest] + 8]                     \n\t" // dest += 8
+        "dec %[i]                                       \n\t" // i--
+
+        "loop_1_begin%=:                                \n\t"
+
+        "mov %[j], %[count]                             \n\t" // j = count
+        "mov rdx, [%[src_1]]                            \n\t" // D = *src_1
+        "shr %[j], 5                                    \n\t" // j /= 32
+        "mov %[carry], 0                                \n\t" // carry = 0
+        "xor %[_pos], %[_pos]                           \n\t" // _pos = 0
+
+        "loop_2_begin%=:                                \n\t"
+
+        MUL_CLASSIC_STEP(  0, high, carry, src_2, _pos)
+        MUL_CLASSIC_STEP(  8, carry, high, src_2, _pos)
+        MUL_CLASSIC_STEP( 16, high, carry, src_2, _pos)
+        MUL_CLASSIC_STEP( 24, carry, high, src_2, _pos)
+        MUL_CLASSIC_STEP( 32, high, carry, src_2, _pos)
+        MUL_CLASSIC_STEP( 40, carry, high, src_2, _pos)
+        MUL_CLASSIC_STEP( 48, high, carry, src_2, _pos)
+        MUL_CLASSIC_STEP( 56, carry, high, src_2, _pos)
+        MUL_CLASSIC_STEP( 64, high, carry, src_2, _pos)
+        MUL_CLASSIC_STEP( 72, carry, high, src_2, _pos)
+        MUL_CLASSIC_STEP( 80, high, carry, src_2, _pos)
+        MUL_CLASSIC_STEP( 88, carry, high, src_2, _pos)
+        MUL_CLASSIC_STEP( 96, high, carry, src_2, _pos)
+        MUL_CLASSIC_STEP(104, carry, high, src_2, _pos)
+        MUL_CLASSIC_STEP(112, high, carry, src_2, _pos)
+        MUL_CLASSIC_STEP(120, carry, high, src_2, _pos)
+        MUL_CLASSIC_STEP(128, high, carry, src_2, _pos)
+        MUL_CLASSIC_STEP(136, carry, high, src_2, _pos)
+        MUL_CLASSIC_STEP(144, high, carry, src_2, _pos)
+        MUL_CLASSIC_STEP(152, carry, high, src_2, _pos)
+        MUL_CLASSIC_STEP(160, high, carry, src_2, _pos)
+        MUL_CLASSIC_STEP(168, carry, high, src_2, _pos)
+        MUL_CLASSIC_STEP(176, high, carry, src_2, _pos)
+        MUL_CLASSIC_STEP(184, carry, high, src_2, _pos)
+        MUL_CLASSIC_STEP(192, high, carry, src_2, _pos)
+        MUL_CLASSIC_STEP(200, carry, high, src_2, _pos)
+        MUL_CLASSIC_STEP(208, high, carry, src_2, _pos)
+        MUL_CLASSIC_STEP(216, carry, high, src_2, _pos)
+        MUL_CLASSIC_STEP(224, high, carry, src_2, _pos)
+        MUL_CLASSIC_STEP(232, carry, high, src_2, _pos)
+        MUL_CLASSIC_STEP(240, high, carry, src_2, _pos)
+        MUL_CLASSIC_STEP(248, carry, high, src_2, _pos)
+
+        "adox %[carry], %[zero]                         \n\t" // carry += OF
+
+        "lea %[_pos], [%[_pos] + 256]                   \n\t" // _pos += 256
+        "dec %[j]                                       \n\t" // j--
+        "jnz loop_2_begin%=                             \n\t"
+
+        "adcx %[carry], %[zero]                         \n\t" // carry += CF
+        "mov [%[dest] + %[_pos]], %[carry]              \n\t" // *(dest + _pos) = carry
+
+        "lea %[src_1], [%[src_1] + 8]                   \n\t" // src_1 += 8
+        "lea %[dest], [%[dest] + 8]                     \n\t" // dest += 8
+        "dec %[i]                                       \n\t" // i--
+        "jnz loop_1_begin%=                             \n\t"
+
+        ".att_syntax prefix                             \n\t"
+        // out
+        :   [high] "=&r" (high),
+            [low] "=&r" (low),
+            [carry] "=&r" (carry),
+            [_pos] "=&r" (_pos),
+            [j] "=&r" (j),
+            [i] "+&r" (i),
+            [src_1] "+&r" (src_1),
+            [src_2] "+&r" (src_2),
+            [dest] "+&r" (dest)
+        // in
+        :   [zero] "r" (zero),
+            [count] "r" (count)
+        // clobber
+        :   "cc",
+            "memory",
+            "rdx"
+    );
+
+    dest = &num_aux->chunk[0];
+
+#else
+
     uint128_t carry = 0;
     uint64_t v1 = src_1[0];
     #pragma GCC unroll 32
@@ -2169,7 +2310,7 @@ static void num_ssm_mul_mod_span(
         dest[i + count] = LOW(carry);
     }
 
-// #endif
+#endif
 
     memmove(&dest[n], &dest[n-1], n * sizeof(uint64_t));
     dest[   n -1] = 0;
