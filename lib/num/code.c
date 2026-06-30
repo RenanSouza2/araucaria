@@ -2015,13 +2015,15 @@ STATIC void num_ssm_fft_inv(num_p num_aux, num_p num, ssm_params_p p)
 
 #define TRESHOLD 129
 
-static bool ssm_is_recursive(uint64_t n)
+// static bool ssm_is_recursive(uint64_t n) REVERT BEFORE PR
+bool ssm_is_recursive(uint64_t n)
 {
     return (bool)((n > TRESHOLD) && (((n - 1) & (1 - n)) > 4));
 }
 
 // NOLINTBEGIN(readability-magic-numbers)
-STATIC ssm_params_t ssm_get_params(uint64_t count)
+// STATIC ssm_params_t ssm_get_params(uint64_t count) REVERT BEFORE PR
+ssm_params_t ssm_get_params(uint64_t count)
 {
     uint64_t M = B(stdc_bit_width(count) / 2);
     uint64_t K = 4 * stdc_bit_ceil((count + M - 1) / M);
@@ -2043,19 +2045,13 @@ STATIC ssm_params_t ssm_get_params(uint64_t count)
     assert(64 * (n - 1) % K == 0);
     assert(n > 2 * M);
 
-    if(n > TRESHOLD)
+    uint64_t moduli = (n - 1) & 31;
+    if(moduli)
     {
-        uint64_t moduli = (n - 1) & 7;
-        if(moduli)
-        {
-            n += 8 - moduli;
-
-            assert(64 * (n - 1) % K == 0);
-            Q = 64 * (n - 1) / K;
-        }
+        n += 32 - moduli;
+        Q = 64 * (n - 1) / K;
     }
     assert(64 * (n - 1) % K == 0);
-    assert(n > 2 * M);
 
     return (ssm_params_t)
     {
@@ -2089,19 +2085,15 @@ STATIC ssm_params_t ssm_get_params_wrap(uint64_t n)
         Q = (128 * M / K) + 1;
         _n = (K * Q / 64) + 1;
     }
+    assert(64 * (_n - 1) % K == 0);
 
-    if(_n > TRESHOLD)
+    uint64_t moduli = (_n - 1) & 31;
+    if(moduli)
     {
-        uint64_t moduli = (_n - 1) & 7;
-        if(moduli)
-        {
-            _n += 8 - moduli;
-
-            assert(64 * (_n - 1) % K == 0);
-            Q = 64 * (_n - 1) / K;
-        }
+        _n += 32 - moduli;
+        Q = 64 * (_n - 1) / K;
     }
-
+    assert(64 * (_n - 1) % K == 0);
     assert(n == (M * K) + 1);
 
     return (ssm_params_t)
@@ -2114,112 +2106,6 @@ STATIC ssm_params_t ssm_get_params_wrap(uint64_t n)
     };
 }
 // NOLINTEND(readability-magic-numbers)
-
-#ifdef __linux__
-
-static uint64_t num_ssm_add_mul_uint(
-    uint64_t *dest, // NOLINT(readability-non-const-parameter)
-    const uint64_t *src,
-    uint64_t n,
-    uint64_t v2
-)
-{
-    uint64_t carry = 0;
-    __asm__ volatile (
-        "test %[n], %[n]\n\t"          // Check if n == 0
-        "jz 2f\n"                      // If zero, jump forward to label 2
-        "1:\n\t"                       // Loop start
-        "mov (%[src]), %%rax\n\t"      // rax = *src
-        "mul %[v2]\n\t"                // rdx:rax = rax * v2
-
-        "add %[carry], %%rax\n\t"      // rax += carry
-        "adc $0, %%rdx\n\t"            // rdx += overflow from previous addition
-
-        "add %%rax, (%[dest])\n\t"     // *dest += rax
-        "adc $0, %%rdx\n\t"            // rdx += overflow from destination addition
-
-        "mov %%rdx, %[carry]\n\t"      // carry = rdx
-
-        "add $8, %[src]\n\t"           // src pointer++ (8 bytes for uint64_t)
-        "add $8, %[dest]\n\t"          // dest pointer++
-        "dec %[n]\n\t"                 // n--
-        "jnz 1b\n"                     // If n != 0, jump backward to label 1
-        "2:\n\t"                       // End
-
-        // --- Output Operands ---
-        // "+&r" means read/write, and early-clobber (modified before inputs are consumed)
-        : [carry] "+&r" (carry),
-          [src] "+&r" (src),
-          [dest] "+&r" (dest),
-          [n] "+&r" (n)
-
-        // --- Input Operands ---
-        // "r" means put this in any available general-purpose register
-        : [v2] "r" (v2)
-
-        // --- Clobbers ---
-        // Tell the compiler we destroy rax, rdx, CPU flags (cc), and memory
-        : "rax", "rdx", "cc", "memory"
-    );
-
-    return carry;
-}
-
-#elifdef __APPLE__
-
-static uint64_t num_ssm_add_mul_uint(
-    uint64_t *dest, // NOLINT(readability-non-const-parameter)
-    const uint64_t *src,
-    uint64_t n,
-    uint64_t v2
-)
-{
-    uint64_t carry = 0;
-    uint64_t low, high, src_val, dest_val;
-
-    __asm__ volatile (
-        "cbz %[n], 2f\n\t"                   // If n == 0, jump to label 2
-        "1:\n\t"
-        "ldr %[src_val], [%[src]], #8\n\t"   // src_val = *src, then src += 8
-
-        // 128-bit multiplication (ARM64 separates low and high halves)
-        "mul %[low], %[src_val], %[v2]\n\t"  // low = (src_val * v2) [bottom 64 bits]
-        "umulh %[high], %[src_val], %[v2]\n\t"// high = (src_val * v2) [top 64 bits]
-
-        // Add previous carry
-        "adds %[low], %[low], %[carry]\n\t"  // low += carry (updates CF)
-        "adc %[high], %[high], xzr\n\t"      // high += CF (using zero register xzr)
-
-        // Add to destination
-        "ldr %[dest_val], [%[dest]]\n\t"     // dest_val = *dest (no post-increment yet)
-        "adds %[low], %[low], %[dest_val]\n\t"// low += dest_val (updates CF)
-        "str %[low], [%[dest]], #8\n\t"      // *dest = low, then dest += 8
-
-        // Calculate new carry
-        "adc %[carry], %[high], xzr\n\t"     // carry = high + CF
-
-        // Loop mechanics
-        "sub %[n], %[n], #1\n\t"             // n--
-        "cbnz %[n], 1b\n\t"                  // Loop if n != 0
-        "2:\n\t"
-
-        // --- Output Operands ---
-        : [carry] "+&r" (carry),
-          [src] "+&r" (src),
-          [dest] "+&r" (dest),
-          [n] "+&r" (n),
-          [low] "=&r" (low),
-          [high] "=&r" (high),
-          [src_val] "=&r" (src_val),
-          [dest_val] "=&r" (dest_val)
-        : [v2] "r" (v2)
-        : "cc", "memory"
-    );
-
-    return carry;
-}
-
-#endif
 
 // num_aux->size >= 2 * n
 static void num_ssm_mul_mod_span(
@@ -2237,42 +2123,63 @@ static void num_ssm_mul_mod_span(
     assert(num_aux->size >= 2 * n)
 
     uint64_t * restrict dest = num_aux->chunk;
-    const uint64_t * restrict src1 = &num_1->chunk[pos];
-    const uint64_t * restrict src2 = &num_2->chunk[pos];
+    uint64_t * restrict src_1 = &num_1->chunk[pos];
+    const uint64_t * restrict src_2 = &num_2->chunk[pos];
 
-    memset(dest, 0, 2 * n * sizeof(uint64_t));
-    for(uint64_t i = 0; i < n; i++)
+    if(src_1[n-1] == 1)
     {
-        uint64_t v2 = src2[i];
-#if defined(__linux__) || defined(__APPLE__)
-
-        dest[i + n] = num_ssm_add_mul_uint(&dest[i], src1, n, v2);
-
-#else
-
-        uint64_t carry = 0;
-        for(uint64_t j = 0; j < n; j++)
-        {
-            uint64_t dest_idx = i + j;
-            uint128_t u = MUL(src1[j], v2);
-
-            uint64_t sum;
-            uint64_t c1 = (uint64_t)__builtin_add_overflow(LOW(u), dest[dest_idx], &sum);
-            uint64_t c2 = (uint64_t)__builtin_add_overflow(sum, carry, &dest[dest_idx]);
-
-            carry = HIGH(u) + c1 + c2;
-        }
-        dest[i + n] = carry;
-
-#endif
+        memcpy(src_1, src_2, n);
+        num_ssm_opposite(num_1, pos, n);
+        return;
     }
 
+    if(src_2[n-1] == 1)
+    {
+        num_ssm_opposite(num_1, pos, n);
+        return;
+    }
+
+// #if !defined(NO_ASSEMBLY) && defined(__linux__)
+
+// #else
+
+    uint64_t count = n - 1;
+    uint128_t carry = 0;
+    uint64_t v1 = src_1[0];
+    #pragma GCC unroll 32
+    for(uint64_t j = 0; j < count; j++)
+    {
+        carry += MUL(v1, src_2[j]);
+        dest[j] = LOW(carry);
+        carry = HIGH(carry);
+    }
+    dest[count] = LOW(carry);
+
+    for(uint64_t i = 1; i < count; i++)
+    {
+        v1 = src_1[i];
+        carry = 0;
+        #pragma GCC unroll 32
+        for(uint64_t j = 0; j < count; j++)
+        {
+            carry += dest[i + j] + MUL(v1, src_2[j]);
+            dest[i + j] = LOW(carry);
+            carry = HIGH(carry);
+        }
+        dest[i + count] = LOW(carry);
+    }
+
+// #endif
+
     memmove(&dest[n], &dest[n-1], n * sizeof(uint64_t));
-    dest[n-1] = 0;
+    dest[   n -1] = 0;
+    dest[(2*n)-1] = 0;
 
     // NOLINTNEXTLINE(readability-suspicious-call-argument)
     num_ssm_sub_mod(num_1, pos, num_aux, 0, num_aux, n, n);
 }
+
+// time_assembly_benchmark | time mul: 18.136
 
 
 
@@ -2366,7 +2273,6 @@ STATIC void num_ssm_depad_wrap(
             num_ssm_sub_mod_immed(num_aux_1, 0, num_aux_2, 0, n);
         }
 
-        // 3. Recombination
         if(is_add)
         {
             num_ssm_add_mod_immed(num_res, pos, num_aux_1, 0, n);
@@ -2922,7 +2828,7 @@ uint64_t num_div_normalize(num_p *num_1, num_p *num_2) // TODO TEST
 
     uint64_t bits = chunk_bits - stdc_bit_width((*num_2)->chunk[(*num_2)->count-1]);
     (*num_1) = num_expand_to((*num_1), (*num_1)->count + 1);
-    (*num_2) = num_expand_to((*num_2), (*num_2)->count + 1);
+    // (*num_2) = num_expand_to((*num_2), (*num_2)->count + 1);
     num_shl_core(*num_1, bits);
     num_shl_core(*num_2, bits);
     return bits;

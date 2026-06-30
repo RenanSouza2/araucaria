@@ -791,8 +791,19 @@ int main()
     // flt_num_pi_2(1000);
     // flt_num_pi_3(1000);
     // mem_1(21);
-    // time_assembly_benchmark();
-    time_mul_classic_benchmark();
+    time_assembly_benchmark();
+    // time_mul_classic_benchmark();
+
+    // for(uint64_t n=1024; n<4096; n++)
+    // {
+    //     ssm_params_t t = ssm_get_params(n);
+    //     printf("\n%lu: %lu", n, t.n);
+    //     while(ssm_is_recursive(t.n))
+    //     {
+    //         t = ssm_get_params(t.n);
+    //         printf(", %lu", t.n);
+    //     }
+    // }
 
     printf("\n");
     return 0;
