@@ -2320,7 +2320,9 @@ static void num_ssm_mul_mod_span(
     num_ssm_sub_mod(num_1, pos, num_aux, 0, num_aux, n, n);
 }
 
-// time_assembly_benchmark | time mul: 18.136
+// time_assembly_benchmark | time mul: 18.136 | original c
+// time_assembly_benchmark | time mul: 13.173 | unrolled c
+// time_assembly_benchmark | time mul: 12.394 | unrolled assembly | only mul
 
 
 
