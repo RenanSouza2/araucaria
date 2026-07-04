@@ -2045,10 +2045,10 @@ ssm_params_t ssm_get_params(uint64_t count)
     assert(64 * (n - 1) % K == 0);
     assert(n > 2 * M);
 
-    uint64_t moduli = (n - 1) & 31;
+    uint64_t moduli = (n - 1) & 7;
     if(moduli)
     {
-        n += 32 - moduli;
+        n += 8 - moduli;
         Q = 64 * (n - 1) / K;
     }
     assert(64 * (n - 1) % K == 0);
@@ -2087,10 +2087,10 @@ STATIC ssm_params_t ssm_get_params_wrap(uint64_t n)
     }
     assert(64 * (_n - 1) % K == 0);
 
-    uint64_t moduli = (_n - 1) & 31;
+    uint64_t moduli = (_n - 1) & 7;
     if(moduli)
     {
-        _n += 32 - moduli;
+        _n += 8 - moduli;
         Q = 64 * (_n - 1) / K;
     }
     assert(64 * (_n - 1) % K == 0);
@@ -2129,7 +2129,7 @@ static void num_ssm_mul_mod_span(
     uint64_t count = n - 1;
     if(src_1[count] == 1)
     {
-        memcpy(src_1, src_2, n);
+        memcpy(src_1, src_2, n * sizeof(uint64_t));
         num_ssm_opposite(num_1, pos, n);
         return;
     }
@@ -2152,7 +2152,7 @@ static void num_ssm_mul_mod_span(
         ".intel_syntax noprefix                         \n\t"
 
         "mov %[j], %[count]                             \n\t" // j = count
-        "shr %[j], 5                                    \n\t" // j /= 32
+        "shr %[j], 3                                    \n\t" // j /= 8
         "mov rdx, [%[src_1]]                            \n\t" // D = *src_1
         "mov %[carry], 0                                \n\t" // carry = 0
         "xor %[_pos], %[_pos]                           \n\t" // _pos = 0
@@ -2168,32 +2168,8 @@ static void num_ssm_mul_mod_span(
         MUL_CLASSIC_STEP_ZERO( 40, carry, high, _pos)
         MUL_CLASSIC_STEP_ZERO( 48, high, carry, _pos)
         MUL_CLASSIC_STEP_ZERO( 56, carry, high, _pos)
-        MUL_CLASSIC_STEP_ZERO( 64, high, carry, _pos)
-        MUL_CLASSIC_STEP_ZERO( 72, carry, high, _pos)
-        MUL_CLASSIC_STEP_ZERO( 80, high, carry, _pos)
-        MUL_CLASSIC_STEP_ZERO( 88, carry, high, _pos)
-        MUL_CLASSIC_STEP_ZERO( 96, high, carry, _pos)
-        MUL_CLASSIC_STEP_ZERO(104, carry, high, _pos)
-        MUL_CLASSIC_STEP_ZERO(112, high, carry, _pos)
-        MUL_CLASSIC_STEP_ZERO(120, carry, high, _pos)
-        MUL_CLASSIC_STEP_ZERO(128, high, carry, _pos)
-        MUL_CLASSIC_STEP_ZERO(136, carry, high, _pos)
-        MUL_CLASSIC_STEP_ZERO(144, high, carry, _pos)
-        MUL_CLASSIC_STEP_ZERO(152, carry, high, _pos)
-        MUL_CLASSIC_STEP_ZERO(160, high, carry, _pos)
-        MUL_CLASSIC_STEP_ZERO(168, carry, high, _pos)
-        MUL_CLASSIC_STEP_ZERO(176, high, carry, _pos)
-        MUL_CLASSIC_STEP_ZERO(184, carry, high, _pos)
-        MUL_CLASSIC_STEP_ZERO(192, high, carry, _pos)
-        MUL_CLASSIC_STEP_ZERO(200, carry, high, _pos)
-        MUL_CLASSIC_STEP_ZERO(208, high, carry, _pos)
-        MUL_CLASSIC_STEP_ZERO(216, carry, high, _pos)
-        MUL_CLASSIC_STEP_ZERO(224, high, carry, _pos)
-        MUL_CLASSIC_STEP_ZERO(232, carry, high, _pos)
-        MUL_CLASSIC_STEP_ZERO(240, high, carry, _pos)
-        MUL_CLASSIC_STEP_ZERO(248, carry, high, _pos)
 
-        "lea %[_pos], [%[_pos] + 256]                   \n\t" // _pos += 256
+        "lea %[_pos], [%[_pos] + 64]                    \n\t" // _pos += 64
         "dec %[j]                                       \n\t" // j--
         "jnz loop_0_begin%=                             \n\t"
 
@@ -2208,7 +2184,7 @@ static void num_ssm_mul_mod_span(
 
         "mov %[j], %[count]                             \n\t" // j = count
         "mov rdx, [%[src_1]]                            \n\t" // D = *src_1
-        "shr %[j], 5                                    \n\t" // j /= 32
+        "shr %[j], 3                                    \n\t" // j /= 8
         "mov %[carry], 0                                \n\t" // carry = 0
         "xor %[_pos], %[_pos]                           \n\t" // _pos = 0
 
@@ -2222,34 +2198,10 @@ static void num_ssm_mul_mod_span(
         MUL_CLASSIC_STEP( 40, carry, high, src_2, _pos)
         MUL_CLASSIC_STEP( 48, high, carry, src_2, _pos)
         MUL_CLASSIC_STEP( 56, carry, high, src_2, _pos)
-        MUL_CLASSIC_STEP( 64, high, carry, src_2, _pos)
-        MUL_CLASSIC_STEP( 72, carry, high, src_2, _pos)
-        MUL_CLASSIC_STEP( 80, high, carry, src_2, _pos)
-        MUL_CLASSIC_STEP( 88, carry, high, src_2, _pos)
-        MUL_CLASSIC_STEP( 96, high, carry, src_2, _pos)
-        MUL_CLASSIC_STEP(104, carry, high, src_2, _pos)
-        MUL_CLASSIC_STEP(112, high, carry, src_2, _pos)
-        MUL_CLASSIC_STEP(120, carry, high, src_2, _pos)
-        MUL_CLASSIC_STEP(128, high, carry, src_2, _pos)
-        MUL_CLASSIC_STEP(136, carry, high, src_2, _pos)
-        MUL_CLASSIC_STEP(144, high, carry, src_2, _pos)
-        MUL_CLASSIC_STEP(152, carry, high, src_2, _pos)
-        MUL_CLASSIC_STEP(160, high, carry, src_2, _pos)
-        MUL_CLASSIC_STEP(168, carry, high, src_2, _pos)
-        MUL_CLASSIC_STEP(176, high, carry, src_2, _pos)
-        MUL_CLASSIC_STEP(184, carry, high, src_2, _pos)
-        MUL_CLASSIC_STEP(192, high, carry, src_2, _pos)
-        MUL_CLASSIC_STEP(200, carry, high, src_2, _pos)
-        MUL_CLASSIC_STEP(208, high, carry, src_2, _pos)
-        MUL_CLASSIC_STEP(216, carry, high, src_2, _pos)
-        MUL_CLASSIC_STEP(224, high, carry, src_2, _pos)
-        MUL_CLASSIC_STEP(232, carry, high, src_2, _pos)
-        MUL_CLASSIC_STEP(240, high, carry, src_2, _pos)
-        MUL_CLASSIC_STEP(248, carry, high, src_2, _pos)
 
         "adox %[carry], %[zero]                         \n\t" // carry += OF
 
-        "lea %[_pos], [%[_pos] + 256]                   \n\t" // _pos += 256
+        "lea %[_pos], [%[_pos] + 64]                    \n\t" // _pos += 64
         "dec %[j]                                       \n\t" // j--
         "jnz loop_2_begin%=                             \n\t"
 
@@ -2322,8 +2274,8 @@ static void num_ssm_mul_mod_span(
 
 // time_assembly_benchmark | time mul: 18.136 | original c
 // time_assembly_benchmark | time mul: 13.173 | unrolled c
-// time_assembly_benchmark | time mul: 12.394 | unrolled assembly | only mul
-
+// time_assembly_benchmark | time mul: 12.394 | unrolled assembly 32 | only mul
+// time_assembly_benchmark | time mul: 11.376 | unrolled assembly 8  | only mul
 
 
 STATIC void num_ssm_pad_wrap(num_p num_fft, num_p num, uint64_t pos, ssm_params_p p)
