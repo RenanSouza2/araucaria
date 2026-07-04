@@ -1520,6 +1520,11 @@ static void num_ssm_denormalize(num_p num, uint64_t pos, uint64_t n)
     num->chunk[pos + n - 1] += 1;
 }
 
+#define ADD_CLASSIC_STEP(OFF)                                                                     \
+    "mov %[reg_1], [%[src2] + %[pos] + " #OFF "]    \n\t" /* reg_1  = *(src2 + pos + OFF)       */\
+    "adcx %[reg_1], [%[dest] + %[pos] + " #OFF "]   \n\t" /* reg_1 += *(dest + pos + OFF) + CF  */\
+    "mov [%[dest] + %[pos] + " #OFF "], %[reg_1]    \n\t" /* *(dest + pos + OFF) = reg_1        */\
+
 STATIC void num_ssm_add_mod_immed(
     num_p num_1, uint64_t pos_1,
     num_p num_2, uint64_t pos_2,
@@ -1535,23 +1540,44 @@ STATIC void num_ssm_add_mod_immed(
 
 #ifdef __linux__
 
-    uint64_t count = n;
-    __asm__ volatile (
-        "test %[count], %[count]\n\t"
-        "jz 2f\n\t"
-        "clc\n"
-        "1:\n\t"
-        "mov (%[src2]), %%rax\n\t"
-        "adc %%rax, (%[dest])\n\t"        // *dest = *dest + rax + CF
+    uint64_t pos, j, reg_1;
 
-        "lea 8(%[src2]), %[src2]\n\t"
-        "lea 8(%[dest]), %[dest]\n\t"
-        "dec %[count]\n\t"
-        "jnz 1b\n\t"
-        "2:\n"
-        : [dest] "+r" (dest), [src2] "+r" (src2), [count] "+r" (count)
-        :
-        : "rax", "cc", "memory"
+    __asm__ __volatile__ (
+        ".intel_syntax noprefix                         \n\t"
+
+        "mov %[j], %[n]                                 \n\t" // j = n
+        "shr %[j], 3                                    \n\t" // j /= 8
+        "xor %[pos], %[pos]                             \n\t" // pos = 0 (and inherently clears CF)
+
+        "loop_add_begin%=:                              \n\t" // LOOP_ADD_BEGIN
+
+        ADD_CLASSIC_STEP(  0)
+        ADD_CLASSIC_STEP(  8)
+        ADD_CLASSIC_STEP( 16)
+        ADD_CLASSIC_STEP( 24)
+        ADD_CLASSIC_STEP( 32)
+        ADD_CLASSIC_STEP( 40)
+        ADD_CLASSIC_STEP( 48)
+        ADD_CLASSIC_STEP( 56)
+
+        "lea %[pos], [%[pos] + 64]                      \n\t" // pos += 64 (lea does not modify CF)
+        "dec %[j]                                       \n\t" // j-- (dec does not modify CF)
+        "jnz loop_add_begin%=                           \n\t"
+
+        ADD_CLASSIC_STEP(0)
+
+        ".att_syntax prefix                             \n\t"
+        // out
+        :   [pos] "=&r" (pos),
+            [j] "=&r" (j),
+            [reg_1] "=&r" (reg_1)
+        // in
+        :   [dest] "r" (dest),
+            [src2] "r" (src2),
+            [n] "r" (n)
+        // clobber
+        :   "cc",
+            "memory"
     );
 
 #elifdef __APPLE__
