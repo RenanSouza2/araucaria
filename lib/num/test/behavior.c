@@ -996,28 +996,86 @@ static void test_num_ssm_add_mod(bool show)
     }
 
     TEST_SSM_ADD_MOD(1,
-        (6, 0, 0, 1, 0, 0, 2), 3,
-        (6, 0, 0, 1, 0, 0, 3)
+        (18,
+            0, 0, 0, 0, 0, 0, 0, 0, 1,
+            0, 0, 0, 0, 0, 0, 0, 0, 2
+        ),
+        9,
+        (18,
+            0, 0, 0, 0, 0, 0, 0, 0, 1,
+            0, 0, 0, 0, 0, 0, 0, 0, 3
+        )
     )
     TEST_SSM_ADD_MOD(2,
-        (6, 0, B(63), 0, 0, B(63), 0), 3,
-        (6, 0, B(63), 0, 1, 0, 0)
+        (18,
+            0, B(63), 0, 0, 0, 0, 0, 0, 0,
+            0, B(63), 0, 0, 0, 0, 0, 0, 0
+        ),
+        9,
+        (18,
+            0, B(63), 0, 0, 0, 0, 0, 0, 0,
+            1,     0, 0, 0, 0, 0, 0, 0, 0
+        )
     )
     TEST_SSM_ADD_MOD(3,
-        (6, 1, 0, 0, 0, 0, 1), 3,
-        (6, 1, 0, 0, 0, 0, 0)
+        (18,
+            1, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 1
+        ),
+        9,
+        (18,
+            1, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0
+        )
     )
     TEST_SSM_ADD_MOD(4,
-        (6, 1, 0, 0, 1, 0, 0), 3,
-        (6, 1, 0, 0, 0, UINT64_MAX, UINT64_MAX)
+        (18,
+            1, 0, 0, 0, 0, 0, 0, 0, 0,
+            1, 0, 0, 0, 0, 0, 0, 0, 0
+        ),
+        9,
+        (18,
+            1, 0, 0, 0, 0, 0, 0, 0, 0,
+            0,
+            UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX,
+            UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX
+        )
     )
     TEST_SSM_ADD_MOD(5,
-        (6, 0, UINT64_MAX, UINT64_MAX, 1, 0, 0), 3,
-        (6, 0, UINT64_MAX, UINT64_MAX, 0, UINT64_MAX, UINT64_MAX - 1)
+        (18,
+            0,
+            UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX,
+            UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX,
+            1, 0, 0, 0, 0, 0, 0, 0, 0
+        ),
+        9,
+        (18,
+            0,
+            UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX,
+            UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX,
+            0,
+            UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX,
+            UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX - 1
+        )
     )
     TEST_SSM_ADD_MOD(6,
-        (6, 0, UINT64_MAX, UINT64_MAX, 0, UINT64_MAX, UINT64_MAX), 3,
-        (6, 0, UINT64_MAX, UINT64_MAX, 0, UINT64_MAX, UINT64_MAX - 2)
+        (18,
+            0,
+            UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX,
+            UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX,
+            0,
+            UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX,
+            UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX
+        ),
+        9,
+        (18,
+            0,
+            UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX,
+            UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX,
+            0,
+            UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX,
+            UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX - 2
+        )
     )
 
     #undef TEST_SSM_ADD_MOD

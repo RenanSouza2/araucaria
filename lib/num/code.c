@@ -1540,12 +1540,13 @@ STATIC void num_ssm_add_mod_immed(
 
 #ifdef __linux__
 
-    uint64_t pos, j, reg_1;
+    uint64_t reg_1;
+    uint64_t j = n;
+    uint64_t pos = 0;
 
     __asm__ __volatile__ (
         ".intel_syntax noprefix                         \n\t"
 
-        "mov %[j], %[n]                                 \n\t" // j = n
         "shr %[j], 3                                    \n\t" // j /= 8
         "xor %[pos], %[pos]                             \n\t" // pos = 0 (and inherently clears CF)
 
@@ -1568,13 +1569,12 @@ STATIC void num_ssm_add_mod_immed(
 
         ".att_syntax prefix                             \n\t"
         // out
-        :   [pos] "=&r" (pos),
-            [j] "=&r" (j),
+        :   [pos] "+&r" (pos),
+            [j] "+&r" (j),
             [reg_1] "=&r" (reg_1)
         // in
         :   [dest] "r" (dest),
-            [src2] "r" (src2),
-            [n] "r" (n)
+            [src2] "r" (src2)
         // clobber
         :   "cc",
             "memory"
