@@ -16,7 +16,7 @@ static char buffer[256];
 [[maybe_unused]]
 static char* format_buffer(const char* func)
 {
-    snprintf(buffer, 256, "%s %s", func, NAME);
+    snprintf(buffer, 256, "%s %s", NAME, func);
     return buffer;
 }
 
@@ -2845,6 +2845,7 @@ static void test_fuzz_num_ssm_fft(bool show)
                 .Q = Q,                                                 \
                 .n = (Nv),                                              \
             };                                                          \
+            assert(p.M % 8 == 0);   \
             num_p num_fft = num_ssm_pad_no_wrap(num, &p);               \
             num_free(num);                                              \
             num_fft->count = (Nv) * (Kv);                               \
@@ -2868,11 +2869,13 @@ static void test_fuzz_num_ssm_fft(bool show)
         TEST_FUZZ_CASE_CLOSE                                            \
     }
 
-    TEST_FUZZ_NUM_SSM_FFT(1, 2, 4, 100)
-    TEST_FUZZ_NUM_SSM_FFT(2, 2, 8, 100)
-    TEST_FUZZ_NUM_SSM_FFT(3, 2, 16, 100)
-    TEST_FUZZ_NUM_SSM_FFT(4, 3, 16, 100)
-    TEST_FUZZ_NUM_SSM_FFT(5, 10, 128, 100)
+    TEST_FUZZ_NUM_SSM_FFT(1, 9, 4, 100)
+    TEST_FUZZ_NUM_SSM_FFT(2, 9, 8, 100)
+    TEST_FUZZ_NUM_SSM_FFT(3, 9, 16, 100)
+    TEST_FUZZ_NUM_SSM_FFT(4, 17, 16, 100)
+    TEST_FUZZ_NUM_SSM_FFT(5, 25, 128, 100)
+
+    #undef TEST_FUZZ_NUM_SSM_FFT
 
     TEST_FN_CLOSE
 }
