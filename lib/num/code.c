@@ -1933,7 +1933,7 @@ STATIC void num_ssm_shr_mod(
 // num_aux->size >= 2 * n
 static void num_ssm_fft_fwd_rec(
     num_p num_aux,
-    num_p num,
+    num_p num_fft,
     uint64_t pos,
     uint64_t step,
     uint64_t n,
@@ -1942,15 +1942,15 @@ static void num_ssm_fft_fwd_rec(
 )
 {
     CLU_HANDLER_IS_SAFE(num_aux)
-    CLU_HANDLER_IS_SAFE(num)
+    CLU_HANDLER_IS_SAFE(num_fft)
     assert(num_aux)
-    assert(num)
+    assert(num_fft)
     assert(num_aux->size >= 2 * n)
 
     if(K > 2)
     {
-        num_ssm_fft_fwd_rec(num_aux, num, pos     , 2*step, n, K/2, 2*bits);
-        num_ssm_fft_fwd_rec(num_aux, num, pos+step, 2*step, n, K/2, 2*bits);
+        num_ssm_fft_fwd_rec(num_aux, num_fft, pos     , 2*step, n, K/2, 2*bits);
+        num_ssm_fft_fwd_rec(num_aux, num_fft, pos+step, 2*step, n, K/2, 2*bits);
     }
 
     for(uint64_t i=0; i<K/2; i++)
@@ -1959,30 +1959,30 @@ static void num_ssm_fft_fwd_rec(
         uint64_t pos_2 = (pos + (step * ((2 * i) + 1))) * n;
 
         uint64_t shift = ssm_bit_inv(i, K / 2) * bits;
-        num_ssm_shl_mod(num_aux, num, pos_2, n, shift);
+        num_ssm_shl_mod(num_aux, num_fft, pos_2, n, shift);
 
-        num_ssm_sub_mod(num_aux, 0, num, pos_1, num, pos_2, n);
-        num_ssm_add_mod_immed(num, pos_1, num, pos_2, n);
-        memcpy(&num->chunk[pos_2], num_aux->chunk, n * sizeof(uint64_t));
+        num_ssm_sub_mod(num_aux, 0, num_fft, pos_1, num_fft, pos_2, n);
+        num_ssm_add_mod_immed(num_fft, pos_1, num_fft, pos_2, n);
+        memcpy(&num_fft->chunk[pos_2], num_aux->chunk, n * sizeof(uint64_t));
     }
 }
 
 // num_aux->size >= 2 * n
-STATIC void num_ssm_fft_fwd(num_p num_aux, num_p num, ssm_params_p p)
+STATIC void num_ssm_fft_fwd(num_p num_aux, num_p num_fft, ssm_params_p p)
 {
     CLU_HANDLER_IS_SAFE(num_aux)
-    CLU_HANDLER_IS_SAFE(num)
+    CLU_HANDLER_IS_SAFE(num_fft)
     assert(num_aux)
-    assert(num)
+    assert(num_fft)
     assert(num_aux->size >= 2 * p->n)
-    assert(num->size >= p->n * p->K)
+    assert(num_fft->size >= p->n * p->K)
 
     for(uint64_t i=0; i<p->K; i++)
     {
-        num_ssm_shl_mod(num_aux, num, p->n * i, p->n, p->Q * i);
+        num_ssm_shl_mod(num_aux, num_fft, p->n * i, p->n, p->Q * i);
     }
 
-    num_ssm_fft_fwd_rec(num_aux, num, 0, 1, p->n, p->K, 2 * p->Q);
+    num_ssm_fft_fwd_rec(num_aux, num_fft, 0, 1, p->n, p->K, 2 * p->Q);
 }
 
 // num_aux->size >= 2 * n
@@ -2003,7 +2003,7 @@ static void num_ssm_fft_inv_rec(
 
     if(k > 2)
     {
-        num_ssm_fft_inv_rec(num_aux, num, pos     , n, k/2, 2*bits);
+        num_ssm_fft_inv_rec(num_aux, num, pos      , n, k/2, 2*bits);
         num_ssm_fft_inv_rec(num_aux, num, pos+(k/2), n, k/2, 2*bits);
     }
 

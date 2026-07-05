@@ -1,6 +1,7 @@
 #include "../debug.h"
 #include "../../../testrc.h"
 #include "../../../mods/macros/test.h"
+#include <stdint.h>
 
 
 
@@ -1560,11 +1561,11 @@ static void test_num_ssm_shr_mod(bool show)
     TEST_FN_CLOSE
 }
 
-static void test_num_ssm_fft(bool show)
+static void test_num_ssm_fft_fwd(bool show)
 {
     TEST_FN_OPEN
 
-    #define TEST_SSM_FFT(TAG, NUM, Nv, Kv, RES)         \
+    #define TEST_NUM_SSM_FFT_FWD(TAG, NUM, Nv, Kv, RES) \
     {                                                   \
         TEST_CASE_OPEN(TAG)                             \
         {                                               \
@@ -1584,32 +1585,86 @@ static void test_num_ssm_fft(bool show)
         TEST_CASE_CLOSE                                 \
     }
 
-    TEST_SSM_FFT(1,
-        (4, 0, 0, 0, 1), 2, 2,
-        (4, 0, 1, 0, 1)
+    TEST_NUM_SSM_FFT_FWD(1,
+        (18,
+            0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 1
+        ),
+        9, 2,
+        (18,
+            0, 0, 0, 0, 0, 0, 0, 0, 1,
+            0, 0, 0, 0, 0, 0, 0, 0, 1
+        )
     )
-    TEST_SSM_FFT(2,
-        (4, 0, 1, 0, 0), 2, 2,
-        (4, 0, 0xffffffff00000001, 0, B(32))
+    TEST_NUM_SSM_FFT_FWD(2,
+        (18,
+            0, 0, 0, 0, 0, 0, 0, 0, 1,
+            0, 0, 0, 0, 0, 0, 0, 0, 0
+        ),
+        9, 2,
+        (18,
+            0, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, 0, 0, 0, 1,
+            0, 0, 0, 0, 1, 0, 0, 0, 0
+        )
     )
-    TEST_SSM_FFT(3,
-        (4, 0, 1, 0, 1), 2, 2,
-        (4, 0, 0xffffffff00000002, 0, 0x100000001)
+    TEST_NUM_SSM_FFT_FWD(3,
+        (18,
+            0, 0, 0, 0, 0, 0, 0, 0, 1,
+            0, 0, 0, 0, 0, 0, 0, 0, 1
+        ),
+        9, 2,
+        (18,
+            0, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, 0, 0, 0, 2,
+            0, 0, 0, 0, 1, 0, 0, 0, 1
+        )
     )
-    TEST_SSM_FFT(4,
-        (8, 0, 0, 0, 0, 0, 0, 0, 1), 2, 4,
-        (8, 0, 1, 0, 1, 0, 1, 0, 1)
+    TEST_NUM_SSM_FFT_FWD(4,
+        (36,
+            0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 1
+        ),
+        9, 4,
+        (36,
+            0, 0, 0, 0, 0, 0, 0, 0, 1,
+            0, 0, 0, 0, 0, 0, 0, 0, 1,
+            0, 0, 0, 0, 0, 0, 0, 0, 1,
+            0, 0, 0, 0, 0, 0, 0, 0, 1
+        )
     )
-    TEST_SSM_FFT(5,
-        (8, 0, 0, 0, 0, 0, 1, 0, 0), 2, 4,
-        (8, 0, 0xffff000000000001, 0, B(48), 0, 0xffffffffffff0001, 0, B(16))
+    TEST_NUM_SSM_FFT_FWD(5,
+        (36,
+            0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 1,
+            0, 0, 0, 0, 0, 0, 0, 0, 0
+        ),
+        9, 4,
+        (36,
+            0, UINT64_MAX, UINT64_MAX, 0, 0, 0, 0, 0, 1,
+            0, 0, 1, 0, 0, 0, 0, 0, 0,
+            0, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, 0, 1,
+            0, 0, 0, 0, 0, 0, 1, 0, 0
+        )
     )
-    TEST_SSM_FFT(6,
-        (8, 0, 0, 0, 1, 0, 0, 0, 0), 2, 4,
-        (8, 0, 0xffffffff00000001, 0, 0xffffffff00000001, 0, B(32), 0, B(32))
+    TEST_NUM_SSM_FFT_FWD(6,
+        (36,
+            0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 1,
+            0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0
+        ),
+        9, 4,
+        (36,
+            0, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, 0, 0, 0, 1,
+            0, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, 0, 0, 0, 1,
+            0, 0, 0, 0, 1, 0, 0, 0, 0,
+            0, 0, 0, 0, 1, 0, 0, 0, 0
+        )
     )
 
-    #undef TEST_SSM_FFT
+    #undef TEST_NUM_SSM_FFT_FWD
 
     TEST_FN_CLOSE
 }
@@ -2990,7 +3045,7 @@ static void test_all(bool show)
     test_num_ssm_shr(show);
     test_num_ssm_shl_mod(show);
     test_num_ssm_shr_mod(show);
-    test_num_ssm_fft(show);
+    test_num_ssm_fft_fwd(show);
     // test_num_ssm_depad_wrap(show);
     // test_num_ssm_mul_wrap(show);
 
