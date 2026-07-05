@@ -1520,10 +1520,10 @@ static void num_ssm_denormalize(num_p num, uint64_t pos, uint64_t n)
     num->chunk[pos + n - 1] += 1;
 }
 
-#define ADD_CLASSIC_STEP(OFF)                                                                     \
-    "mov %[reg_1], [%[src2] + %[pos] + " #OFF "]    \n\t" /* reg_1  = *(src2 + pos + OFF)       */\
-    "adcx %[reg_1], [%[dest] + %[pos] + " #OFF "]   \n\t" /* reg_1 += *(dest + pos + OFF) + CF  */\
-    "mov [%[dest] + %[pos] + " #OFF "], %[reg_1]    \n\t" /* *(dest + pos + OFF) = reg_1        */\
+#define ADD_CLASSIC_STEP(OFF, REG)                                                                     \
+    "mov %[" #REG "], [%[src2] + %[pos] + " #OFF "]    \n\t" /* reg_1  = *(src2 + pos + OFF)       */\
+    "adcx %[" #REG "], [%[dest] + %[pos] + " #OFF "]   \n\t" /* reg_1 += *(dest + pos + OFF) + CF  */\
+    "mov [%[dest] + %[pos] + " #OFF "], %[" #REG "]    \n\t" /* *(dest + pos + OFF) = reg_1        */\
 
 STATIC void num_ssm_add_mod_immed(
     num_p num_1, uint64_t pos_1,
@@ -1540,7 +1540,7 @@ STATIC void num_ssm_add_mod_immed(
 
 #ifdef __linux__
 
-    uint64_t reg_1;
+    uint64_t reg_1, reg_2;
     uint64_t j = n;
     uint64_t pos = 0;
 
@@ -1552,26 +1552,27 @@ STATIC void num_ssm_add_mod_immed(
 
         "loop_add_begin%=:                              \n\t" // LOOP_ADD_BEGIN
 
-        ADD_CLASSIC_STEP(  0)
-        ADD_CLASSIC_STEP(  8)
-        ADD_CLASSIC_STEP( 16)
-        ADD_CLASSIC_STEP( 24)
-        ADD_CLASSIC_STEP( 32)
-        ADD_CLASSIC_STEP( 40)
-        ADD_CLASSIC_STEP( 48)
-        ADD_CLASSIC_STEP( 56)
+        ADD_CLASSIC_STEP(  0, reg_1)
+        ADD_CLASSIC_STEP(  8, reg_2)
+        ADD_CLASSIC_STEP( 16, reg_1)
+        ADD_CLASSIC_STEP( 24, reg_2)
+        ADD_CLASSIC_STEP( 32, reg_1)
+        ADD_CLASSIC_STEP( 40, reg_2)
+        ADD_CLASSIC_STEP( 48, reg_1)
+        ADD_CLASSIC_STEP( 56, reg_2)
 
         "lea %[pos], [%[pos] + 64]                      \n\t" // pos += 64 (lea does not modify CF)
         "dec %[j]                                       \n\t" // j-- (dec does not modify CF)
         "jnz loop_add_begin%=                           \n\t"
 
-        ADD_CLASSIC_STEP(0)
+        ADD_CLASSIC_STEP(0, reg_1)
 
         ".att_syntax prefix                             \n\t"
         // out
         :   [pos] "+&r" (pos),
             [j] "+&r" (j),
-            [reg_1] "=&r" (reg_1)
+            [reg_1] "=&r" (reg_1),
+            [reg_2] "=&r" (reg_2)
         // in
         :   [dest] "r" (dest),
             [src2] "r" (src2)
@@ -2302,6 +2303,7 @@ static void num_ssm_mul_mod_span(
 // time_assembly_benchmark | time mul: 13.173 | unrolled c
 // time_assembly_benchmark | time mul: 12.394 | unrolled assembly 32 | only mul
 // time_assembly_benchmark | time mul: 11.376 | unrolled assembly 8  | only mul
+// time_assembly_benchmark | time mul: 10.837 | ssm add
 
 
 STATIC void num_ssm_pad_wrap(num_p num_fft, num_p num, uint64_t pos, ssm_params_p p)
