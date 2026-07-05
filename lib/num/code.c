@@ -1538,7 +1538,7 @@ STATIC void num_ssm_add_mod_immed(
     uint64_t * restrict dest = &num_1->chunk[pos_1];
     const uint64_t * restrict src2 = &num_2->chunk[pos_2];
 
-#ifdef __linux__
+#if !defined(NO_ASSEMBLY) && defined(__linux__)
 
     uint64_t reg_1, reg_2;
     uint64_t j = n;
@@ -1581,7 +1581,7 @@ STATIC void num_ssm_add_mod_immed(
             "memory"
     );
 
-#elifdef __APPLE__
+#elif !defined(NO_ASSEMBLY) && defined(__APPLE__)
 
     uint64_t count = n;
     uint64_t tmp1, tmp2; // Need two temporaries now
@@ -1608,12 +1608,13 @@ STATIC void num_ssm_add_mod_immed(
 
 #else
 
-    uint64_t carry = 0;
+    uint128_t carry = 0;
+    #pragma GCC unroll 8
     for(uint64_t i = 0; i < n; i++)
     {
-        uint64_t c1 = (uint64_t)__builtin_add_overflow(dest[i], src2[i], &dest[i]);
-        uint64_t c2 = (uint64_t)__builtin_add_overflow(dest[i], carry, &dest[i]);
-        carry = c1 | c2;
+        carry += (uint128_t)dest[i] + src2[i];
+        dest[i] = LOW(carry);
+        carry = HIGH(carry);
     }
 
 #endif
