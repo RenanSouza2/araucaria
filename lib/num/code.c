@@ -1219,7 +1219,7 @@ num_p num_mul_classic(num_p num_1, num_p num_2)
 
         "mov %[i], %[count_2]                           \n\t" // i = count_2
         "and %[i], ~31                                  \n\t" // i = i - i % 32
-        "lea %[src_2], [%[src_2] + 8 * %[i]]            \n\t" // src2 += 8 * i
+        "lea %[src_2], [%[src_2] + 8 * %[i]]            \n\t" // src_2 += 8 * i
         "lea %[dest], [%[dest] + 8 * %[i]]              \n\t" // dest += 8 * i
         "mov %[j], %[count_2]                           \n\t" // j = count_2
         "sub %[j], %[i]                                 \n\t" // j -= i
@@ -1739,7 +1739,7 @@ STATIC void num_ssm_sub_mod(
     for(uint64_t i=0; i<n; i++)
     {
         uint64_t diff;
-        uint64_t b1 = (uint64_t)__builtin_sub_overflow(src_1[i], src2[i], &diff);
+        uint64_t b1 = (uint64_t)__builtin_sub_overflow(src_1[i], src_2[i], &diff);
         uint64_t b2 = (uint64_t)__builtin_sub_overflow(diff, borrow, &dest[i]);
         borrow = b1 | b2;
     }
@@ -1818,7 +1818,7 @@ static void num_ssm_sub_mod_immed(
         "cmp xzr, xzr\n\t"                   // SET the carry flag (C=1 means NO borrow)
 
         "1:\n\t"
-        "ldr %[tmp1], [%[src2]], #8\n\t"     // tmp1 = *src2, then src2 += 8
+        "ldr %[tmp1], [%[src_2]], #8\n\t"    // tmp1 = *src_2, then src_2 += 8
         "ldr %[tmp2], [%[dest]]\n\t"         // tmp2 = *dest (NO post-increment yet)
 
         "sbcs %[tmp2], %[tmp2], %[tmp1]\n\t" // tmp2 = tmp2 - tmp1 - (1 - C), update C
@@ -1828,7 +1828,7 @@ static void num_ssm_sub_mod_immed(
         "sub %[count], %[count], #1\n\t"     // count-- (leaves flags untouched)
         "cbnz %[count], 1b\n\t"              // Loop if count != 0
         "2:\n"
-        : [dest] "+r" (dest), [src2] "+r" (src2), [count] "+r" (count),
+        : [dest] "+r" (dest), [src_2] "+r" (src_2), [count] "+r" (count),
           [tmp1] "=&r" (tmp1), [tmp2] "=&r" (tmp2)
         :
         : "cc", "memory"
@@ -1839,7 +1839,7 @@ static void num_ssm_sub_mod_immed(
     uint64_t borrow = 0;
     for(uint64_t i=0; i<n; i++)
     {
-        uint64_t b1 = (uint64_t)__builtin_sub_overflow(dest[i], src2[i], &dest[i]);
+        uint64_t b1 = (uint64_t)__builtin_sub_overflow(dest[i], src_2[i], &dest[i]);
         uint64_t b2 = (uint64_t)__builtin_sub_overflow(dest[i], borrow, &dest[i]);
         borrow = b1 | b2;
     }
