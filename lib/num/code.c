@@ -1551,14 +1551,14 @@ STATIC void num_ssm_add_mod_immed(
 
         "loop_add_begin%=:                              \n\t" // LOOP_ADD_BEGIN
 
-        ADD_CLASSIC_STEP(  0, reg_1)
-        ADD_CLASSIC_STEP(  8, reg_2)
-        ADD_CLASSIC_STEP( 16, reg_1)
-        ADD_CLASSIC_STEP( 24, reg_2)
-        ADD_CLASSIC_STEP( 32, reg_1)
-        ADD_CLASSIC_STEP( 40, reg_2)
-        ADD_CLASSIC_STEP( 48, reg_1)
-        ADD_CLASSIC_STEP( 56, reg_2)
+        ADD_CLASSIC_STEP( 0, reg_1)
+        ADD_CLASSIC_STEP( 8, reg_2)
+        ADD_CLASSIC_STEP(16, reg_1)
+        ADD_CLASSIC_STEP(24, reg_2)
+        ADD_CLASSIC_STEP(32, reg_1)
+        ADD_CLASSIC_STEP(40, reg_2)
+        ADD_CLASSIC_STEP(48, reg_1)
+        ADD_CLASSIC_STEP(56, reg_2)
 
         "lea %[pos], [%[pos] + 64]                      \n\t" // pos += 64 (lea does not modify CF)
         "dec %[j]                                       \n\t" // j-- (dec does not modify CF)
@@ -1658,14 +1658,14 @@ STATIC void num_ssm_sub_mod(
 
         "loop_sub_begin%=:                              \n\t" // LOOP_SUB_BEGIN
 
-        SUB_CLASSIC_STEP(  0, reg_1)
-        SUB_CLASSIC_STEP(  8, reg_2)
-        SUB_CLASSIC_STEP( 16, reg_1)
-        SUB_CLASSIC_STEP( 24, reg_2)
-        SUB_CLASSIC_STEP( 32, reg_1)
-        SUB_CLASSIC_STEP( 40, reg_2)
-        SUB_CLASSIC_STEP( 48, reg_1)
-        SUB_CLASSIC_STEP( 56, reg_2)
+        SUB_CLASSIC_STEP( 0, reg_1)
+        SUB_CLASSIC_STEP( 8, reg_2)
+        SUB_CLASSIC_STEP(16, reg_1)
+        SUB_CLASSIC_STEP(24, reg_2)
+        SUB_CLASSIC_STEP(32, reg_1)
+        SUB_CLASSIC_STEP(40, reg_2)
+        SUB_CLASSIC_STEP(48, reg_1)
+        SUB_CLASSIC_STEP(56, reg_2)
 
         "lea %[pos], [%[pos] + 64]                      \n\t" // pos += 64 (lea does not modify CF)
         "dec %[j]                                       \n\t" // j-- (dec does not modify CF)
@@ -2056,7 +2056,12 @@ STATIC void num_ssm_fft_inv(num_p num_aux, num_p num_fft, ssm_params_p p)
     num_ssm_fft_inv_rec(num_aux, num_fft, 0, p->n, p->K, 2 * p->Q);
 
     uint64_t k_ = stdc_trailing_zeros(p->K);
-    for(uint64_t i=0; i<p->K; i++)
+    uint64_t lim = ((64 * (p->n - 1)) - k_) / p->Q;
+    for(uint64_t i=0; i<lim; i++)
+    {
+        num_ssm_shr_mod(num_aux, num_fft, p->n * i, p->n, (p->Q * i) + k_);
+    }
+    for(uint64_t i=lim; i<p->K; i++)
     {
         num_ssm_shr_mod(num_aux, num_fft, p->n * i, p->n, p->Q * i);
         num_ssm_shr_mod(num_aux, num_fft, p->n * i, p->n, k_);
@@ -2210,14 +2215,14 @@ static void num_ssm_mul_mod_span(
 
         "loop_0_begin%=:                                \n\t" // LOOP_0_BEGIN
 
-        MUL_CLASSIC_STEP_ZERO(  0, high, carry, _pos)
-        MUL_CLASSIC_STEP_ZERO(  8, carry, high, _pos)
-        MUL_CLASSIC_STEP_ZERO( 16, high, carry, _pos)
-        MUL_CLASSIC_STEP_ZERO( 24, carry, high, _pos)
-        MUL_CLASSIC_STEP_ZERO( 32, high, carry, _pos)
-        MUL_CLASSIC_STEP_ZERO( 40, carry, high, _pos)
-        MUL_CLASSIC_STEP_ZERO( 48, high, carry, _pos)
-        MUL_CLASSIC_STEP_ZERO( 56, carry, high, _pos)
+        MUL_CLASSIC_STEP_ZERO( 0, high, carry, _pos)
+        MUL_CLASSIC_STEP_ZERO( 8, carry, high, _pos)
+        MUL_CLASSIC_STEP_ZERO(16, high, carry, _pos)
+        MUL_CLASSIC_STEP_ZERO(24, carry, high, _pos)
+        MUL_CLASSIC_STEP_ZERO(32, high, carry, _pos)
+        MUL_CLASSIC_STEP_ZERO(40, carry, high, _pos)
+        MUL_CLASSIC_STEP_ZERO(48, high, carry, _pos)
+        MUL_CLASSIC_STEP_ZERO(56, carry, high, _pos)
 
         "lea %[_pos], [%[_pos] + 64]                    \n\t" // _pos += 64
         "dec %[j]                                       \n\t" // j--
@@ -2240,14 +2245,14 @@ static void num_ssm_mul_mod_span(
 
         "loop_2_begin%=:                                \n\t"
 
-        MUL_CLASSIC_STEP(  0, high, carry, src_2, _pos)
-        MUL_CLASSIC_STEP(  8, carry, high, src_2, _pos)
-        MUL_CLASSIC_STEP( 16, high, carry, src_2, _pos)
-        MUL_CLASSIC_STEP( 24, carry, high, src_2, _pos)
-        MUL_CLASSIC_STEP( 32, high, carry, src_2, _pos)
-        MUL_CLASSIC_STEP( 40, carry, high, src_2, _pos)
-        MUL_CLASSIC_STEP( 48, high, carry, src_2, _pos)
-        MUL_CLASSIC_STEP( 56, carry, high, src_2, _pos)
+        MUL_CLASSIC_STEP( 0, high, carry, src_2, _pos)
+        MUL_CLASSIC_STEP( 8, carry, high, src_2, _pos)
+        MUL_CLASSIC_STEP(16, high, carry, src_2, _pos)
+        MUL_CLASSIC_STEP(24, carry, high, src_2, _pos)
+        MUL_CLASSIC_STEP(32, high, carry, src_2, _pos)
+        MUL_CLASSIC_STEP(40, carry, high, src_2, _pos)
+        MUL_CLASSIC_STEP(48, high, carry, src_2, _pos)
+        MUL_CLASSIC_STEP(56, carry, high, src_2, _pos)
 
         "adox %[carry], %[zero]                         \n\t" // carry += OF
 
@@ -2325,6 +2330,7 @@ static void num_ssm_mul_mod_span(
 // time_assembly_benchmark | time mul: 12.394 | unrolled assembly 32 | only mul
 // time_assembly_benchmark | time mul: 11.376 | unrolled assembly 8  | only mul
 // time_assembly_benchmark | time mul: 10.837 | ssm add
+// time_assembly_benchmark | time mul: 9.975 | better shift
 
 
 STATIC void num_ssm_pad_wrap(num_p num_fft, num_p num, uint64_t pos, ssm_params_p p)
