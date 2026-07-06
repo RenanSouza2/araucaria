@@ -1172,48 +1172,40 @@ static void test_num_ssm_opposite(bool show)
 {
     TEST_FN_OPEN
 
-    #define TEST_NUM_SSM_OPPOSITE(TAG, NUM, N, RES)     \
+    #define TEST_NUM_SSM_OPPOSITE(TAG, NUM, RES)        \
     {                                                   \
         TEST_CASE_OPEN(TAG)                             \
         {                                               \
             num_p num = num_create_immed(ARG_OPEN NUM); \
-            num_ssm_opposite(num, 0, N);                \
+            num_ssm_opposite(num, 0, num->count);       \
             assert(num_immed(num, ARG_OPEN RES));       \
         }                                               \
         TEST_CASE_CLOSE                                 \
     }
 
     TEST_NUM_SSM_OPPOSITE(1,
-        (2, 0, 1), 2,
-        (2, 1, 0)
+        (9, 0, 0, 0, 0, 0, 0, 0, 0, 1),
+        (9, 1, 0, 0, 0, 0, 0, 0, 0, 0)
     )
     TEST_NUM_SSM_OPPOSITE(2,
-        (2, 1, 0), 2,
-        (2, 0, 1)
+        (9, 1, 0, 0, 0, 0, 0, 0, 0, 0),
+        (9, 0, 0, 0, 0, 0, 0, 0, 0, 1)
     )
     TEST_NUM_SSM_OPPOSITE(3,
-        (2, 0, 2), 2,
-        (2, 0, UINT64_MAX)
+        (9, 0, 0, 0, 0, 0, 0, 0, 0, 2),
+        (9,
+            0,
+            UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX,
+            UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX
+        )
     )
     TEST_NUM_SSM_OPPOSITE(4,
-        (2, 0, UINT64_MAX), 2,
-        (2, 0, 2)
-    )
-    TEST_NUM_SSM_OPPOSITE(5,
-        (3, 0, 0, 1), 3,
-        (3, 1, 0, 0)
-    )
-    TEST_NUM_SSM_OPPOSITE(6,
-        (3, 1, 0, 0), 3,
-        (3, 0, 0, 1)
-    )
-    TEST_NUM_SSM_OPPOSITE(7,
-        (3, 0, 0, 2), 3,
-        (3, 0, UINT64_MAX, UINT64_MAX)
-    )
-    TEST_NUM_SSM_OPPOSITE(8,
-        (3, 0, UINT64_MAX, UINT64_MAX), 3,
-        (3, 0, 0, 2)
+        (9,
+            0,
+            UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX,
+            UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX
+        ),
+        (9, 0, 0, 0, 0, 0, 0, 0, 0, 2)
     )
 
     TEST_FN_CLOSE

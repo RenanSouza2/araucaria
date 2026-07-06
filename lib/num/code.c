@@ -1831,21 +1831,78 @@ static void num_ssm_sub_mod_immed(
     num_ssm_normalize(num_fft_1, pos_1, n);
 }
 
-STATIC void num_ssm_opposite(num_p num_fft, uint64_t pos, uint64_t n)
+#define OPPOSITE_STEP(OFF, REG)                                                                     \
+    "sbb %[" #REG "], [%[dest] + %[pos] + " #OFF "]     \n\t" /* REG -= *(dest + pos + OFF) + CF */ \
+    "mov [%[dest] + %[pos] + " #OFF "], %[" #REG "]     \n\t" /* *(dest + pos + OFF) = REG       */ \
+    "mov %[" #REG "], 0                                 \n\t" /* REG = 0 (preserves CF)          */
+
+STATIC void num_ssm_opposite(num_p num_fft, uint64_t chunk_pos, uint64_t n)
 {
     CLU_HANDLER_IS_SAFE(num_fft)
     assert(num_fft)
 
-    uint64_t borrow = (uint64_t)__builtin_sub_overflow(1, num_fft->chunk[pos], &num_fft->chunk[pos]);
+    uint64_t * restrict dest = &num_fft->chunk[chunk_pos];
+
+#ifdef __linux__
+
+    uint64_t reg_1, reg_2;
+    uint64_t j = n;
+    uint64_t pos = 0;
+
+    __asm__ __volatile__ (
+        ".intel_syntax noprefix                         \n\t"
+
+        "mov %[reg_1], 1                                \n\t" // Init for the 1st limb (1 - dest[0])
+        "mov %[reg_2], 0                                \n\t" // Init for the 2nd limb (0 - dest[1])
+
+        "shr %[j], 3                                    \n\t" // j /= 8
+        "xor %[pos], %[pos]                             \n\t" // pos = 0 (and inherently clears CF)
+
+        "loop_opp_begin%=:                              \n\t" // LOOP_OPP_BEGIN
+
+        OPPOSITE_STEP( 0, reg_1)
+        OPPOSITE_STEP( 8, reg_2)
+        OPPOSITE_STEP(16, reg_1)
+        OPPOSITE_STEP(24, reg_2)
+        OPPOSITE_STEP(32, reg_1)
+        OPPOSITE_STEP(40, reg_2)
+        OPPOSITE_STEP(48, reg_1)
+        OPPOSITE_STEP(56, reg_2)
+
+        "lea %[pos], [%[pos] + 64]                      \n\t" // pos += 64 (lea does not modify CF)
+        "dec %[j]                                       \n\t" // j-- (dec does not modify CF)
+        "jnz loop_opp_begin%=                           \n\t"
+
+        OPPOSITE_STEP(0, reg_1)
+
+        ".att_syntax prefix                             \n\t"
+        // out
+        :   [pos] "+&r" (pos),
+            [j] "+&r" (j),
+            [reg_1] "=&r" (reg_1),
+            [reg_2] "=&r" (reg_2)
+        // in
+        :   [dest] "r" (dest)
+        // clobber
+        :   "cc",
+            "memory"
+    );
+
+#else
+
+    uint64_t borrow = (uint64_t)__builtin_sub_overflow(1, dest[0], &dest[0]);
     for(uint64_t i = 1; i < n; i++)
     {
         uint64_t diff;
-        uint64_t b1 = (uint64_t)__builtin_sub_overflow(0, num_fft->chunk[pos + i], &diff);
-        uint64_t b2 = (uint64_t)__builtin_sub_overflow(diff, borrow, &num_fft->chunk[pos + i]);
+        uint64_t b1 = (uint64_t)__builtin_sub_overflow(0, dest[i], &diff);
+        uint64_t b2 = (uint64_t)__builtin_sub_overflow(diff, borrow, &dest[i]);
         borrow = b1 | b2;
     }
-    num_fft->chunk[pos + n - 1]++;
-    num_ssm_normalize(num_fft, pos, n);
+
+#endif
+
+    num_fft->chunk[chunk_pos + n - 1]++;
+    num_ssm_normalize(num_fft, chunk_pos, n);
 }
 
 STATIC void num_ssm_shl(
@@ -1877,6 +1934,7 @@ STATIC void num_ssm_shl(
     }
 
     uint64_t inv_bits = chunk_bits - bits;
+    #pragma GCC unroll 8
     for(uint64_t i = count + 1; i < n; i++)
     {
         dest[i] = (src[i - count] << bits) | (src[i - count - 1] >> inv_bits);
@@ -1916,6 +1974,7 @@ STATIC void num_ssm_shr(
 
     uint64_t inv_bits = chunk_bits - bits;
     uint64_t stop = n - count - 1;
+    #pragma GCC unroll 8
     for(uint64_t i = 0; i < stop; i++)
     {
         dest[i] = (src[count + i] >> bits) | (src[count + i + 1] << inv_bits);
@@ -2078,7 +2137,7 @@ STATIC void num_ssm_fft_inv(num_p num_aux, num_p num_fft, ssm_params_p p)
     num_ssm_fft_inv_rec(num_aux, num_fft, 0, p->n, p->K, 2 * p->Q);
 
     uint64_t k_ = stdc_trailing_zeros(p->K);
-    uint64_t lim = ((64 * (p->n - 1)) - k_) / p->Q;
+    uint64_t lim = ((chunk_bits * (p->n - 1)) - k_) / p->Q;
     for(uint64_t i=0; i<lim; i++)
     {
         num_ssm_shr_mod(num_aux, num_fft, p->n * i, p->n, (p->Q * i) + k_);
