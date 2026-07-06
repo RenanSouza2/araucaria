@@ -935,6 +935,11 @@ static num_p num_add_offset(num_p num_1, uint64_t pos_1, num_p num_2, uint64_t p
     assert(num_1)
     assert(num_2)
 
+    if(num_2->count <= pos_2)
+    {
+        return num_1;
+    }
+
     uint64_t delta = pos_1 - pos_2;
     uint64_t count_max = delta + num_2->count;
     assert(num_1->size >= count_max);
