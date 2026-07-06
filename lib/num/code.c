@@ -1627,20 +1627,20 @@ STATIC void num_ssm_add_mod_immed(
     "mov [%[dest] + %[pos] + " #OFF "], %[" #REG "]    \n\t" /* *(dest + pos + OFF) = reg_1        */\
 
 STATIC void num_ssm_sub_mod(
-    num_p num_res, uint64_t pos_res,
+    num_p num_fft_res, uint64_t pos_res,
     num_p num_fft_1, uint64_t pos_1,
     num_p num_fft_2, uint64_t pos_2,
     uint64_t n
 )
 {
-    CLU_HANDLER_IS_SAFE(num_res)
+    CLU_HANDLER_IS_SAFE(num_fft_res)
     CLU_HANDLER_IS_SAFE(num_fft_1)
     CLU_HANDLER_IS_SAFE(num_fft_2)
-    assert(num_res && num_fft_1 && num_fft_2)
+    assert(num_fft_res && num_fft_1 && num_fft_2)
 
     num_ssm_denormalize(num_fft_1, pos_1, n);
 
-    uint64_t * restrict dest = &num_res->chunk[pos_res];
+    uint64_t * restrict dest = &num_fft_res->chunk[pos_res];
     const uint64_t * restrict src1 = &num_fft_1->chunk[pos_1];
     const uint64_t * restrict src2 = &num_fft_2->chunk[pos_2];
 
@@ -1729,7 +1729,7 @@ STATIC void num_ssm_sub_mod(
 #endif
 
     num_ssm_normalize(num_fft_1, pos_1, n);
-    num_ssm_normalize(num_res, pos_res, n);
+    num_ssm_normalize(num_fft_res, pos_res, n);
 }
 
 static void num_ssm_sub_mod_immed(
@@ -1827,24 +1827,24 @@ STATIC void num_ssm_opposite(num_p num_fft, uint64_t pos, uint64_t n)
 }
 
 STATIC void num_ssm_shl(
-    num_p num_res, uint64_t pos_res,
+    num_p num_fft_res, uint64_t pos_res,
     num_p num_fft, uint64_t pos,
     uint64_t n,
     uint64_t bits
 )
 {
-    CLU_HANDLER_IS_SAFE(num_res)
+    CLU_HANDLER_IS_SAFE(num_fft_res)
     CLU_HANDLER_IS_SAFE(num_fft)
-    assert(num_res)
+    assert(num_fft_res)
     assert(num_fft)
-    assert(num_res->size >= pos_res + n)
+    assert(num_fft_res->size >= pos_res + n)
 
     constexpr uint64_t mask = 0x3f;
 
     uint64_t count = bits >> chunk_bits_log_2;
     bits &= mask;
 
-    uint64_t * restrict dest = &num_res->chunk[pos_res];
+    uint64_t * restrict dest = &num_fft_res->chunk[pos_res];
     const uint64_t * restrict src = &num_fft->chunk[pos];
 
     if(bits == 0)
@@ -1865,24 +1865,24 @@ STATIC void num_ssm_shl(
 }
 
 STATIC void num_ssm_shr(
-    num_p num_res, uint64_t pos_res,
+    num_p num_fft_res, uint64_t pos_res,
     num_p num_fft, uint64_t pos,
     uint64_t n,
     uint64_t bits
 )
 {
-    CLU_HANDLER_IS_SAFE(num_res)
+    CLU_HANDLER_IS_SAFE(num_fft_res)
     CLU_HANDLER_IS_SAFE(num_fft)
-    assert(num_res)
+    assert(num_fft_res)
     assert(num_fft)
-    assert(num_res->size >= pos_res + n)
+    assert(num_fft_res->size >= pos_res + n)
 
     constexpr uint64_t mask = 0x3f;
 
     uint64_t count = bits >> chunk_bits_log_2;
     bits &= mask;
 
-    uint64_t * restrict dest = &num_res->chunk[pos_res];
+    uint64_t * restrict dest = &num_fft_res->chunk[pos_res];
     const uint64_t * restrict src = &num_fft->chunk[pos];
 
     if(bits == 0)
@@ -2056,33 +2056,10 @@ STATIC void num_ssm_fft_inv(num_p num_aux, num_p num_fft, ssm_params_p p)
     num_ssm_fft_inv_rec(num_aux, num_fft, 0, p->n, p->K, 2 * p->Q);
 
     uint64_t k_ = stdc_trailing_zeros(p->K);
-
-    // for(uint64_t i=0; i<p->K; i++)
-    // {
-    //     num_ssm_shr_mod(num_aux, num_fft, p->n * i, p->n, p->Q * i);
-    //     num_ssm_shr_mod(num_aux, num_fft, p->n * i, p->n, k_);
-    // }
-
-    uint64_t max = 64 * (p->n - 1);
-    uint64_t lim = (max - k_) / p->Q;
-    if (lim > p->K)
+    for(uint64_t i=0; i<p->K; i++)
     {
-        lim = p->K;
-    }
-    for(uint64_t i=0; i<lim; i++)
-    {
-        uint64_t bits = (p->Q * i) + k_;
-        num_ssm_shr_mod(num_aux, num_fft, p->n * i, p->n, bits);
-    }
-    for(uint64_t i=lim; i<p->K; i++)
-    {
-        uint64_t bits = (p->Q * i) + k_;
-
-        // The mathematical complement of right-shifting 'bits' mod 2^M+1
-        uint64_t left_shift = p->M - bits;
-
-        num_ssm_shl_mod(num_aux, num_fft, p->n * i, p->n, left_shift);
-        num_ssm_opposite(num_fft, p->n * i, p->n);
+        num_ssm_shr_mod(num_aux, num_fft, p->n * i, p->n, p->Q * i);
+        num_ssm_shr_mod(num_aux, num_fft, p->n * i, p->n, k_);
     }
 }
 
@@ -2340,8 +2317,6 @@ static void num_ssm_mul_mod_span(
     memmove(&dest[n], &dest[n-1], n * sizeof(uint64_t));
     dest[   n -1] = 0;
     dest[(2*n)-1] = 0;
-
-    // NOLINTNEXTLINE(readability-suspicious-call-argument)
     num_ssm_sub_mod(num_1, pos, num_aux, 0, num_aux, n, n);
 }
 

@@ -44,50 +44,53 @@ STATIC void num_sub_uint_offset(num_p num, uint64_t pos, uint64_t value);
 STATIC int64_t num_cmp_offset(num_p num_1, uint64_t pos_1, num_p num_2);
 STATIC void num_sub_offset(num_p num_1, uint64_t pos_1, num_p num_2);
 
-STATIC void num_display_span_full(const char tag[], num_p num, uint64_t n, uint64_t k);
+STATIC void num_display_span_full(
+    const char tag[],
+    num_p num_fft,
+    uint64_t n,
+    uint64_t k
+);
 STATIC uint64_t ssm_bit_inv(uint64_t i, uint64_t K);
 STATIC void num_ssm_add_mod_immed(
-    num_p num_1, uint64_t pos_1,
-    num_p num_2, uint64_t pos_2,
+    num_p num_fft_1, uint64_t pos_1,
+    num_p num_fft_2, uint64_t pos_2,
     uint64_t n
 );
 STATIC void num_ssm_sub_mod(
-    num_p num_res, uint64_t pos_res,
-    num_p num_1, uint64_t pos_1,
-    num_p num_2, uint64_t pos_2,
+    num_p num_fft_res, uint64_t pos_res,
+    num_p num_fft_1, uint64_t pos_1,
+    num_p num_fft_2, uint64_t pos_2,
     uint64_t n
 );
-STATIC void num_ssm_opposite(num_p num, uint64_t pos, uint64_t n);
+STATIC void num_ssm_opposite(num_p num_fft, uint64_t pos, uint64_t n);
 STATIC void num_ssm_shl(
-    num_p num_res, uint64_t pos_res,
-    num_p num, uint64_t pos,
+    num_p num_fft_res, uint64_t pos_res,
+    num_p num_fft, uint64_t pos,
     uint64_t n,
     uint64_t bits
 );
 STATIC void num_ssm_shr(
-    num_p num_res, uint64_t pos_res,
-    num_p num, uint64_t pos,
+    num_p num_fft_res, uint64_t pos_res,
+    num_p num_fft, uint64_t pos,
     uint64_t n,
     uint64_t bits
 );
 STATIC void num_ssm_shl_mod(
     num_p num_aux,
-    num_p num,
-    uint64_t pos,
+    num_p num_fft, uint64_t pos,
     uint64_t n,
     uint64_t bits
 );
 STATIC void num_ssm_shr_mod(
     num_p num_aux,
-    num_p num,
-    uint64_t pos,
+    num_p num_fft, uint64_t pos,
     uint64_t n,
     uint64_t bits
 );
 // STATIC ssm_params_t ssm_get_params(uint64_t count); REVERT BEFORE PR
 STATIC ssm_params_t ssm_get_params_wrap(uint64_t n);
-STATIC void num_ssm_fft_fwd(num_p num_aux, num_p num, ssm_params_p p);
-STATIC void num_ssm_fft_inv(num_p num_aux, num_p num, ssm_params_p p);
+STATIC void num_ssm_fft_fwd(num_p num_aux, num_p num_fft, ssm_params_p p);
+STATIC void num_ssm_fft_inv(num_p num_aux, num_p num_fft, ssm_params_p p);
 
 STATIC void num_ssm_pad_wrap(num_p num_fft, num_p num, uint64_t pos, ssm_params_p p);
 STATIC void num_ssm_depad_wrap(

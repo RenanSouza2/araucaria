@@ -1,7 +1,6 @@
 #include "../debug.h"
 #include "../../../testrc.h"
 #include "../../../mods/macros/test.h"
-#include <stdint.h>
 
 
 
@@ -1774,7 +1773,6 @@ static void test_num_ssm_depad_wrap(bool show)
         TEST_CASE_OPEN(TAG)                                                     \
         {                                                                       \
             num_p num_fft = num_create_immed(ARG_OPEN NUM_FFT);                 \
-            num_display_full("num_fft", num_fft);   \
             ssm_params_t p = ssm_get_params_wrap(N);                            \
             num_p num_aux_1 = num_create_rand(N);                               \
             num_p num_aux_2 = num_create_rand(2 * (N));                         \
@@ -1789,29 +1787,29 @@ static void test_num_ssm_depad_wrap(bool show)
     }
 
     TEST_NUM_SSM_DEPAD_WRAP(1,
-        (264,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1
+        (72,
+            0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 1
         ),
         9,
         (9, 0, 0, 0, 0, 0, 0, 0, 0, 1)
     )
     TEST_NUM_SSM_DEPAD_WRAP(2,
         (264,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1
+            0, 0, 0, 0, 0, 0, 0, 0, 1,
+            0, 0, 0, 0, 0, 0, 0, 0, 1,
+            0, 0, 0, 0, 0, 0, 0, 0, 1,
+            0, 0, 0, 0, 0, 0, 0, 0, 1,
+            0, 0, 0, 0, 0, 0, 0, 0, 1,
+            0, 0, 0, 0, 0, 0, 0, 0, 1,
+            0, 0, 0, 0, 0, 0, 0, 0, 1,
+            0, 0, 0, 0, 0, 0, 0, 0, 1
         ),
         9,
         (9, 0, 1, 1, 1, 1, 1, 1, 1, 1)
@@ -2181,6 +2179,7 @@ static void test_num_sub(bool show)
     TEST_FN_CLOSE
 }
 
+[[maybe_unused]]
 static void test_num_mul(bool show)
 {
     TEST_FN_OPEN
@@ -2334,6 +2333,7 @@ static void test_num_mul(bool show)
     TEST_FN_CLOSE
 }
 
+[[maybe_unused]]
 static void test_num_sqr(bool show)
 {
     TEST_FN_OPEN
@@ -2822,11 +2822,11 @@ static void test_num_base_from(bool show)
 
 
 
-static void test_fuzz_num_ssm_sh(bool show)
+static void test_fuzz_num_ssm_shift_round_trip(bool show)
 {
     TEST_FN_OPEN
 
-    #define TEST_FUZZ_NUM_SSM_SH(TAG, N, BITS, RUNS)                \
+    #define TEST_FUZZ_NUM_SSM_SHIFT_ROUND_TRIP(TAG, N, BITS, RUNS)  \
     {                                                               \
         TEST_FUZZ_CASE_OPEN(TAG, RUNS)                              \
         {                                                           \
@@ -2852,10 +2852,10 @@ static void test_fuzz_num_ssm_sh(bool show)
         TEST_FUZZ_CASE_CLOSE                                        \
     }
 
-    TEST_FUZZ_NUM_SSM_SH(1, 2,  1, 100)
-    TEST_FUZZ_NUM_SSM_SH(2, 3, 65, 100)
-    TEST_FUZZ_NUM_SSM_SH(3, 4, 80, 100)
-    TEST_FUZZ_NUM_SSM_SH(4, 5, 80, 100)
+    TEST_FUZZ_NUM_SSM_SHIFT_ROUND_TRIP(1,  9,  1, 100)
+    TEST_FUZZ_NUM_SSM_SHIFT_ROUND_TRIP(2, 17, 65, 100)
+    TEST_FUZZ_NUM_SSM_SHIFT_ROUND_TRIP(3, 25, 80, 100)
+    TEST_FUZZ_NUM_SSM_SHIFT_ROUND_TRIP(4, 33, 80, 100)
 
     TEST_FN_CLOSE
 }
@@ -3162,7 +3162,7 @@ static void test_all(bool show)
     test_num_base_to(show);
     test_num_base_from(show);
 
-    test_fuzz_num_ssm_sh(show);
+    test_fuzz_num_ssm_shift_round_trip(show);
     test_fuzz_num_ssm_pad_no_wrap_round_trip(show);
     test_fuzz_num_ssm_pad_wrap_round_trip(show);
     test_fuzz_num_ssm_fft(show);
