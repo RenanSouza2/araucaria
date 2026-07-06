@@ -921,7 +921,7 @@ static void num_add_offset(num_p num_1, uint64_t pos_1, num_p num_2, uint64_t po
 
     if(num_2->count <= pos_2)
     {
-        return num_1;
+        return;
     }
 
     uint64_t delta = pos_1 - pos_2;
@@ -947,7 +947,7 @@ static void num_add_offset(num_p num_1, uint64_t pos_1, num_p num_2, uint64_t po
         num_add_uint_offset(num_1, count_max, carry);
     }
 
-    num_normalize(num_1);
+    // num_normalize(num_1);
 }
 
 // keeps NUM2
