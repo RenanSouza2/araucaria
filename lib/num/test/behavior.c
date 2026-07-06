@@ -692,26 +692,6 @@ static void test_num_add_uint_offset(bool show)
 
     #undef TEST_NUM_ADD_UINT_OFFSET
 
-    #define TEST_NUM_ADD_UINT_OFFSET(TAG, NUM, OFFSET, VALUE)   \
-    {                                                           \
-        TEST_CASE_OPEN(TAG)                                     \
-        {                                                       \
-            num_p num = num_create_immed(ARG_OPEN NUM);         \
-            TEST_REVERT_OPEN                                    \
-            {                                                   \
-                num_add_uint_offset(num, OFFSET, VALUE);        \
-            }                                                   \
-            TEST_REVERT_CLOSE                                   \
-        }                                                       \
-        TEST_CASE_CLOSE                                         \
-    }
-
-    TEST_NUM_ADD_UINT_OFFSET(7, (1, UINT64_MAX), 0, 3)
-    TEST_NUM_ADD_UINT_OFFSET(8, (0), 1, 0)
-    TEST_NUM_ADD_UINT_OFFSET(9, (0), 1, 1)
-
-    #undef TEST_NUM_ADD_UINT_OFFSET
-
     TEST_FN_CLOSE
 }
 

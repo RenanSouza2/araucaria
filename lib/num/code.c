@@ -741,11 +741,18 @@ STATIC num_p num_add_uint_offset(num_p num, uint64_t pos, uint64_t value)
     CLU_HANDLER_IS_SAFE(num);
     assert(num);
 
-// printf("\n");
-// tprintf("pos: %lu", pos);
-// tprintf("num->count: %lu", num->count);
+    if(value == 0)
+    {
+        return num;
+    }
 
-    assert(pos <= num->count);
+    if(pos >= num->count)
+    {
+        assert(num->size > num->count);
+        num->chunk[pos] = value;
+        num->count = pos + 1;
+        return num;
+    }
 
     uint64_t carry = value;
     for(uint64_t i=pos; i<num->count && carry; i++)
@@ -963,6 +970,7 @@ static num_p num_add_offset(num_p num_1, uint64_t pos_1, num_p num_2, uint64_t p
         num_1 = num_add_uint_offset(num_1, count_max, carry);
     }
 
+    num_normalize(num_1);
     return num_1;
 }
 
@@ -1033,7 +1041,6 @@ static num_p num_sqr_classic_buffer(num_p num_res, num_p num)
     assert(num_res->size >= 2 * num->count)
 
     memset(num_res->chunk, 0, num_res->size * sizeof(uint64_t));
-    num_res->count = 2 * num->count;
     for(uint64_t i=0; i<num->count; i++)
     {
         uint64_t value = num->chunk[i];
