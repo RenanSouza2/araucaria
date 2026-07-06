@@ -1022,6 +1022,16 @@ static void num_sqr_classic_buffer(num_p num_res, num_p num)
 
 #if !defined(NO_ASSEMBLY) && defined(__linux__)
 
+#define ADD_CLASSIC_STEP(OFF, REG)                                                                    \
+    "mov %[" #REG "], [%[src_2] + %[pos] + " #OFF "]    \n\t" /* REG  = *(src_2 + pos + OFF)        */\
+    "adcx %[" #REG "], [%[dest] + %[pos] + " #OFF "]    \n\t" /* REG += *(dest + pos + OFF) + CF    */\
+    "mov [%[dest] + %[pos] + " #OFF "], %[" #REG "]     \n\t" /* *(dest + pos + OFF) = REG          */\
+
+#define SUB_CLASSIC_STEP(OFF, SRC_1, REG)                                                                 \
+    "mov %[" #REG "], [%[" #SRC_1"] + %[pos] + " #OFF "]    \n\t" /* REG  = *(SRC_1 + pos + OFF)        */\
+    "sbb %[" #REG "], [%[src_2] + %[pos] + " #OFF "]        \n\t" /* REG -= *(src_2 + pos + OFF) + CF   */\
+    "mov [%[dest] + %[pos] + " #OFF "], %[" #REG "]         \n\t" /* *(dest + pos + OFF) = REG          */\
+
 #define MUL_CLASSIC_STEP_ZERO(OFF, HIGH, CARRY, POS)                                                                      \
     "mulx %[" #HIGH "], %[low], [%[src_2] + %[" #POS "] + " #OFF "] \n\t" /* (HIGH, low) = MUL(D, *(src_2 + POS + OFF)) */\
     "adcx %[low], %[" #CARRY "]                                     \n\t" /* low += carry + CF                          */\
@@ -1519,11 +1529,6 @@ static void num_ssm_denormalize(num_p num_fft, uint64_t pos, uint64_t n)
     num_fft->chunk[pos + n - 1] += 1;
 }
 
-#define ADD_CLASSIC_STEP(OFF, REG)                                                                     \
-    "mov %[" #REG "], [%[src2] + %[pos] + " #OFF "]    \n\t" /* reg_1  = *(src2 + pos + OFF)       */\
-    "adcx %[" #REG "], [%[dest] + %[pos] + " #OFF "]   \n\t" /* reg_1 += *(dest + pos + OFF) + CF  */\
-    "mov [%[dest] + %[pos] + " #OFF "], %[" #REG "]    \n\t" /* *(dest + pos + OFF) = reg_1        */\
-
 STATIC void num_ssm_add_mod_immed(
     num_p num_fft_1, uint64_t pos_1,
     num_p num_fft_2, uint64_t pos_2,
@@ -1535,7 +1540,7 @@ STATIC void num_ssm_add_mod_immed(
     assert(num_fft_1 && num_fft_2)
 
     uint64_t * restrict dest = &num_fft_1->chunk[pos_1];
-    const uint64_t * restrict src2 = &num_fft_2->chunk[pos_2];
+    const uint64_t * restrict src_2 = &num_fft_2->chunk[pos_2];
 
 #if !defined(NO_ASSEMBLY) && defined(__linux__)
 
@@ -1574,7 +1579,7 @@ STATIC void num_ssm_add_mod_immed(
             [reg_2] "=&r" (reg_2)
         // in
         :   [dest] "r" (dest),
-            [src2] "r" (src2)
+            [src_2] "r" (src_2)
         // clobber
         :   "cc",
             "memory"
@@ -1589,7 +1594,7 @@ STATIC void num_ssm_add_mod_immed(
         "cbz %[count], 2f\n\t"               // If count == 0, jump to label 2
         "adds xzr, xzr, xzr\n\t"             // Clear carry flag (C=0)
         "1:\n\t"
-        "ldr %[tmp1], [%[src2]], #8\n\t"     // tmp1 = *src2, then src2 += 8
+        "ldr %[tmp1], [%[src_2]], #8\n\t"     // tmp1 = *src_2, then src_2 += 8
         "ldr %[tmp2], [%[dest]]\n\t"         // tmp2 = *dest (NO post-increment yet)
 
         "adcs %[tmp2], %[tmp2], %[tmp1]\n\t" // tmp2 = tmp2 + tmp1 + CF, update CF
@@ -1599,7 +1604,7 @@ STATIC void num_ssm_add_mod_immed(
         "sub %[count], %[count], #1\n\t"     // count-- (leaves CF untouched)
         "cbnz %[count], 1b\n\t"              // Loop if count != 0
         "2:\n"
-        : [dest] "+r" (dest), [src2] "+r" (src2), [count] "+r" (count),
+        : [dest] "+r" (dest), [src_2] "+r" (src_2), [count] "+r" (count),
           [tmp1] "=&r" (tmp1), [tmp2] "=&r" (tmp2)
         :
         : "cc", "memory"
@@ -1611,7 +1616,7 @@ STATIC void num_ssm_add_mod_immed(
     #pragma GCC unroll 8
     for(uint64_t i = 0; i < n; i++)
     {
-        carry += (uint128_t)dest[i] + src2[i];
+        carry += (uint128_t)dest[i] + src_2[i];
         dest[i] = LOW(carry);
         carry = HIGH(carry);
     }
@@ -1620,11 +1625,6 @@ STATIC void num_ssm_add_mod_immed(
 
     num_ssm_normalize(num_fft_1, pos_1, n);
 }
-
-#define SUB_CLASSIC_STEP(OFF, REG)                                                                           \
-    "mov %[" #REG "], [%[src1] + %[pos] + " #OFF "]    \n\t" /* reg_1  = *(src1 + pos + OFF)       */\
-    "sbb %[" #REG "], [%[src2] + %[pos] + " #OFF "]    \n\t" /* reg_1 -= *(src2 + pos + OFF) + CF  */\
-    "mov [%[dest] + %[pos] + " #OFF "], %[" #REG "]    \n\t" /* *(dest + pos + OFF) = reg_1        */\
 
 STATIC void num_ssm_sub_mod(
     num_p num_fft_res, uint64_t pos_res,
@@ -1641,8 +1641,8 @@ STATIC void num_ssm_sub_mod(
     num_ssm_denormalize(num_fft_1, pos_1, n);
 
     uint64_t * restrict dest = &num_fft_res->chunk[pos_res];
-    const uint64_t * restrict src1 = &num_fft_1->chunk[pos_1];
-    const uint64_t * restrict src2 = &num_fft_2->chunk[pos_2];
+    const uint64_t * restrict src_1 = &num_fft_1->chunk[pos_1];
+    const uint64_t * restrict src_2 = &num_fft_2->chunk[pos_2];
 
 #if !defined(NO_ASSEMBLY) && defined(__linux__)
 
@@ -1658,20 +1658,20 @@ STATIC void num_ssm_sub_mod(
 
         "loop_sub_begin%=:                              \n\t" // LOOP_SUB_BEGIN
 
-        SUB_CLASSIC_STEP( 0, reg_1)
-        SUB_CLASSIC_STEP( 8, reg_2)
-        SUB_CLASSIC_STEP(16, reg_1)
-        SUB_CLASSIC_STEP(24, reg_2)
-        SUB_CLASSIC_STEP(32, reg_1)
-        SUB_CLASSIC_STEP(40, reg_2)
-        SUB_CLASSIC_STEP(48, reg_1)
-        SUB_CLASSIC_STEP(56, reg_2)
+        SUB_CLASSIC_STEP( 0, src_1, reg_1)
+        SUB_CLASSIC_STEP( 8, src_1, reg_2)
+        SUB_CLASSIC_STEP(16, src_1, reg_1)
+        SUB_CLASSIC_STEP(24, src_1, reg_2)
+        SUB_CLASSIC_STEP(32, src_1, reg_1)
+        SUB_CLASSIC_STEP(40, src_1, reg_2)
+        SUB_CLASSIC_STEP(48, src_1, reg_1)
+        SUB_CLASSIC_STEP(56, src_1, reg_2)
 
         "lea %[pos], [%[pos] + 64]                      \n\t" // pos += 64 (lea does not modify CF)
         "dec %[j]                                       \n\t" // j-- (dec does not modify CF)
         "jnz loop_sub_begin%=                           \n\t"
 
-        SUB_CLASSIC_STEP(0, reg_1)
+        SUB_CLASSIC_STEP(0, src_1, reg_1)
 
         ".att_syntax prefix                             \n\t"
         // out
@@ -1681,8 +1681,8 @@ STATIC void num_ssm_sub_mod(
             [reg_2] "=&r" (reg_2)
         // in
         :   [dest] "r" (dest),
-            [src1] "r" (src1),
-            [src2] "r" (src2)
+            [src_1] "r" (src_1),
+            [src_2] "r" (src_2)
         // clobber
         :   "cc",
             "memory"
@@ -1699,8 +1699,8 @@ STATIC void num_ssm_sub_mod(
         "cmp xzr, xzr\n\t"                   // SET the carry flag (C=1 means NO borrow)
 
         "1:\n\t"
-        "ldr %[tmp1], [%[src1]], #8\n\t"     // tmp1 = *src1, then src1 += 8
-        "ldr %[tmp2], [%[src2]], #8\n\t"     // tmp2 = *src2, then src2 += 8
+        "ldr %[tmp1], [%[src_1]], #8\n\t"     // tmp1 = *src_1, then src_1 += 8
+        "ldr %[tmp2], [%[src_2]], #8\n\t"     // tmp2 = *src_2, then src_2 += 8
 
         "sbcs %[tmp1], %[tmp1], %[tmp2]\n\t" // tmp1 = tmp1 - tmp2 - (1 - C), update C
 
@@ -1709,7 +1709,7 @@ STATIC void num_ssm_sub_mod(
         "sub %[count], %[count], #1\n\t"     // count-- (leaves flags untouched)
         "cbnz %[count], 1b\n\t"              // Loop if count != 0
         "2:\n"
-        : [dest] "+r" (dest), [src1] "+r" (src1), [src2] "+r" (src2),
+        : [dest] "+r" (dest), [src_1] "+r" (src_1), [src_2] "+r" (src_2),
           [count] "+r" (count), [tmp1] "=&r" (tmp1), [tmp2] "=&r" (tmp2)
         :
         : "cc", "memory"
@@ -1721,7 +1721,7 @@ STATIC void num_ssm_sub_mod(
     for(uint64_t i=0; i<n; i++)
     {
         uint64_t diff;
-        uint64_t b1 = (uint64_t)__builtin_sub_overflow(src1[i], src2[i], &diff);
+        uint64_t b1 = (uint64_t)__builtin_sub_overflow(src_1[i], src2[i], &diff);
         uint64_t b2 = (uint64_t)__builtin_sub_overflow(diff, borrow, &dest[i]);
         borrow = b1 | b2;
     }
@@ -1744,27 +1744,49 @@ static void num_ssm_sub_mod_immed(
     num_ssm_denormalize(num_fft_1, pos_1, n);
 
     uint64_t * restrict dest = &num_fft_1->chunk[pos_1];
-    const uint64_t * restrict src2 = &num_fft_2->chunk[pos_2];
+    const uint64_t * restrict src_2 = &num_fft_2->chunk[pos_2];
 
 #ifdef __linux__
 
-    uint64_t count = n;
-    __asm__ volatile (
-        "test %[count], %[count]\n\t"
-        "jz 2f\n\t"
-        "clc\n"
-        "1:\n\t"
-        "mov (%[src2]), %%rax\n\t"
-        "sbb %%rax, (%[dest])\n\t"        // *dest = *dest - rax - CF
+    uint64_t reg_1, reg_2;
+    uint64_t j = n;
+    uint64_t pos = 0;
 
-        "lea 8(%[src2]), %[src2]\n\t"
-        "lea 8(%[dest]), %[dest]\n\t"
-        "dec %[count]\n\t"
-        "jnz 1b\n\t"
-        "2:\n"
-        : [dest] "+r" (dest), [src2] "+r" (src2), [count] "+r" (count)
-        :
-        : "rax", "cc", "memory"
+    __asm__ __volatile__ (
+        ".intel_syntax noprefix                         \n\t"
+
+        "shr %[j], 3                                    \n\t" // j /= 8
+        "xor %[pos], %[pos]                             \n\t" // pos = 0 (and inherently clears CF)
+
+        "loop_sub_begin%=:                              \n\t" // LOOP_SUB_BEGIN
+
+        SUB_CLASSIC_STEP( 0, dest, reg_1)
+        SUB_CLASSIC_STEP( 8, dest, reg_2)
+        SUB_CLASSIC_STEP(16, dest, reg_1)
+        SUB_CLASSIC_STEP(24, dest, reg_2)
+        SUB_CLASSIC_STEP(32, dest, reg_1)
+        SUB_CLASSIC_STEP(40, dest, reg_2)
+        SUB_CLASSIC_STEP(48, dest, reg_1)
+        SUB_CLASSIC_STEP(56, dest, reg_2)
+
+        "lea %[pos], [%[pos] + 64]                      \n\t" // pos += 64 (lea does not modify CF)
+        "dec %[j]                                       \n\t" // j-- (dec does not modify CF)
+        "jnz loop_sub_begin%=                           \n\t"
+
+        SUB_CLASSIC_STEP(0, dest, reg_1)
+
+        ".att_syntax prefix                             \n\t"
+        // out
+        :   [pos] "+&r" (pos),
+            [j] "+&r" (j),
+            [reg_1] "=&r" (reg_1),
+            [reg_2] "=&r" (reg_2)
+        // in
+        :   [dest] "r" (dest),
+            [src_2] "r" (src_2)
+        // clobber
+        :   "cc",
+            "memory"
     );
 
 #elifdef __APPLE__
@@ -2331,6 +2353,7 @@ static void num_ssm_mul_mod_span(
 // time_assembly_benchmark | time mul: 11.376 | unrolled assembly 8  | only mul
 // time_assembly_benchmark | time mul: 10.837 | ssm add
 // time_assembly_benchmark | time mul: 9.975 | better shift
+// time_assembly_benchmark | time mul: 9.900 | sub immed
 
 
 STATIC void num_ssm_pad_wrap(num_p num_fft, num_p num, uint64_t pos, ssm_params_p p)
