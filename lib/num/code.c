@@ -729,7 +729,19 @@ STATIC void num_add_uint_offset(num_p num, uint64_t pos, uint64_t value)
 {
     CLU_HANDLER_IS_SAFE(num);
     assert(num);
-    assert(pos <= num->count);
+
+    if(value == 0)
+    {
+        return;
+    }
+
+    if(pos >= num->count)
+    {
+        assert(num->size > num->count);
+        num->chunk[pos] = value;
+        num->count = pos + 1;
+        return;
+    }
 
     uint64_t carry = value;
     for(uint64_t i=pos; i<num->count && carry; i++)
@@ -907,6 +919,11 @@ static void num_add_offset(num_p num_1, uint64_t pos_1, num_p num_2, uint64_t po
     assert(num_1)
     assert(num_2)
 
+    if(num_2->count <= pos_2)
+    {
+        return num_1;
+    }
+
     uint64_t delta = pos_1 - pos_2;
     uint64_t count_max = delta + num_2->count;
     assert(num_1->size >= count_max);
@@ -929,6 +946,8 @@ static void num_add_offset(num_p num_1, uint64_t pos_1, num_p num_2, uint64_t po
     {
         num_add_uint_offset(num_1, count_max, carry);
     }
+
+    num_normalize(num_1);
 }
 
 // keeps NUM2
@@ -998,7 +1017,6 @@ static void num_sqr_classic_buffer(num_p num_res, num_p num)
     assert(num_res->size >= 2 * num->count)
 
     memset(num_res->chunk, 0, num_res->size * sizeof(uint64_t));
-    num_res->count = 2 * num->count;
     for(uint64_t i=0; i<num->count; i++)
     {
         uint64_t value = num->chunk[i];
