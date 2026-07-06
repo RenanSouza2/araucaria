@@ -1549,8 +1549,8 @@ static void test_num_ssm_shr_mod(bool show)
         TEST_CASE_OPEN(TAG)                             \
         {                                               \
             num_p num = num_create_immed(ARG_OPEN NUM); \
-            num_p num_aux = num_create_rand(6);         \
-            num_ssm_shr_mod(num_aux, num, 0, 3, BITS);  \
+            num_p num_aux = num_create_rand(18);        \
+            num_ssm_shr_mod(num_aux, num, 0, 9, BITS);  \
             num_free(num_aux);                          \
             assert(num_immed(num, ARG_OPEN RES));       \
         }                                               \
@@ -1558,64 +1558,94 @@ static void test_num_ssm_shr_mod(bool show)
     }
 
     TEST_SSM_SHR_MOD(1,
-        (3, 0, 0, 0), 1,
-        (3, 0, 0, 0)
+        (9, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        1,
+        (9, 0, 0, 0, 0, 0, 0, 0, 0, 0)
     )
     TEST_SSM_SHR_MOD(2,
-        (3, 0, 2, 0), 0,
-        (3, 0, 2, 0)
+        (9, 0, 0, 0, 0, 0, 0, 0, 2, 0),
+        0,
+        (9, 0, 0, 0, 0, 0, 0, 0, 2, 0)
     )
     TEST_SSM_SHR_MOD(3,
-        (3, 0, 2, 0), 1,
-        (3, 0, 1, 0)
+        (9, 0, 0, 0, 0, 0, 0, 0, 2, 0),
+        1,
+        (9, 0, 0, 0, 0, 0, 0, 0, 1, 0)
     )
     TEST_SSM_SHR_MOD(4,
-        (3, 0, 2, 0), 64,
-        (3, 0, 0, 2)
+        (9, 0, 0, 0, 0, 0, 0, 0, 2, 0),
+        64,
+        (9, 0, 0, 0, 0, 0, 0, 0, 0, 2)
     )
     TEST_SSM_SHR_MOD(5,
-        (3, 0, 2, 0), 65,
-        (3, 0, 0, 1)
+        (9, 0, 0, 0, 0, 0, 0, 0, 2, 0),
+        65,
+        (9, 0, 0, 0, 0, 0, 0, 0, 0, 1)
     )
     TEST_SSM_SHR_MOD(6,
-        (3, 1, 0, 0), 128,
-        (3, 0, 0, 1)
+        (9, 1, 0, 0, 0, 0, 0, 0, 0, 0),
+        512,
+        (9, 0, 0, 0, 0, 0, 0, 0, 0, 1)
     )
     TEST_SSM_SHR_MOD(7,
-        (3, 0, 0, 1), 1,
-        (3, 0, B(63), 1)
+        (9, 0, 0, 0, 0, 0, 0, 0, 0, 1),
+        1,
+        (9, 0, B(63), 0, 0, 0, 0, 0, 0, 1)
     )
     TEST_SSM_SHR_MOD(8,
-        (3, 0, UINT64_MAX, UINT64_MAX), 1,
-        (3, 1, 0, 0)
+        (9,
+            0,
+            UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX,
+            UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX
+        ),
+        1,
+        (9, 1, 0, 0, 0, 0, 0, 0, 0, 0)
     )
     TEST_SSM_SHR_MOD(9,
-        (3, 0, UINT64_MAX, UINT64_MAX), 2,
-        (3, 0, B(63), 0)
+        (9,
+            0,
+            UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX,
+            UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX
+        ),
+        2,
+        (9, 0, B(63), 0, 0, 0, 0, 0, 0, 0)
     )
     TEST_SSM_SHR_MOD(10,
-        (3, 0, UINT64_MAX, UINT64_MAX), 64,
-        (3, 0, 2, 0)
+        (9,
+            0,
+            UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX,
+            UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX
+        ),
+        64,
+        (9, 0, 2, 0, 0, 0, 0, 0, 0, 0)
     )
     TEST_SSM_SHR_MOD(11,
-        (3, 0, UINT64_MAX, UINT64_MAX), 65,
-        (3, 0, 1, 0)
+        (9,
+            0,
+            UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX,
+            UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX
+        ),
+        65,
+        (9, 0, 1, 0, 0, 0, 0, 0, 0, 0)
     )
     TEST_SSM_SHR_MOD(12,
-        (3, 0, UINT64_MAX, UINT64_MAX), 128,
-        (3, 0, 0, 2)
+        (9,
+            0,
+            UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX,
+            UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX
+        ),
+        512,
+        (9, 0, 0, 0, 0, 0, 0, 0, 0, 2)
     )
     TEST_SSM_SHR_MOD(13,
-        (3, 0, UINT64_MAX, UINT64_MAX), 128,
-        (3, 0, 0, 2)
+        (9, 1, 0, 0, 0, 0, 0, 0, 0, 0),
+        512,
+        (9, 0, 0, 0, 0, 0, 0, 0, 0, 1)
     )
     TEST_SSM_SHR_MOD(14,
-        (3, 1, 0, 0), 128,
-        (3, 0, 0, 1)
-    )
-    TEST_SSM_SHR_MOD(15,
-        (3, 0, 0, 1), 128,
-        (3, 1, 0, 0)
+        (9, 0, 0, 0, 0, 0, 0, 0, 0, 1),
+        512,
+        (9, 1, 0, 0, 0, 0, 0, 0, 0, 0)
     )
 
     #undef TEST_SSM_SHR_MOD

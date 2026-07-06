@@ -1432,8 +1432,7 @@ static bool num_is_span_zero(num_p num_fft, uint64_t pos, uint64_t count)
 }
 
 static int64_t num_ssm_cmp_uint_offset(
-    num_p num_fft,
-    uint64_t pos,
+    num_p num_fft, uint64_t pos,
     uint64_t value,
     uint64_t n
 )
@@ -1933,8 +1932,7 @@ STATIC void num_ssm_shl_mod(
 // num_aux->size >= 2 * p->n
 STATIC void num_ssm_shr_mod(
     num_p num_aux,
-    num_p num_fft,
-    uint64_t pos,
+    num_p num_fft, uint64_t pos,
     uint64_t n,
     uint64_t bits
 )
@@ -1946,7 +1944,7 @@ STATIC void num_ssm_shr_mod(
     assert(bits <= 64 * (n - 1))
     assert(num_aux->size >= 2 * n)
 
-    if(bits == 0 || num_is_span_zero(num_fft, pos, n))
+    if(bits == 0)
     {
         return;
     }
@@ -1960,8 +1958,7 @@ STATIC void num_ssm_shr_mod(
 // num_aux->size >= 2 * n
 static void num_ssm_fft_fwd_rec(
     num_p num_aux,
-    num_p num_fft,
-    uint64_t pos,
+    num_p num_fft, uint64_t pos,
     uint64_t step,
     uint64_t n,
     uint64_t K,
@@ -2048,21 +2045,44 @@ static void num_ssm_fft_inv_rec(
 }
 
 // num_aux->size >= 2 * p->n
-STATIC void num_ssm_fft_inv(num_p num_aux, num_p num, ssm_params_p p)
+STATIC void num_ssm_fft_inv(num_p num_aux, num_p num_fft, ssm_params_p p)
 {
     CLU_HANDLER_IS_SAFE(num_aux)
-    CLU_HANDLER_IS_SAFE(num)
+    CLU_HANDLER_IS_SAFE(num_fft)
     assert(num_aux)
-    assert(num)
+    assert(num_fft)
     assert(num_aux->size >= 2 * p->n)
 
-    num_ssm_fft_inv_rec(num_aux, num, 0, p->n, p->K, 2 * p->Q);
+    num_ssm_fft_inv_rec(num_aux, num_fft, 0, p->n, p->K, 2 * p->Q);
 
     uint64_t k_ = stdc_trailing_zeros(p->K);
-    for(uint64_t i=0; i<p->K; i++)
+
+    // for(uint64_t i=0; i<p->K; i++)
+    // {
+    //     num_ssm_shr_mod(num_aux, num_fft, p->n * i, p->n, p->Q * i);
+    //     num_ssm_shr_mod(num_aux, num_fft, p->n * i, p->n, k_);
+    // }
+
+    uint64_t max = 64 * (p->n - 1);
+    uint64_t lim = (max - k_) / p->Q;
+    if (lim > p->K)
     {
-        num_ssm_shr_mod(num_aux, num, p->n * i, p->n, p->Q * i);
-        num_ssm_shr_mod(num_aux, num, p->n * i, p->n, k_);
+        lim = p->K;
+    }
+    for(uint64_t i=0; i<lim; i++)
+    {
+        uint64_t bits = (p->Q * i) + k_;
+        num_ssm_shr_mod(num_aux, num_fft, p->n * i, p->n, bits);
+    }
+    for(uint64_t i=lim; i<p->K; i++)
+    {
+        uint64_t bits = (p->Q * i) + k_;
+
+        // The mathematical complement of right-shifting 'bits' mod 2^M+1
+        uint64_t left_shift = p->M - bits;
+
+        num_ssm_shl_mod(num_aux, num_fft, p->n * i, p->n, left_shift);
+        num_ssm_opposite(num_fft, p->n * i, p->n);
     }
 }
 
