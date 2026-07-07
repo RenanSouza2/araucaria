@@ -738,30 +738,6 @@ static void time_assembly_benchmark()
     #endif
 }
 
-[[maybe_unused]]
-static void time_mul_classic_benchmark()
-{
-    uint64_t base = 8;
-
-    num_p num_1 = num_generate_1(base, 0x9E3779B97F4A7C15);
-    num_p num_2 = num_generate_1(base, 0xBF58476D1CE4E5B9);
-    num_1->count = num_1->count - (num_1->count % 32) + 31;
-    num_2->count = num_2->count - (num_2->count % 32) + 31;
-
-    uint64_t time = 0;
-    for(uint64_t i=0; i<1000000; i++)
-    {
-        TIME_SETUP
-        num_p num_res = num_mul_classic(num_1, num_2);
-        TIME_END(t1)
-
-        time += t1;
-        __asm__ volatile("" : : "r"(num_res->chunk) : "memory");
-        num_free(num_res);
-    }
-    tprintf("time mul: %.3f", dtime(time));
-}
-
 
 
 // int main(int argc, char** argv)
@@ -808,6 +784,3 @@ int main()
     printf("\n");
     return 0;
 }
-
-// time_mul_classic_benchmark      | time mul: 21.921
-// time_mul_classic_benchmark      | time mul: 10.963

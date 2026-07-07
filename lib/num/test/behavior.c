@@ -2546,10 +2546,16 @@ static void test_num_div_mod(bool show)
         (1, 0xa),
         (1, 2)
     )
+    TEST_NUM_DIV_MOD(28,
+        (3, 0x8000000000000000, 0, 0),
+        (2, 0x8000000000000000, UINT64_MAX),
+        (1, UINT64_MAX - 1),
+        (2, 2, UINT64_MAX - 1)
+    )
 
     #undef TEST_NUM_DIV_MOD
 
-    TEST_CASE_OPEN(25)
+    TEST_CASE_OPEN(29)
     {
         num_p num_1 = num_create_immed(1, 1);
         num_p num_2 = num_create_immed(0);
@@ -2563,6 +2569,8 @@ static void test_num_div_mod(bool show)
         num_free(num_2);
     }
     TEST_CASE_CLOSE
+
+    #undef TEST_NUM_DIV_MOD
 
     TEST_FN_CLOSE
 }
@@ -3028,7 +3036,7 @@ static void test_fuzz_num_bz_div(bool show)
 {
     TEST_FN_OPEN
 
-    #define TEST_FUZZ_NUM_SSM_DIV(TAG, COUNT_1, COUNT_2, RUNS)              \
+    #define TEST_FUZZ_NUM_BZ_DIV(TAG, COUNT_1, COUNT_2, RUNS)               \
     {                                                                       \
         TEST_FUZZ_CASE_OPEN(TAG, RUNS)                                      \
         {                                                                   \
@@ -3036,6 +3044,15 @@ static void test_fuzz_num_bz_div(bool show)
             num_p num_2 = num_create_rand(COUNT_2);                         \
             num_p num_q, num_r;                                             \
             num_div_mod(&num_q, &num_r, num_copy(num_1), num_copy(num_2));  \
+            if(num_cmp(num_r, num_2) >= 0)                                  \
+            {                                                               \
+                printf("\nentries");                                        \
+                num_display_full("num_1", num_1);                           \
+                num_display_full("num_2", num_2);                           \
+                printf("\nmod bigger than dividend give");                  \
+                num_display_full("num_r", num_r);                           \
+                assert(false);                                              \
+            }                                                               \
             num_p num_aux = num_mul(num_copy(num_q), num_copy(num_2));      \
             num_aux = num_add(num_aux, num_copy(num_r));                    \
             if(!num_eq_dbg(num_copy(num_aux), num_copy(num_1)))             \
@@ -3056,19 +3073,19 @@ static void test_fuzz_num_bz_div(bool show)
         TEST_FUZZ_CASE_CLOSE                                                \
     }
 
-    TEST_FUZZ_NUM_SSM_DIV( 1,  3,  1, 100)
-    TEST_FUZZ_NUM_SSM_DIV( 1,  3,  2, 100)
-    TEST_FUZZ_NUM_SSM_DIV( 2,  4,  2, 100)
-    TEST_FUZZ_NUM_SSM_DIV( 3,  5,  2, 100)
-    TEST_FUZZ_NUM_SSM_DIV( 4,  8,  5, 100)
-    TEST_FUZZ_NUM_SSM_DIV( 5, 10,  7, 100)
-    TEST_FUZZ_NUM_SSM_DIV( 6, 32, 19, 100)
-    TEST_FUZZ_NUM_SSM_DIV( 7, 20, 20,   5)
-    TEST_FUZZ_NUM_SSM_DIV( 8, 30, 20,   5)
-    TEST_FUZZ_NUM_SSM_DIV( 9, 40, 20,   5)
-    TEST_FUZZ_NUM_SSM_DIV(10, 50, 20,   5)
+    TEST_FUZZ_NUM_BZ_DIV( 1,  3,  1, 100)
+    TEST_FUZZ_NUM_BZ_DIV( 1,  3,  2, 100)
+    TEST_FUZZ_NUM_BZ_DIV( 2,  4,  2, 100)
+    TEST_FUZZ_NUM_BZ_DIV( 3,  5,  2, 100)
+    TEST_FUZZ_NUM_BZ_DIV( 4,  8,  5, 100)
+    TEST_FUZZ_NUM_BZ_DIV( 5, 10,  7, 100)
+    TEST_FUZZ_NUM_BZ_DIV( 6, 32, 19, 100)
+    TEST_FUZZ_NUM_BZ_DIV( 7, 20, 20,   5)
+    TEST_FUZZ_NUM_BZ_DIV( 8, 30, 20,   5)
+    TEST_FUZZ_NUM_BZ_DIV( 9, 40, 20,   5)
+    TEST_FUZZ_NUM_BZ_DIV(10, 50, 20,   5)
 
-    #undef TEST_FUZZ_NUM_SSM_DIV
+    #undef TEST_FUZZ_NUM_BZ_DIV
 
     TEST_FN_CLOSE
 }

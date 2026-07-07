@@ -1,3 +1,4 @@
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -773,7 +774,7 @@ STATIC void num_sub_uint_offset(num_p num, uint64_t pos, uint64_t value)
 }
 
 // keeps NUM
-// before pr remove expand here
+// TODO remove expand here
 static void num_add_mul_uint_offset(
     num_p num_res, uint64_t pos_res,
     num_p num, uint64_t pos,
@@ -2171,17 +2172,14 @@ STATIC void num_ssm_fft_inv(num_p num_aux, num_p num_fft, ssm_params_p p)
     }
 }
 
-#define TRESHOLD 129
-
-// static bool ssm_is_recursive(uint64_t n) REVERT BEFORE PR
-bool ssm_is_recursive(uint64_t n)
+static bool ssm_is_recursive(uint64_t n)
 {
-    return (bool)((n > TRESHOLD) && (((n - 1) & (1 - n)) > 4));
+    constexpr uint64_t threshold = 129;
+    return (bool)((n > threshold) && (((n - 1) & (1 - n)) > 4));
 }
 
 // NOLINTBEGIN(readability-magic-numbers)
-// STATIC ssm_params_t ssm_get_params(uint64_t count) REVERT BEFORE PR
-ssm_params_t ssm_get_params(uint64_t count)
+STATIC ssm_params_t ssm_get_params(uint64_t count)
 {
     uint64_t M = B(stdc_bit_width(count) / 2);
     uint64_t K = 4 * stdc_bit_ceil((count + M - 1) / M);
@@ -2904,16 +2902,17 @@ static num_p num_div_mod_classic(num_p num_aux, num_p num_1, num_p num_2)
             continue;
         }
 
+        uint64_t r;
         if(num_1->chunk[num_1->count-1] == value_2)
         {
-            num_q->chunk[i] = UINT64_MAX;
-            num_aux = num_mul_uint_buffer(num_aux, num_2, UINT64_MAX);
-            num_sub_offset(num_1, i, num_aux);
-            continue;
+            r = UINT64_MAX;
+        }
+        else
+        {
+            uint128_t value_1 = U128HL(num_1->chunk[num_1->count-1], num_1->chunk[num_1->count-2]);
+            r = (uint64_t)(value_1 / value_2);
         }
 
-        uint128_t value_1 = U128HL(num_1->chunk[num_1->count-1], num_1->chunk[num_1->count-2]);
-        uint64_t r = (uint64_t)(value_1 / value_2);
         num_aux = num_mul_uint_buffer(num_aux, num_2, r);
         while(num_cmp_offset(num_1, i, num_aux) < 0)
         {
