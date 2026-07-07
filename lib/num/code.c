@@ -1764,7 +1764,7 @@ static void num_ssm_sub_mod_immed(
     uint64_t * restrict dest = &num_fft_1->chunk[pos_1];
     const uint64_t * restrict src_2 = &num_fft_2->chunk[pos_2];
 
-#ifdef __linux__
+#if !defined(NO_ASSEMBLY) && defined(__linux__)
 
     uint64_t reg_1, reg_2;
     uint64_t j = n;
@@ -1807,7 +1807,7 @@ static void num_ssm_sub_mod_immed(
             "memory"
     );
 
-#elifdef __APPLE__
+#elif !defined(NO_ASSEMBLY) && defined(__linux__)
 
     uint64_t count = n;
     uint64_t tmp1, tmp2; // Two temporaries required for the in-place math
@@ -1849,10 +1849,14 @@ static void num_ssm_sub_mod_immed(
     num_ssm_normalize(num_fft_1, pos_1, n);
 }
 
+#if !defined(NO_ASSEMBLY) && defined(__linux__)
+
 #define OPPOSITE_STEP(OFF, REG)                                                                     \
     "sbb %[" #REG "], [%[dest] + %[pos] + " #OFF "]     \n\t" /* REG -= *(dest + pos + OFF) + CF */ \
     "mov [%[dest] + %[pos] + " #OFF "], %[" #REG "]     \n\t" /* *(dest + pos + OFF) = REG       */ \
     "mov %[" #REG "], 0                                 \n\t" /* REG = 0 (preserves CF)          */
+
+#endif
 
 STATIC void num_ssm_opposite(num_p num_fft, uint64_t chunk_pos, uint64_t n)
 {
@@ -1861,7 +1865,7 @@ STATIC void num_ssm_opposite(num_p num_fft, uint64_t chunk_pos, uint64_t n)
 
     uint64_t * restrict dest = &num_fft->chunk[chunk_pos];
 
-#ifdef __linux__
+#if !defined(NO_ASSEMBLY) && defined(__linux__)
 
     uint64_t reg_1, reg_2;
     uint64_t j = n;
