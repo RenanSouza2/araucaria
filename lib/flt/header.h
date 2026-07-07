@@ -9,6 +9,7 @@
 #include "struct.h"
 
 void flt_num_display(flt_num_t flt);
+void flt_num_display_full(flt_num_t flt);
 void flt_num_display_dec(flt_num_t flt);
 
 flt_num_t flt_num_wrap(int64_t value, uint64_t size);

@@ -18,11 +18,11 @@ dbg d: debug.o
 
 lib.o: $(LIB_FILES)
 	echo " linking $(PRJ_NAME) object $(DIR)"
-	gcc -o $@ $^ $(FLAGS) $(FLAGS_PRD) $(FLAGS_LNK)
+	gcc -o $@ $^ $(FLAGS) $(FLAGS_PRD) $(FLAGS_LNK) $(FLAGS_EXTRA)
 
 debug.o: $(DBG_FILES)
 	echo " linking $(PRJ_NAME) debug $(DIR)"
-	gcc -o $@ $^ $(FLAGS) $(FLAGS_DBG) $(FLAGS_LNK)
+	gcc -o $@ $^ $(FLAGS) $(FLAGS_DBG) $(FLAGS_LNK) $(FLAGS_EXTRA)
 
 FORCE:
 

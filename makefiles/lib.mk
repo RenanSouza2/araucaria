@@ -11,11 +11,11 @@ dbg d: debug.o
 
 lib.o: code.c
 	echo "building $(PRJ_NAME) object $(DIR)"
-	gcc -o $@ $^ $(FLAGS) $(FLAGS_PRD) $(FLAGS_CMP)
+	gcc -o $@ $^ $(FLAGS) $(FLAGS_PRD) $(FLAGS_CMP) $(FLAGS_EXTRA)
 
 debug.o: code.c
 	echo "building $(PRJ_NAME) debug $(DIR)"
-	gcc -o $@ $^ $(FLAGS) $(FLAGS_DBG) $(FLAGS_CMP)
+	gcc -o $@ $^ $(FLAGS) $(FLAGS_DBG) $(FLAGS_CMP) $(FLAGS_EXTRA)
 
 
 

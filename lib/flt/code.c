@@ -154,6 +154,14 @@ void flt_num_display(flt_num_t flt)
     printf(" | exponent: " D64P() "", flt.exponent);
 }
 
+void flt_num_display_full(flt_num_t flt)
+{
+    CLU_FLT_IS_SAFE(flt);
+
+    sig_num_display(flt.sig, true);
+    printf(" | exponent: " D64P() "", flt.exponent);
+}
+
 void flt_num_display_dec(flt_num_t flt_0) // TODO TEST
 {
     CLU_FLT_IS_SAFE(flt_0);

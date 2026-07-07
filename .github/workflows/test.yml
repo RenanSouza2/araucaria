@@ -13,7 +13,20 @@ jobs:
         sudo apt-get install -y gcc-15 g++-15
         sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-15 100
         sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-15 100
-    - run: make build
+    - run: make build FLAGS_EXTRA=-fanalyzer
+  build_linux_no_assembly:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+    - run: git submodule update --init --recursive
+    - name: Install GCC 15
+      run: |
+        sudo add-apt-repository ppa:ubuntu-toolchain-r/test -y
+        sudo apt-get update
+        sudo apt-get install -y gcc-15 g++-15
+        sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-15 100
+        sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-15 100
+    - run: make build FLAGS_EXTRA="-fanalyzer -DNO_ASSEMBLY"
   test_linux:
     runs-on: ubuntu-latest
     steps:
@@ -27,15 +40,40 @@ jobs:
         sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-15 100
         sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-15 100
     - run: make test
+  test_linux_no_assembly:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+    - run: git submodule update --init --recursive
+    - name: Install GCC 15
+      run: |
+        sudo add-apt-repository ppa:ubuntu-toolchain-r/test -y
+        sudo apt-get update
+        sudo apt-get install -y gcc-15 g++-15
+        sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-15 100
+        sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-15 100
+    - run: make test FLAGS_EXTRA=-DNO_ASSEMBLY
   build_mac:
     runs-on: macos-latest
     steps:
     - uses: actions/checkout@v6
     - run: git submodule update --init --recursive
     - run: make build
+  build_mac_no_assembly:
+    runs-on: macos-latest
+    steps:
+    - uses: actions/checkout@v6
+    - run: git submodule update --init --recursive
+    - run: make build FLAGS_EXTRA=-DNO_ASSEMBLY
   test_mac:
     runs-on: macos-latest
     steps:
     - uses: actions/checkout@v6
     - run: git submodule update --init --recursive
     - run: make test
+  test_mac_no_assembly:
+    runs-on: macos-latest
+    steps:
+    - uses: actions/checkout@v6
+    - run: git submodule update --init --recursive
+    - run: make test FLAGS_EXTRA=-DNO_ASSEMBLY

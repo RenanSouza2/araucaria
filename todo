@@ -1,5 +1,4 @@
-remove return if not expected to expand
-fix flt_display_dec_corener cases bug
-multiplication half bits
-division with memoization
-base with memoization
+
+improve fuzz generator
+write better assembly
+write better non assembly code

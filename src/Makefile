@@ -12,7 +12,6 @@ dbg d: debug.out
 main.out: main.o $(LIB_FILE)
 	echo " linking $(PRJ_NAME) exec $(DIR) main"
 	gcc -o $@ $^ $(FLAGS) $(FLAGS_PRD) $(FLAGS_EXE)
-	echo "Finished $(PRJ_NAME) exec $(DIR) debug"
 
 debug.out: debug.o $(DBG_FULL_FILE)
 	echo " linking $(PRJ_NAME) debug $(DIR)"
@@ -22,11 +21,11 @@ debug.out: debug.o $(DBG_FULL_FILE)
 
 main.o: main.c
 	echo "building $(PRJ_NAME) object src main"
-	gcc -c -o $@ $< $(FLAGS) $(FLAGS_PRD) $(FLAGS_CMP)
+	gcc -c -o $@ $< $(FLAGS) $(FLAGS_PRD) $(FLAGS_CMP) $(FLAGS_EXTRA)
 
 debug.o: main.c
 	echo "building $(PRJ_NAME) object src debug"
-	gcc -c -o $@ $< $(FLAGS) $(FLAGS_DBG) $(FLAGS_CMP)
+	gcc -c -o $@ $< $(FLAGS) $(FLAGS_DBG) $(FLAGS_CMP) $(FLAGS_EXTRA)
 
 
 
