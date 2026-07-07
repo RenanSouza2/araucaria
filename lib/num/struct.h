@@ -22,7 +22,6 @@ STRUCT(num)
 {
     uint64_t size;
     uint64_t count;
-    bool cannot_expand;
     bool is_mmap;
     chunk_p chunk;
 };
