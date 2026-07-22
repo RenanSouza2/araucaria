@@ -699,7 +699,7 @@ static void mem_1(uint64_t)
 
 
 [[maybe_unused]]
-static void time_assembly_benchmark()
+static void time_assembly_mul()
 {
     #ifdef DEBUG
     uint64_t base = 22;
@@ -720,6 +720,44 @@ static void time_assembly_benchmark()
     TIME_SETUP
     // clu_log_level_set(CLU_LOG_DYNAMIC);
     num_p num_res = num_mul(num_1_c, num_2);
+    TIME_END(t1)
+    tprintf("time mul: %.3f", dtime(t1));
+
+    // TIME_RESET
+    // num_res = num_div(num_res, num_1); // NOLINT(readability-suspicious-call-argument)
+    // TIME_END(t2)
+    // tprintf("time div: %.3f", dtime(t2));
+
+    num_free(num_res);
+
+    #ifdef DEBUG
+    uint64_t count = clu_get_register_count();
+    tprintf("total allocations : " U64P() "", count);
+    tprintf("max occupancy     : " U64P() "", clu_get_max_occupancy());
+    assert(clu_mem_is_empty());
+    #endif
+}
+
+[[maybe_unused]]
+static void time_assembly_sqr()
+{
+    #ifdef DEBUG
+    uint64_t base = 22;
+    #else
+    uint64_t base = 28;
+    #endif
+
+    tprintf("base: " U64P() "", base);
+
+    num_p num = num_generate_1(base, 2);
+
+    tprintf("num->count: " U64P() "", num->count);
+
+    num_p num_c = num_copy(num);
+
+    TIME_SETUP
+    // clu_log_level_set(CLU_LOG_DYNAMIC);
+    num_p num_res = num_sqr(num_c);
     TIME_END(t1)
     tprintf("time mul: %.3f", dtime(t1));
 
@@ -767,8 +805,8 @@ int main()
     // flt_num_pi_2(1000);
     // flt_num_pi_3(1000);
     // mem_1(21);
-    time_assembly_benchmark();
-    // time_mul_classic_benchmark();
+    // time_assembly_mul();
+    time_assembly_sqr();
 
     // for(uint64_t n=1024; n<4096; n++)
     // {
@@ -784,3 +822,5 @@ int main()
     printf("\n");
     return 0;
 }
+
+// time_assembly_sqr       | time mul: 66.721
