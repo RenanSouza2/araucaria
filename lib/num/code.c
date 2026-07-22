@@ -1017,22 +1017,39 @@ static void num_sqr_classic_buffer(num_p num_res, num_p num)
     assert(num)
     assert(num_res->size >= 2 * num->count)
 
-    memset(num_res->chunk, 0, num_res->size * sizeof(uint64_t));
-    for(uint64_t i=0; i<num->count; i++)
+    uint64_t count = num->count;
+    uint64_t * restrict dest = num_res->chunk;
+    const uint64_t * restrict src = num->chunk;
+
+    memset(dest, 0, num_res->size * sizeof(uint64_t));
+    num_res->count = 2 * count;
+    for(uint64_t i=0; i<count; i++)
     {
-        uint64_t value = num->chunk[i];
+        uint64_t value = src[i];
 
-        uint128_t u = MUL(value, value);
-        num_add_uint_offset(num_res, (2 * i), LOW(u));
-        num_add_uint_offset(num_res, (2 * i) + 1, HIGH(u));
-
-        num_add_mul_uint_offset(num_res, (2 * i) + 1, num, i + 1, value << 1);
-
-        constexpr uint64_t msb_set = 0x8000000000000000;
-        if(value >= msb_set)
+        uint128_t carry = 0;
+        for(uint64_t j=i + 1; j<count; j++)
         {
-            num_add_offset(num_res, (2 * i) + 2, num, i + 1);
+            carry += dest[i+j] + MUL(value, src[j]);
+            dest[i+j] = LOW(carry);
+            carry = HIGH(carry);
         }
+        dest[i+count] = LOW(carry);
+    }
+
+    num_shl_core(num_res, 1);
+
+    uint128_t carry = 0;
+    for(uint64_t i=0; i<count; i++)
+    {
+        uint64_t value = src[i];
+        carry += dest[2 * i] + MUL(value, value);
+        dest[2 * i] = LOW(carry);
+        carry = HIGH(carry);
+
+        carry += dest[(2 * i) + 1];
+        dest[(2 * i) + 1] = LOW(carry);
+        carry = HIGH(carry);
     }
     num_normalize(num_res);
 }

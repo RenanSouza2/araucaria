@@ -823,4 +823,5 @@ int main()
     return 0;
 }
 
-// time_assembly_sqr       | time mul: 66.721
+// time_assembly_sqr       | time mul: 66.721 | original
+// time_assembly_sqr       | time mul: 28.756 | v1

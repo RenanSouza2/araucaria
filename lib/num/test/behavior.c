@@ -3142,7 +3142,7 @@ static void test_all(bool show)
     test_num_add(show);
     test_num_sub(show);
     test_num_mul(show);
-    test_num_sqr(show);
+    test_num_sqr(true);
     test_num_div_mod(show);
     test_num_gcd(show);
 
