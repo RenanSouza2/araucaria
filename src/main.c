@@ -754,18 +754,19 @@ static void time_assembly_sqr()
     tprintf("num->count: " U64P() "", num->count);
 
     num_p num_c = num_copy(num);
-
     TIME_SETUP
     // clu_log_level_set(CLU_LOG_DYNAMIC);
     num_p num_res = num_sqr(num_c);
     TIME_END(t1)
-    tprintf("time mul: %.3f", dtime(t1));
+    tprintf("time mul classic : %.3f", dtime(t1));
+    num_free(num_res);
 
-    // TIME_RESET
-    // num_res = num_div(num_res, num_1); // NOLINT(readability-suspicious-call-argument)
-    // TIME_END(t2)
-    // tprintf("time div: %.3f", dtime(t2));
-
+    num_c = num_copy(num);
+    TIME_RESET
+    // clu_log_level_set(CLU_LOG_DYNAMIC);
+    num_res = num_sqr(num_c);
+    TIME_END(t2)
+    tprintf("time mul ssm     : %.3f", dtime(t2));
     num_free(num_res);
 
     #ifdef DEBUG
