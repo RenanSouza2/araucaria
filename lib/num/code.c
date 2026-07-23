@@ -1038,18 +1038,16 @@ static void num_sqr_classic_buffer(num_p num_res, num_p num)
         dest[i+count] = LOW(carry);
     }
 
-    num_shl_core(num_res, 1);
-
     uint128_t carry = 0;
     #pragma GCC unroll 32
     for(uint64_t i=0; i<count; i++)
     {
         uint64_t value = src[i];
-        carry += dest[2 * i] + MUL(value, value);
+        carry += (2 * (uint128_t)dest[2 * i]) + MUL(value, value);
         dest[2 * i] = LOW(carry);
         carry = HIGH(carry);
 
-        carry += dest[(2 * i) + 1];
+        carry += 2 * (uint128_t)dest[(2 * i) + 1];
         dest[(2 * i) + 1] = LOW(carry);
         carry = HIGH(carry);
     }
