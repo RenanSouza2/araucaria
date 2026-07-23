@@ -1391,7 +1391,8 @@ num_p num_mul_classic(num_p num_1, num_p num_2)
     return num_normalize(num_res);
 }
 
-STATIC num_p num_sqr_classic(num_p num)
+// STATIC num_p num_sqr_classic(num_p num) revert this before PR
+num_p num_sqr_classic(num_p num)
 {
     num_p num_res = num_create(CLU_ARGS(2 * num->count, 0));
     num_sqr_classic_buffer(num_res, num);
@@ -2808,31 +2809,114 @@ static void num_ssm_sqr_mod_span(num_p num_aux, num_p num, uint64_t pos, uint64_
     num_ssm_sub_mod(num, pos, num_aux, 0, num_aux, n, n);
 }
 
+static void num_ssm_sqr_pointwise(
+    num_p num_aux_1,
+    num_p num_aux_2,
+    num_p num_fft,
+    ssm_params_p p
+);
+
+// KEEPS NUM_1 NUM_2
+static void num_ssm_sqr_wrap(
+    num_p num_aux_1,
+    num_p num_aux_2,
+    num_p num_fft,
+    num_p num,
+    uint64_t pos,
+    ssm_params_p p
+)
+{
+    CLU_HANDLER_IS_SAFE(num)
+    assert(num)
+
+    num_ssm_prepare_wrap(num_aux_2, num_fft, num, pos, p);
+
+    num_ssm_sqr_pointwise(
+        num_aux_1,
+        num_aux_2,
+        num_fft,
+        p
+    );
+
+    num_ssm_fft_inv(num_aux_2, num_fft, p);
+    num_ssm_depad_wrap(
+        num_aux_1,
+        num_aux_2,
+        num,
+        pos,
+        num_fft,
+        p
+    );
+}
+
+// num_aux_1->size >= p->n
+// num_aux_2->size >= 2 * p->n
+static void num_ssm_sqr_pointwise(
+    num_p num_aux_1,
+    num_p num_aux_2,
+    num_p num_fft,
+    ssm_params_p p
+)
+{
+    CLU_HANDLER_IS_SAFE(num_aux_1)
+    CLU_HANDLER_IS_SAFE(num_aux_2)
+    CLU_HANDLER_IS_SAFE(num_fft)
+    assert(num_aux_1)
+    assert(num_aux_2)
+    assert(num_fft)
+    assert(num_aux_1->size >= p->n)
+    assert(num_aux_2->size >= 2 * p->n)
+
+    if(!ssm_is_recursive(p->n))
+    {
+        for(uint64_t i=0; i<p->K; i++)
+        {
+            num_ssm_sqr_mod_span(num_aux_2, num_fft, i * p->n, p->n);
+        }
+        return;
+    }
+
+    ssm_params_t p_next = ssm_get_params_wrap(p->n);
+    num_p num_fft_next = num_create_dirty(CLU_ARGS(p_next.n * p_next.K, 0));
+    for(uint64_t i=0; i<p->K; i++)
+    {
+        // NOLINTNEXTLINE(readability-suspicious-call-argument)
+        num_ssm_sqr_wrap(
+            num_aux_1,
+            num_aux_2,
+            num_fft_next,
+            num_fft,
+            i * p->n,
+            &p_next
+        );
+    }
+    num_free(num_fft_next);
+}
+
 STATIC num_p num_sqr_ssm(num_p num)
 {
     CLU_HANDLER_IS_SAFE(num)
     assert(num)
 
-    uint64_t count = 2 * num->count;
-    ssm_params_t p = ssm_get_params(count);
+    ssm_params_t p = ssm_get_params(2 * num->count);
+    num_p num_aux_1 = num_create_dirty(CLU_ARGS(p.n, 0));
     num_p num_aux_2 = num_create_dirty(CLU_ARGS(2 * p.n, 0));
     num_p num_fft = num_ssm_prepare_no_wrap(num_aux_2, num, &p);
     num_free(num);
 
-    // num_ssm_sqr_pointwise();
-    for(uint64_t i=0; i<p.K; i++)
-    {
-        // TODO: recursive fft
-        num_ssm_sqr_mod_span(num_aux_2, num_fft, i * p.n, p.n);
-    }
+    num_ssm_sqr_pointwise(
+        num_aux_1,
+        num_aux_2,
+        num_fft,
+        &p
+    );
+    num_free(num_aux_1);
 
     num_ssm_fft_inv(num_aux_2, num_fft, &p);
     num_free(num_aux_2);
 
     return num_ssm_depad_no_wrap(num_fft, &p);
 }
-
-
 
 // Returns quocient
 // NUM becomes remainder

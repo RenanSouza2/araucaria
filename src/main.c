@@ -744,7 +744,7 @@ static void time_assembly_sqr()
     #ifdef DEBUG
     uint64_t base = 22;
     #else
-    uint64_t base = 28;
+    uint64_t base = 20;
     #endif
 
     tprintf("base: " U64P() "", base);
@@ -753,20 +753,36 @@ static void time_assembly_sqr()
 
     tprintf("num->count: " U64P() "", num->count);
 
-    num_p num_c = num_copy(num);
     TIME_SETUP
     // clu_log_level_set(CLU_LOG_DYNAMIC);
-    num_p num_res = num_sqr(num_c);
+    num_p num_res = num_mul_classic(num, num);
     TIME_END(t1)
-    tprintf("time sqr classic : %.3f", dtime(t1));
+    tprintf("time mul classic : %.3f", dtime(t1));
+    num_free(num_res);
+
+    num_p num_c = num_copy(num);
+    TIME_RESET
+    // clu_log_level_set(CLU_LOG_DYNAMIC);
+    num_res = num_sqr_classic(num_c);
+    TIME_END(t2)
+    tprintf("time sqr classic : %.3f", dtime(t2));
+    num_free(num_res);
+
+    num_p num_c_1 = num_copy(num);
+    num_p num_c_2 = num_copy(num);
+    TIME_RESET
+    // clu_log_level_set(CLU_LOG_DYNAMIC);
+    num_res = num_mul(num_c_1, num_c_2);
+    TIME_END(t3)
+    tprintf("time sqr ssm     : %.3f", dtime(t3));
     num_free(num_res);
 
     num_c = num_copy(num);
     TIME_RESET
     // clu_log_level_set(CLU_LOG_DYNAMIC);
     num_res = num_sqr(num_c);
-    TIME_END(t2)
-    tprintf("time sqr ssm     : %.3f", dtime(t2));
+    TIME_END(t4)
+    tprintf("time sqr ssm     : %.3f", dtime(t4));
     num_free(num_res);
 
     #ifdef DEBUG
@@ -832,3 +848,8 @@ int main()
 
 // time_assembly_sqr       | time sqr classic : 69.494 | original
 // time_assembly_sqr       | time sqr ssm     : 69.231
+
+// time_assembly_sqr       | time mul classic : 0.578
+// time_assembly_sqr       | time sqr classic : 1.042
+// time_assembly_sqr       | time sqr ssm     : 0.017
+// time_assembly_sqr       | time sqr ssm     : 0.024
