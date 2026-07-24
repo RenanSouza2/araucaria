@@ -115,11 +115,11 @@ STATIC void num_ssm_mul_wrap(
     ssm_params_p p
 );
 
-STATIC num_p num_mul_classic(num_p num_1, num_p num_2);
+// STATIC num_p num_mul_classic(num_p num_1, num_p num_2); REVERT BEFORE PR
 STATIC num_p num_mul_ssm(num_p num_1, num_p num_2);
 STATIC num_p num_mul_core(num_p num_1, num_p num_2);
 
-STATIC num_p num_sqr_classic(num_p num);
+// STATIC num_p num_sqr_classic(num_p num);
 STATIC num_p num_sqr_ssm(num_p num);
 
 STATIC uint64_t num_div_normalize(num_p *num_1, num_p *num_2);

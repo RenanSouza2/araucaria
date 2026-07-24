@@ -1819,6 +1819,7 @@ static void test_num_ssm_depad_wrap(bool show)
     TEST_FN_CLOSE
 }
 
+[[maybe_unused]]
 static void test_num_ssm_mul_wrap(bool show)
 {
     TEST_FN_OPEN
@@ -2148,6 +2149,7 @@ static void test_num_sub(bool show)
     TEST_FN_CLOSE
 }
 
+[[maybe_unused]]
 static void test_num_mul(bool show)
 {
     TEST_FN_OPEN
@@ -2301,6 +2303,7 @@ static void test_num_mul(bool show)
     TEST_FN_CLOSE
 }
 
+[[maybe_unused]]
 static void test_num_sqr(bool show)
 {
     TEST_FN_OPEN
