@@ -701,11 +701,11 @@ static void mem_1(uint64_t)
 [[maybe_unused]]
 static void time_assembly_mul()
 {
-    #ifdef DEBUG
+#ifdef DEBUG
     uint64_t base = 22;
-    #else
+#else
     uint64_t base = 28;
-    #endif
+#endif
 
     tprintf("base: " U64P() "", base);
 
@@ -730,22 +730,22 @@ static void time_assembly_mul()
 
     num_free(num_res);
 
-    #ifdef DEBUG
+#ifdef DEBUG
     uint64_t count = clu_get_register_count();
     tprintf("total allocations : " U64P() "", count);
     tprintf("max occupancy     : " U64P() "", clu_get_max_occupancy());
     assert(clu_mem_is_empty());
-    #endif
+#endif
 }
 
 [[maybe_unused]]
 static void time_assembly_sqr()
 {
-    #ifdef DEBUG
+#ifdef DEBUG
     uint64_t base = 22;
-    #else
+#else
     uint64_t base = 28;
-    #endif
+#endif
 
     tprintf("base: " U64P() "", base);
 
@@ -759,12 +759,12 @@ static void time_assembly_sqr()
 
     // TIME_RESET
     // // clu_log_level_set(CLU_LOG_DYNAMIC);
-    // num_p num_res = num_mul_classic(num, num);
+    // num_res = num_mul_classic(num, num);
     // TIME_END(t1)
     // tprintf("time mul classic : %.3f", dtime(t1));
     // num_free(num_res);
 
-    // num_p num_c = num_copy(num);
+    // num_c = num_copy(num);
     // TIME_RESET
     // // clu_log_level_set(CLU_LOG_DYNAMIC);
     // num_res = num_sqr_classic(num_c);
@@ -789,12 +789,12 @@ static void time_assembly_sqr()
     tprintf("time sqr ssm     : %.3f", dtime(t4));
     num_free(num_res);
 
-    #ifdef DEBUG
+#ifdef DEBUG
     uint64_t count = clu_get_register_count();
     tprintf("total allocations : " U64P() "", count);
     tprintf("max occupancy     : " U64P() "", clu_get_max_occupancy());
     assert(clu_mem_is_empty());
-    #endif
+#endif
 }
 
 
@@ -843,15 +843,3 @@ int main()
     printf("\n");
     return 0;
 }
-
-// time_assembly_sqr       | time sqr: 66.721 | original
-// time_assembly_sqr       | time sqr: 28.756 | v1
-// time_assembly_sqr       | time sqr: 22.702 | v2
-// time_assembly_sqr       | time sqr: 20.277 | v3
-
-
-
-// time_assembly_sqr       | base: 28
-// time_assembly_sqr       | num->count: 9451329
-// time_assembly_sqr       | time mul ssm     : 10.035
-// time_assembly_sqr       | time sqr ssm     : 7.124
