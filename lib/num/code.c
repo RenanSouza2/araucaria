@@ -355,7 +355,8 @@ static num_p num_create_disk(CLU_PARAMS(uint64_t size, uint64_t count))
     unlink(template_path);
 
     uint64_t total_size = sizeof(num_t) + (size * sizeof(uint64_t));
-    assert(ftruncate(fd, (off_t)total_size) == 0);
+    int res = ftruncate(fd, (off_t)total_size);
+    assert(res == 0);
     num_p num = mmap(NULL, total_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     close(fd);
     *num = (num_t)
@@ -659,9 +660,11 @@ num_p num_read_dec(const char file_name[])
     FILE *fp = fopen(file_name, "r");
     assert(fp);
 
-    assert(!fseek(fp, 0, SEEK_END));
+    int res = fseek(fp, 0, SEEK_END);
+    assert(!res);
     uint64_t size = get_ftell(fp);
-    assert(!fseek(fp, 0, SEEK_SET));
+    res = fseek(fp, 0, SEEK_END);
+    assert(!res);
 
     uint64_t pos = size / chunk_len;
     uint64_t extra = size % chunk_len;
@@ -720,7 +723,8 @@ void num_free(num_p num)
     }
 
     uint64_t total_size = sizeof(num_t) + (num->size * sizeof(uint64_t));
-    assert(munmap(num, total_size) == 0);
+    int res = munmap(num, total_size);
+    assert(res == 0);
     CLU_HANDLER_UNREGISTER(num)
 }
 
@@ -736,13 +740,15 @@ STATIC void num_add_uint_offset(num_p num, uint64_t pos, uint64_t value)
         return;
     }
 
-    if(pos >= num->count)
+    if(pos == num->count)
     {
         assert(num->size > num->count);
         num->chunk[pos] = value;
         num->count = pos + 1;
         return;
     }
+
+    assert(pos < num->count);
 
     uint64_t carry = value;
     for(uint64_t i=pos; i<num->count && carry; i++)
@@ -2129,33 +2135,6 @@ static void num_ssm_sub_mod_immed(
         // clobber
         :   "cc",
             "memory"
-    );
-
-#elif !defined(NO_ASSEMBLY) && defined(__linux__)
-
-    uint64_t count = n;
-    uint64_t tmp1, tmp2; // Two temporaries required for the in-place math
-
-    __asm__ volatile (
-        "cbz %[count], 2f\n\t"               // If count == 0, jump to label 2
-
-        "cmp xzr, xzr\n\t"                   // SET the carry flag (C=1 means NO borrow)
-
-        "1:\n\t"
-        "ldr %[tmp1], [%[src_2]], #8\n\t"    // tmp1 = *src_2, then src_2 += 8
-        "ldr %[tmp2], [%[dest]]\n\t"         // tmp2 = *dest (NO post-increment yet)
-
-        "sbcs %[tmp2], %[tmp2], %[tmp1]\n\t" // tmp2 = tmp2 - tmp1 - (1 - C), update C
-
-        "str %[tmp2], [%[dest]], #8\n\t"     // *dest = tmp2, then dest += 8
-
-        "sub %[count], %[count], #1\n\t"     // count-- (leaves flags untouched)
-        "cbnz %[count], 1b\n\t"              // Loop if count != 0
-        "2:\n"
-        : [dest] "+r" (dest), [src_2] "+r" (src_2), [count] "+r" (count),
-          [tmp1] "=&r" (tmp1), [tmp2] "=&r" (tmp2)
-        :
-        : "cc", "memory"
     );
 
 #else
