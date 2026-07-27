@@ -663,7 +663,7 @@ num_p num_read_dec(const char file_name[])
     int res = fseek(fp, 0, SEEK_END);
     assert(!res);
     uint64_t size = get_ftell(fp);
-    res = fseek(fp, 0, SEEK_END);
+    res = fseek(fp, 0, SEEK_SET);
     assert(!res);
 
     uint64_t pos = size / chunk_len;
