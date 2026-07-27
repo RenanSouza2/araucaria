@@ -1585,160 +1585,97 @@ static void num_sqr_classic_buffer(num_p num_res, num_p num)
 
 
     // --- PHASE 2: DOUBLE DESTINATION ARRAY ---
-    uint64_t d_count = 2 * count;
-    j = d_count >> 5;
-    uint64_t tail = d_count & 31;
-    uint64_t _a;
-
-#define DBL_STEP(OFF)                                                       \
-    "mov %[_a], [%[dest] + %[pos] + " #OFF "]       \n\t"                   \
-    "adc %[_a], %[_a]                               \n\t"                   \
-    "mov [%[dest] + %[pos] + " #OFF "], %[_a]       \n\t"
-
-    __asm__ __volatile__ (
-        ".intel_syntax noprefix                         \n\t"
-        "xor %[pos], %[pos]                             \n\t"
-        "test %[j], %[j]                                \n\t"
-        "jz loop_dbl_tail_prepare%=                     \n\t"
-
-        "loop_dbl_begin%=:                              \n\t"
-        DBL_STEP(  0)
-        DBL_STEP(  8)
-        DBL_STEP( 16)
-        DBL_STEP( 24)
-        DBL_STEP( 32)
-        DBL_STEP( 40)
-        DBL_STEP( 48)
-        DBL_STEP( 56)
-        DBL_STEP( 64)
-        DBL_STEP( 72)
-        DBL_STEP( 80)
-        DBL_STEP( 88)
-        DBL_STEP( 96)
-        DBL_STEP(104)
-        DBL_STEP(112)
-        DBL_STEP(120)
-        DBL_STEP(128)
-        DBL_STEP(136)
-        DBL_STEP(144)
-        DBL_STEP(152)
-        DBL_STEP(160)
-        DBL_STEP(168)
-        DBL_STEP(176)
-        DBL_STEP(184)
-        DBL_STEP(192)
-        DBL_STEP(200)
-        DBL_STEP(208)
-        DBL_STEP(216)
-        DBL_STEP(224)
-        DBL_STEP(232)
-        DBL_STEP(240)
-        DBL_STEP(248)
-
-        "lea %[pos], [%[pos] + 256]                     \n\t"
-        "dec %[j]                                       \n\t"
-        "jnz loop_dbl_begin%=                           \n\t"
-
-        "loop_dbl_tail_prepare%=:                       \n\t"
-        "dec %[tail]                                    \n\t" // SF=1 if 0. CF untouched.
-        "js loop_dbl_end%=                              \n\t"
-
-        "loop_dbl_tail_begin%=:                         \n\t"
-        DBL_STEP(0)
-        "lea %[pos], [%[pos] + 8]                       \n\t"
-        "dec %[tail]                                    \n\t"
-        "jns loop_dbl_tail_begin%=                      \n\t"
-
-        "loop_dbl_end%=:                                \n\t"
-
-        ".att_syntax prefix                             \n\t"
-        : [pos] "=&r" (pos), [j] "+&r" (j), [tail] "+&r" (tail), [_a] "=&r" (_a)
-        : [dest] "r" (dest)
-        : "cc", "memory"
-    );
-#undef DBL_STEP
-
-
-    // --- PHASE 3: ADD SQUARES DIAGONALLY ---
     uint64_t pos_src, pos_dest;
+    uint64_t _a;
     j = count >> 5;
-    tail = count & 31;
+    uint64_t tail = count & 31;
 
-#define SQR_ADD_STEP(OFF_SRC, OFF_DEST)                                     \
-    "mov rdx, [%[src] + %[pos_src] + " #OFF_SRC "]  \n\t"                   \
-    "mulx %[high], %[low], rdx                      \n\t"                   \
-    "adcx %[low], [%[dest] + %[pos_dest] + " #OFF_DEST "]\n\t"              \
-    "mov [%[dest] + %[pos_dest] + " #OFF_DEST "], %[low] \n\t"              \
-    "adcx %[high], [%[dest] + %[pos_dest] + " #OFF_DEST " + 8]\n\t"         \
-    "mov [%[dest] + %[pos_dest] + " #OFF_DEST " + 8], %[high] \n\t"
+#define COMBINED_STEP(OFF_SRC, OFF_DEST)                                    \
+    "mov rdx, [%[src] + %[pos_src] + " #OFF_SRC "]                  \n\t"   \
+    "mulx %[high], %[low], rdx                                      \n\t"   \
+    "mov %[_a], [%[dest] + %[pos_dest] + " #OFF_DEST "]             \n\t"   \
+    "adox %[_a], %[_a]                                              \n\t"   \
+    "adcx %[low], %[_a]                                             \n\t"   \
+    "mov [%[dest] + %[pos_dest] + " #OFF_DEST "], %[low]            \n\t"   \
+    "mov %[_a], [%[dest] + %[pos_dest] + " #OFF_DEST " + 8]         \n\t"   \
+    "adox %[_a], %[_a]                                              \n\t"   \
+    "adcx %[high], %[_a]                                            \n\t"   \
+    "mov [%[dest] + %[pos_dest] + " #OFF_DEST " + 8], %[high]       \n\t"
 
     __asm__ __volatile__ (
-        ".intel_syntax noprefix                         \n\t"
-        "xor %[pos_src], %[pos_src]                     \n\t"
-        "xor %[pos_dest], %[pos_dest]                   \n\t" // clears CF
-        "test %[j], %[j]                                \n\t"
-        "jz loop_sq_tail_prepare%=                      \n\t"
+        ".intel_syntax noprefix                                     \n\t"
+        "mov rcx, %[j]                                              \n\t"
+        "xor %[pos_src], %[pos_src]                                 \n\t"
+        "xor %[pos_dest], %[pos_dest]                               \n\t" // Clears both CF and OF
+        "test rcx, rcx                                              \n\t"
+        "jz loop_comb_tail_prepare%=                                \n\t"
 
-        "loop_sq_begin%=:                               \n\t"
-        SQR_ADD_STEP(  0,   0)
-        SQR_ADD_STEP(  8,  16)
-        SQR_ADD_STEP( 16,  32)
-        SQR_ADD_STEP( 24,  48)
-        SQR_ADD_STEP( 32,  64)
-        SQR_ADD_STEP( 40,  80)
-        SQR_ADD_STEP( 48,  96)
-        SQR_ADD_STEP( 56, 112)
-        SQR_ADD_STEP( 64, 128)
-        SQR_ADD_STEP( 72, 144)
-        SQR_ADD_STEP( 80, 160)
-        SQR_ADD_STEP( 88, 176)
-        SQR_ADD_STEP( 96, 192)
-        SQR_ADD_STEP(104, 208)
-        SQR_ADD_STEP(112, 224)
-        SQR_ADD_STEP(120, 240)
-        SQR_ADD_STEP(128, 256)
-        SQR_ADD_STEP(136, 272)
-        SQR_ADD_STEP(144, 288)
-        SQR_ADD_STEP(152, 304)
-        SQR_ADD_STEP(160, 320)
-        SQR_ADD_STEP(168, 336)
-        SQR_ADD_STEP(176, 352)
-        SQR_ADD_STEP(184, 368)
-        SQR_ADD_STEP(192, 384)
-        SQR_ADD_STEP(200, 400)
-        SQR_ADD_STEP(208, 416)
-        SQR_ADD_STEP(216, 432)
-        SQR_ADD_STEP(224, 448)
-        SQR_ADD_STEP(232, 464)
-        SQR_ADD_STEP(240, 480)
-        SQR_ADD_STEP(248, 496)
+        "loop_comb_begin%=:                                         \n\t"
+        COMBINED_STEP(  0,   0)
+        COMBINED_STEP(  8,  16)
+        COMBINED_STEP( 16,  32)
+        COMBINED_STEP( 24,  48)
+        COMBINED_STEP( 32,  64)
+        COMBINED_STEP( 40,  80)
+        COMBINED_STEP( 48,  96)
+        COMBINED_STEP( 56, 112)
+        COMBINED_STEP( 64, 128)
+        COMBINED_STEP( 72, 144)
+        COMBINED_STEP( 80, 160)
+        COMBINED_STEP( 88, 176)
+        COMBINED_STEP( 96, 192)
+        COMBINED_STEP(104, 208)
+        COMBINED_STEP(112, 224)
+        COMBINED_STEP(120, 240)
+        COMBINED_STEP(128, 256)
+        COMBINED_STEP(136, 272)
+        COMBINED_STEP(144, 288)
+        COMBINED_STEP(152, 304)
+        COMBINED_STEP(160, 320)
+        COMBINED_STEP(168, 336)
+        COMBINED_STEP(176, 352)
+        COMBINED_STEP(184, 368)
+        COMBINED_STEP(192, 384)
+        COMBINED_STEP(200, 400)
+        COMBINED_STEP(208, 416)
+        COMBINED_STEP(216, 432)
+        COMBINED_STEP(224, 448)
+        COMBINED_STEP(232, 464)
+        COMBINED_STEP(240, 480)
+        COMBINED_STEP(248, 496)
 
-        "lea %[pos_src], [%[pos_src] + 256]             \n\t"
-        "lea %[pos_dest], [%[pos_dest] + 512]           \n\t"
-        "dec %[j]                                       \n\t"
-        "jnz loop_sq_begin%=                            \n\t"
+        "lea %[pos_src], [%[pos_src] + 256]                         \n\t"
+        "lea %[pos_dest], [%[pos_dest] + 512]                       \n\t"
 
-        "loop_sq_tail_prepare%=:                        \n\t"
-        "dec %[tail]                                    \n\t" // SF=1 if 0. CF untouched.
-        "js loop_sq_end%=                               \n\t"
+        // Loop control avoiding flag corruption (preserves OF and CF)
+        "lea rcx, [rcx - 1]                                         \n\t"
+        "jrcxz loop_comb_tail_prepare%=                             \n\t"
+        "jmp loop_comb_begin%=                                      \n\t"
 
-        "loop_sq_tail_begin%=:                          \n\t"
-        SQR_ADD_STEP(0, 0)
-        "lea %[pos_src], [%[pos_src] + 8]               \n\t"
-        "lea %[pos_dest], [%[pos_dest] + 16]            \n\t"
-        "dec %[tail]                                    \n\t"
-        "jns loop_sq_tail_begin%=                       \n\t"
+        "loop_comb_tail_prepare%=:                                  \n\t"
+        "mov rcx, %[tail]                                           \n\t" // mov preserves all flags
+        "jrcxz loop_comb_end%=                                      \n\t"
 
-        "loop_sq_end%=:                                 \n\t"
+        "loop_comb_tail_begin%=:                                    \n\t"
+        COMBINED_STEP(0, 0)
+        "lea %[pos_src], [%[pos_src] + 8]                           \n\t"
+        "lea %[pos_dest], [%[pos_dest] + 16]                        \n\t"
+        "lea rcx, [rcx - 1]                                         \n\t"
+        "jrcxz loop_comb_end%=                                      \n\t"
+        "jmp loop_comb_tail_begin%=                                 \n\t"
 
-        ".att_syntax prefix                             \n\t"
+        "loop_comb_end%=:                                           \n\t"
+        "mov %[j], rcx                                              \n\t" // Update states to match destruction
+        "mov %[tail], rcx                                           \n\t"
+        ".att_syntax prefix                                         \n\t"
+
         : [pos_src] "=&r" (pos_src), [pos_dest] "=&r" (pos_dest),
           [j] "+&r" (j), [tail] "+&r" (tail),
-          [high] "=&r" (high), [low] "=&r" (low)
+          [high] "=&r" (high), [low] "=&r" (low), [_a] "=&r" (_a)
         : [src] "r" (src), [dest] "r" (dest)
-        : "cc", "memory", "rdx"
+        : "cc", "memory", "rdx", "rcx"
     );
-#undef SQR_ADD_STEP
+#undef COMBINED_STEP
 
 #else
 
