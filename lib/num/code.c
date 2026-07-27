@@ -1394,8 +1394,6 @@ static void num_sqr_classic_buffer(num_p num_res, num_p num)
 
     // --- PHASE 1: CROSS PRODUCTS ---
 
-    // 1. Peel i=0 to use MUL_CLASSIC_STEP_ZERO.
-    // Avoids useless reads/adds on fresh 0 memory.
     if (count > 1)
     {
         uint64_t value = src[0];
@@ -1403,8 +1401,8 @@ static void num_sqr_classic_buffer(num_p num_res, num_p num)
         uint64_t * restrict d = &dest[1];
         const uint64_t * restrict s = &src[1];
 
-        j = inner_count >> 5;
-        uint64_t tail = inner_count & 31;
+        j = inner_count >> 3;
+        uint64_t tail = inner_count & 7;
 
         __asm__ __volatile__ (
             ".intel_syntax noprefix                         \n\t"
@@ -1423,48 +1421,24 @@ static void num_sqr_classic_buffer(num_p num_res, num_p num)
             MUL_CLASSIC_STEP_ZERO( 40, carry, high, pos)
             MUL_CLASSIC_STEP_ZERO( 48, high, carry, pos)
             MUL_CLASSIC_STEP_ZERO( 56, carry, high, pos)
-            MUL_CLASSIC_STEP_ZERO( 64, high, carry, pos)
-            MUL_CLASSIC_STEP_ZERO( 72, carry, high, pos)
-            MUL_CLASSIC_STEP_ZERO( 80, high, carry, pos)
-            MUL_CLASSIC_STEP_ZERO( 88, carry, high, pos)
-            MUL_CLASSIC_STEP_ZERO( 96, high, carry, pos)
-            MUL_CLASSIC_STEP_ZERO(104, carry, high, pos)
-            MUL_CLASSIC_STEP_ZERO(112, high, carry, pos)
-            MUL_CLASSIC_STEP_ZERO(120, carry, high, pos)
-            MUL_CLASSIC_STEP_ZERO(128, high, carry, pos)
-            MUL_CLASSIC_STEP_ZERO(136, carry, high, pos)
-            MUL_CLASSIC_STEP_ZERO(144, high, carry, pos)
-            MUL_CLASSIC_STEP_ZERO(152, carry, high, pos)
-            MUL_CLASSIC_STEP_ZERO(160, high, carry, pos)
-            MUL_CLASSIC_STEP_ZERO(168, carry, high, pos)
-            MUL_CLASSIC_STEP_ZERO(176, high, carry, pos)
-            MUL_CLASSIC_STEP_ZERO(184, carry, high, pos)
-            MUL_CLASSIC_STEP_ZERO(192, high, carry, pos)
-            MUL_CLASSIC_STEP_ZERO(200, carry, high, pos)
-            MUL_CLASSIC_STEP_ZERO(208, high, carry, pos)
-            MUL_CLASSIC_STEP_ZERO(216, carry, high, pos)
-            MUL_CLASSIC_STEP_ZERO(224, high, carry, pos)
-            MUL_CLASSIC_STEP_ZERO(232, carry, high, pos)
-            MUL_CLASSIC_STEP_ZERO(240, high, carry, pos)
-            MUL_CLASSIC_STEP_ZERO(248, carry, high, pos)
 
-            "lea %[pos], [%[pos] + 256]                     \n\t"
+            "lea %[pos], [%[pos] + 64]                      \n\t"
             "dec %[j]                                       \n\t"
             "jnz loop_cp0_begin%=                           \n\t"
 
             "loop_cp0_tail_prepare%=:                       \n\t"
-            "dec %[tail]                                    \n\t" // SF=1 if tail was 0, preserves CF!
+            "dec %[tail]                                    \n\t"
             "js loop_cp0_end%=                              \n\t"
 
             "loop_cp0_tail_begin%=:                         \n\t"
             MUL_CLASSIC_STEP_ZERO(0, high, carry, pos)
-            "mov %[carry], %[high]                          \n\t" // Shift output to next input carry
+            "mov %[carry], %[high]                          \n\t"
             "lea %[pos], [%[pos] + 8]                       \n\t"
             "dec %[tail]                                    \n\t"
             "jns loop_cp0_tail_begin%=                      \n\t"
 
             "loop_cp0_end%=:                                \n\t"
-            "adcx %[carry], %[zero]                         \n\t" // Catch the final CF
+            "adcx %[carry], %[zero]                         \n\t"
             "mov [%[dest] + %[pos]], %[carry]               \n\t"
 
             ".att_syntax prefix                             \n\t"
@@ -1501,8 +1475,8 @@ static void num_sqr_classic_buffer(num_p num_res, num_p num)
         uint64_t * restrict d = &dest[(2 * i) + 1];
         const uint64_t * restrict s = &src[i + 1];
 
-        j = inner_count >> 5;
-        uint64_t tail = inner_count & 31;
+        j = inner_count >> 3;           // Changed from 5 to 3
+        uint64_t tail = inner_count & 7; // Changed from 31 to 7
 
         __asm__ __volatile__ (
             ".intel_syntax noprefix                         \n\t"
@@ -1521,40 +1495,16 @@ static void num_sqr_classic_buffer(num_p num_res, num_p num)
             MUL_CLASSIC_STEP( 40, carry, high, s, pos)
             MUL_CLASSIC_STEP( 48, high, carry, s, pos)
             MUL_CLASSIC_STEP( 56, carry, high, s, pos)
-            MUL_CLASSIC_STEP( 64, high, carry, s, pos)
-            MUL_CLASSIC_STEP( 72, carry, high, s, pos)
-            MUL_CLASSIC_STEP( 80, high, carry, s, pos)
-            MUL_CLASSIC_STEP( 88, carry, high, s, pos)
-            MUL_CLASSIC_STEP( 96, high, carry, s, pos)
-            MUL_CLASSIC_STEP(104, carry, high, s, pos)
-            MUL_CLASSIC_STEP(112, high, carry, s, pos)
-            MUL_CLASSIC_STEP(120, carry, high, s, pos)
-            MUL_CLASSIC_STEP(128, high, carry, s, pos)
-            MUL_CLASSIC_STEP(136, carry, high, s, pos)
-            MUL_CLASSIC_STEP(144, high, carry, s, pos)
-            MUL_CLASSIC_STEP(152, carry, high, s, pos)
-            MUL_CLASSIC_STEP(160, high, carry, s, pos)
-            MUL_CLASSIC_STEP(168, carry, high, s, pos)
-            MUL_CLASSIC_STEP(176, high, carry, s, pos)
-            MUL_CLASSIC_STEP(184, carry, high, s, pos)
-            MUL_CLASSIC_STEP(192, high, carry, s, pos)
-            MUL_CLASSIC_STEP(200, carry, high, s, pos)
-            MUL_CLASSIC_STEP(208, high, carry, s, pos)
-            MUL_CLASSIC_STEP(216, carry, high, s, pos)
-            MUL_CLASSIC_STEP(224, high, carry, s, pos)
-            MUL_CLASSIC_STEP(232, carry, high, s, pos)
-            MUL_CLASSIC_STEP(240, high, carry, s, pos)
-            MUL_CLASSIC_STEP(248, carry, high, s, pos)
 
             "adox %[carry], %[zero]                         \n\t"
 
-            "lea %[pos], [%[pos] + 256]                     \n\t"
+            "lea %[pos], [%[pos] + 64]                      \n\t"
             "dec %[j]                                       \n\t"
             "jnz loop_cp_begin%=                            \n\t"
 
             "loop_cp_tail_prepare%=:                        \n\t"
-            "adcx %[carry], %[zero]                         \n\t" // Flushes active CF to carry
-            "test %[tail], %[tail]                          \n\t" // Safe to clobber CF/OF here
+            "adcx %[carry], %[zero]                         \n\t"
+            "test %[tail], %[tail]                          \n\t"
             "jz loop_cp_end%=                               \n\t"
 
             "loop_cp_tail_begin%=:                          \n\t"
@@ -1593,8 +1543,8 @@ static void num_sqr_classic_buffer(num_p num_res, num_p num)
     // --- PHASE 2: DOUBLE DESTINATION ARRAY ---
     uint64_t pos_src, pos_dest;
     uint64_t _a;
-    j = count >> 5;
-    uint64_t tail = count & 31;
+    j = count >> 3;           // Changed from 5 to 3
+    uint64_t tail = count & 7; // Changed from 31 to 7
 
 #define COMBINED_STEP(OFF_SRC, OFF_DEST)                                    \
     "mov rdx, [%[src] + %[pos_src] + " #OFF_SRC "]                  \n\t"   \
@@ -1625,33 +1575,9 @@ static void num_sqr_classic_buffer(num_p num_res, num_p num)
         COMBINED_STEP( 40,  80)
         COMBINED_STEP( 48,  96)
         COMBINED_STEP( 56, 112)
-        COMBINED_STEP( 64, 128)
-        COMBINED_STEP( 72, 144)
-        COMBINED_STEP( 80, 160)
-        COMBINED_STEP( 88, 176)
-        COMBINED_STEP( 96, 192)
-        COMBINED_STEP(104, 208)
-        COMBINED_STEP(112, 224)
-        COMBINED_STEP(120, 240)
-        COMBINED_STEP(128, 256)
-        COMBINED_STEP(136, 272)
-        COMBINED_STEP(144, 288)
-        COMBINED_STEP(152, 304)
-        COMBINED_STEP(160, 320)
-        COMBINED_STEP(168, 336)
-        COMBINED_STEP(176, 352)
-        COMBINED_STEP(184, 368)
-        COMBINED_STEP(192, 384)
-        COMBINED_STEP(200, 400)
-        COMBINED_STEP(208, 416)
-        COMBINED_STEP(216, 432)
-        COMBINED_STEP(224, 448)
-        COMBINED_STEP(232, 464)
-        COMBINED_STEP(240, 480)
-        COMBINED_STEP(248, 496)
 
-        "lea %[pos_src], [%[pos_src] + 256]                         \n\t"
-        "lea %[pos_dest], [%[pos_dest] + 512]                       \n\t"
+        "lea %[pos_src], [%[pos_src] + 64]                          \n\t" // Changed from 256 to 64
+        "lea %[pos_dest], [%[pos_dest] + 128]                       \n\t" // Changed from 512 to 128
 
         // Loop control avoiding flag corruption (preserves OF and CF)
         "lea rcx, [rcx - 1]                                         \n\t"
@@ -1675,11 +1601,19 @@ static void num_sqr_classic_buffer(num_p num_res, num_p num)
         "mov %[tail], rcx                                           \n\t"
         ".att_syntax prefix                                         \n\t"
 
-        : [pos_src] "=&r" (pos_src), [pos_dest] "=&r" (pos_dest),
-          [j] "+&r" (j), [tail] "+&r" (tail),
-          [high] "=&r" (high), [low] "=&r" (low), [_a] "=&r" (_a)
-        : [src] "r" (src), [dest] "r" (dest)
-        : "cc", "memory", "rdx", "rcx"
+        :   [pos_src] "=&r" (pos_src),
+            [pos_dest] "=&r" (pos_dest),
+            [j] "+&r" (j),
+            [tail] "+&r" (tail),
+            [high] "=&r" (high),
+            [low] "=&r" (low),
+            [_a] "=&r" (_a)
+        :   [src] "r" (src),
+            [dest] "r" (dest)
+        :   "cc",
+            "memory",
+            "rdx",
+            "rcx"
     );
 #undef COMBINED_STEP
 
