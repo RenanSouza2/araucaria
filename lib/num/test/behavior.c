@@ -12,7 +12,6 @@ static char buffer[256];
 #define NAME "UNDEFINED_TAG"
 #endif
 
-[[maybe_unused]]
 static char* format_buffer(const char* func)
 {
     snprintf(buffer, 256, "%s %s", NAME, func);
@@ -1732,7 +1731,6 @@ static void test_num_ssm_fft_fwd(bool show)
     TEST_FN_CLOSE
 }
 
-
 [[maybe_unused]]
 static void test_num_ssm_depad_wrap(bool show)
 {
@@ -2310,22 +2308,15 @@ static void test_num_sqr(bool show)
 {
     TEST_FN_OPEN
 
-    #define TEST_NUM_SQR_FN(TAG, FN, NUM, RES)          \
+    #define TEST_NUM_SQR(TAG, NUM, RES)                 \
     {                                                   \
         TEST_CASE_OPEN(TAG)                             \
         {                                               \
             num_p num = num_create_immed(ARG_OPEN NUM); \
-            num = FN(num);                              \
+            num = num_sqr(num);                         \
             assert(num_immed(num, ARG_OPEN RES))        \
         }                                               \
         TEST_CASE_CLOSE                                 \
-    }
-
-    #define TEST_NUM_SQR(TAG, NUM, RES)                                 \
-    {                                                                   \
-        TEST_NUM_SQR_FN((10 * (TAG)) + 1, num_sqr_classic, NUM, RES)    \
-        TEST_NUM_SQR_FN((10 * (TAG)) + 2, num_sqr_ssm, NUM, RES)        \
-        TEST_NUM_SQR_FN((10 * (TAG)) + 3, num_sqr, NUM, RES)            \
     }
 
     TEST_NUM_SQR(1,
@@ -2359,6 +2350,10 @@ static void test_num_sqr(bool show)
     TEST_NUM_SQR(8,
         (2, UINT64_MAX, UINT64_MAX),
         (4, UINT64_MAX, UINT64_MAX - 1, 0, 1)
+    )
+    TEST_NUM_SQR(9,
+        (3, UINT64_MAX, UINT64_MAX, UINT64_MAX),
+        (6, UINT64_MAX, UINT64_MAX, UINT64_MAX - 1, 0, 0, 1)
     )
 
     #undef TEST_NUM_SQR
@@ -3090,7 +3085,6 @@ static void test_fuzz_num_bz_div(bool show)
     TEST_FN_CLOSE
 }
 
-[[maybe_unused]]
 static void test_all(bool show)
 {
     test_uint_from_char(show);
@@ -3130,7 +3124,7 @@ static void test_all(bool show)
     test_num_ssm_shr_mod(show);
     test_num_ssm_fft_fwd(show);
     // test_num_ssm_depad_wrap(show);
-    // test_num_ssm_mul_wrap(show);
+    test_num_ssm_mul_wrap(show);
 
     test_num_div_normalize(show);
 

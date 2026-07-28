@@ -355,7 +355,8 @@ static num_p num_create_disk(CLU_PARAMS(uint64_t size, uint64_t count))
     unlink(template_path);
 
     uint64_t total_size = sizeof(num_t) + (size * sizeof(uint64_t));
-    assert(ftruncate(fd, (off_t)total_size) == 0);
+    int res = ftruncate(fd, (off_t)total_size);
+    assert(res == 0);
     num_p num = mmap(NULL, total_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     close(fd);
     *num = (num_t)
@@ -659,9 +660,11 @@ num_p num_read_dec(const char file_name[])
     FILE *fp = fopen(file_name, "r");
     assert(fp);
 
-    assert(!fseek(fp, 0, SEEK_END));
+    int res = fseek(fp, 0, SEEK_END);
+    assert(!res);
     uint64_t size = get_ftell(fp);
-    assert(!fseek(fp, 0, SEEK_SET));
+    res = fseek(fp, 0, SEEK_SET);
+    assert(!res);
 
     uint64_t pos = size / chunk_len;
     uint64_t extra = size % chunk_len;
@@ -720,7 +723,8 @@ void num_free(num_p num)
     }
 
     uint64_t total_size = sizeof(num_t) + (num->size * sizeof(uint64_t));
-    assert(munmap(num, total_size) == 0);
+    int res = munmap(num, total_size);
+    assert(res == 0);
     CLU_HANDLER_UNREGISTER(num)
 }
 
@@ -736,13 +740,15 @@ STATIC void num_add_uint_offset(num_p num, uint64_t pos, uint64_t value)
         return;
     }
 
-    if(pos >= num->count)
+    if(pos == num->count)
     {
         assert(num->size > num->count);
         num->chunk[pos] = value;
         num->count = pos + 1;
         return;
     }
+
+    assert(pos < num->count);
 
     uint64_t carry = value;
     for(uint64_t i=pos; i<num->count && carry; i++)
@@ -1008,36 +1014,6 @@ static num_p num_mul_uint_buffer(num_p num_res, num_p num, uint64_t value) // TO
     }
     return num_normalize(num_res);
 }
-
-static void num_sqr_classic_buffer(num_p num_res, num_p num)
-{
-    CLU_HANDLER_IS_SAFE(num_res)
-    CLU_HANDLER_IS_SAFE(num)
-    assert(num_res)
-    assert(num)
-    assert(num_res->size >= 2 * num->count)
-
-    memset(num_res->chunk, 0, num_res->size * sizeof(uint64_t));
-    for(uint64_t i=0; i<num->count; i++)
-    {
-        uint64_t value = num->chunk[i];
-
-        uint128_t u = MUL(value, value);
-        num_add_uint_offset(num_res, (2 * i), LOW(u));
-        num_add_uint_offset(num_res, (2 * i) + 1, HIGH(u));
-
-        num_add_mul_uint_offset(num_res, (2 * i) + 1, num, i + 1, value << 1);
-
-        constexpr uint64_t msb_set = 0x8000000000000000;
-        if(value >= msb_set)
-        {
-            num_add_offset(num_res, (2 * i) + 2, num, i + 1);
-        }
-    }
-    num_normalize(num_res);
-}
-
-
 
 #if !defined(NO_ASSEMBLY) && defined(__linux__)
 
@@ -1391,7 +1367,295 @@ num_p num_mul_classic(num_p num_1, num_p num_2)
     return num_normalize(num_res);
 }
 
-STATIC num_p num_sqr_classic(num_p num)
+static void num_sqr_classic_buffer(num_p num_res, num_p num)
+{
+    CLU_HANDLER_IS_SAFE(num_res)
+    CLU_HANDLER_IS_SAFE(num)
+    assert(num_res)
+    assert(num)
+    assert(num_res->size >= 2 * num->count)
+
+    uint64_t count = num->count;
+    uint64_t * restrict dest = num_res->chunk;
+    const uint64_t * restrict src = num->chunk;
+
+    memset(dest, 0, num_res->size * sizeof(uint64_t));
+    num_res->count = 2 * count;
+
+    if(count == 0)
+    {
+        return;
+    }
+
+#if !defined(NO_ASSEMBLY) && defined(__linux__)
+
+    uint64_t high, low, carry, pos, j;
+    uint64_t zero = 0;
+
+    // --- PHASE 1: CROSS PRODUCTS ---
+
+    if (count > 1)
+    {
+        uint64_t value = src[0];
+        uint64_t inner_count = count - 1;
+        uint64_t * restrict d = &dest[1];
+        const uint64_t * restrict s = &src[1];
+
+        j = inner_count >> 3;
+        uint64_t tail = inner_count & 7;
+
+        __asm__ __volatile__ (
+            ".intel_syntax noprefix                         \n\t"
+            "mov rdx, %[value]                              \n\t"
+            "mov %[carry], 0                                \n\t"
+            "xor %[pos], %[pos]                             \n\t"
+            "test %[j], %[j]                                \n\t"
+            "jz loop_cp0_tail_prepare%=                     \n\t"
+
+            "loop_cp0_begin%=:                              \n\t"
+            MUL_CLASSIC_STEP_ZERO(  0, high, carry, pos)
+            MUL_CLASSIC_STEP_ZERO(  8, carry, high, pos)
+            MUL_CLASSIC_STEP_ZERO( 16, high, carry, pos)
+            MUL_CLASSIC_STEP_ZERO( 24, carry, high, pos)
+            MUL_CLASSIC_STEP_ZERO( 32, high, carry, pos)
+            MUL_CLASSIC_STEP_ZERO( 40, carry, high, pos)
+            MUL_CLASSIC_STEP_ZERO( 48, high, carry, pos)
+            MUL_CLASSIC_STEP_ZERO( 56, carry, high, pos)
+
+            "lea %[pos], [%[pos] + 64]                      \n\t"
+            "dec %[j]                                       \n\t"
+            "jnz loop_cp0_begin%=                           \n\t"
+
+            "loop_cp0_tail_prepare%=:                       \n\t"
+            "dec %[tail]                                    \n\t"
+            "js loop_cp0_end%=                              \n\t"
+
+            "loop_cp0_tail_begin%=:                         \n\t"
+            MUL_CLASSIC_STEP_ZERO(0, high, carry, pos)
+            "mov %[carry], %[high]                          \n\t"
+            "lea %[pos], [%[pos] + 8]                       \n\t"
+            "dec %[tail]                                    \n\t"
+            "jns loop_cp0_tail_begin%=                      \n\t"
+
+            "loop_cp0_end%=:                                \n\t"
+            "adcx %[carry], %[zero]                         \n\t"
+            "mov [%[dest] + %[pos]], %[carry]               \n\t"
+
+            ".att_syntax prefix                             \n\t"
+            // out
+            :   [high] "=&r" (high),
+                [low] "=&r" (low),
+                [carry] "=&r" (carry),
+                [pos] "=&r" (pos),
+                [j] "+&r" (j),
+                [tail] "+&r" (tail)
+            // in (Mapping [src_2] to 's' as macro demands)
+            :   [value] "r" (value),
+                [src_2] "r" (s),
+                [dest] "r" (d),
+                [zero] "r" (zero)
+            // clobber
+            :   "cc",
+                "memory",
+                "rdx"
+        );
+    }
+
+    // 2. Standard Cross Products for i=1 to count-1
+    for(uint64_t i = 1; i < count; i++)
+    {
+        uint64_t value = src[i];
+        uint64_t inner_count = count - i - 1;
+
+        if (inner_count == 0)
+        {
+            continue;
+        }
+
+        uint64_t * restrict d = &dest[(2 * i) + 1];
+        const uint64_t * restrict s = &src[i + 1];
+
+        j = inner_count >> 3;           // Changed from 5 to 3
+        uint64_t tail = inner_count & 7; // Changed from 31 to 7
+
+        __asm__ __volatile__ (
+            ".intel_syntax noprefix                         \n\t"
+            "mov rdx, %[value]                              \n\t"
+            "mov %[carry], 0                                \n\t"
+            "xor %[pos], %[pos]                             \n\t"
+            "test %[j], %[j]                                \n\t"
+            "jz loop_cp_tail_prepare%=                      \n\t"
+
+            "loop_cp_begin%=:                               \n\t"
+            MUL_CLASSIC_STEP(  0, high, carry, s, pos)
+            MUL_CLASSIC_STEP(  8, carry, high, s, pos)
+            MUL_CLASSIC_STEP( 16, high, carry, s, pos)
+            MUL_CLASSIC_STEP( 24, carry, high, s, pos)
+            MUL_CLASSIC_STEP( 32, high, carry, s, pos)
+            MUL_CLASSIC_STEP( 40, carry, high, s, pos)
+            MUL_CLASSIC_STEP( 48, high, carry, s, pos)
+            MUL_CLASSIC_STEP( 56, carry, high, s, pos)
+
+            "adox %[carry], %[zero]                         \n\t"
+
+            "lea %[pos], [%[pos] + 64]                      \n\t"
+            "dec %[j]                                       \n\t"
+            "jnz loop_cp_begin%=                            \n\t"
+
+            "loop_cp_tail_prepare%=:                        \n\t"
+            "adcx %[carry], %[zero]                         \n\t"
+            "test %[tail], %[tail]                          \n\t"
+            "jz loop_cp_end%=                               \n\t"
+
+            "loop_cp_tail_begin%=:                          \n\t"
+            MUL_CLASSIC_STEP(0, high, carry, s, pos)
+            "mov %[carry], %[high]                          \n\t"
+            "adox %[carry], %[zero]                         \n\t"
+            "lea %[pos], [%[pos] + 8]                       \n\t"
+            "dec %[tail]                                    \n\t"
+            "jnz loop_cp_tail_begin%=                       \n\t"
+
+            "loop_cp_end%=:                                 \n\t"
+            "adcx %[carry], %[zero]                         \n\t"
+            "mov [%[dest] + %[pos]], %[carry]               \n\t"
+
+            ".att_syntax prefix                             \n\t"
+            // out
+            :   [high] "=&r" (high),
+                [low] "=&r" (low),
+                [carry] "=&r" (carry),
+                [pos] "=&r" (pos),
+                [j] "+&r" (j),
+                [tail] "+&r" (tail)
+            // in
+            :   [value] "r" (value),
+                [s] "r" (s),
+                [dest] "r" (d),
+                [zero] "r" (zero)
+            // clobber
+            :   "cc",
+                "memory",
+                "rdx"
+        );
+    }
+
+
+    // --- PHASE 2: DOUBLE DESTINATION ARRAY ---
+    uint64_t pos_src, pos_dest;
+    uint64_t _a;
+    j = count >> 3;           // Changed from 5 to 3
+    uint64_t tail = count & 7; // Changed from 31 to 7
+
+#define COMBINED_STEP(OFF_SRC, OFF_DEST)                                    \
+    "mov rdx, [%[src] + %[pos_src] + " #OFF_SRC "]                  \n\t"   \
+    "mulx %[high], %[low], rdx                                      \n\t"   \
+    "mov %[_a], [%[dest] + %[pos_dest] + " #OFF_DEST "]             \n\t"   \
+    "adox %[_a], %[_a]                                              \n\t"   \
+    "adcx %[low], %[_a]                                             \n\t"   \
+    "mov [%[dest] + %[pos_dest] + " #OFF_DEST "], %[low]            \n\t"   \
+    "mov %[_a], [%[dest] + %[pos_dest] + " #OFF_DEST " + 8]         \n\t"   \
+    "adox %[_a], %[_a]                                              \n\t"   \
+    "adcx %[high], %[_a]                                            \n\t"   \
+    "mov [%[dest] + %[pos_dest] + " #OFF_DEST " + 8], %[high]       \n\t"
+
+    __asm__ __volatile__ (
+        ".intel_syntax noprefix                                     \n\t"
+        "mov rcx, %[j]                                              \n\t"
+        "xor %[pos_src], %[pos_src]                                 \n\t"
+        "xor %[pos_dest], %[pos_dest]                               \n\t" // Clears both CF and OF
+        "test rcx, rcx                                              \n\t"
+        "jz loop_comb_tail_prepare%=                                \n\t"
+
+        "loop_comb_begin%=:                                         \n\t"
+        COMBINED_STEP(  0,   0)
+        COMBINED_STEP(  8,  16)
+        COMBINED_STEP( 16,  32)
+        COMBINED_STEP( 24,  48)
+        COMBINED_STEP( 32,  64)
+        COMBINED_STEP( 40,  80)
+        COMBINED_STEP( 48,  96)
+        COMBINED_STEP( 56, 112)
+
+        "lea %[pos_src], [%[pos_src] + 64]                          \n\t" // Changed from 256 to 64
+        "lea %[pos_dest], [%[pos_dest] + 128]                       \n\t" // Changed from 512 to 128
+
+        // Loop control avoiding flag corruption (preserves OF and CF)
+        "lea rcx, [rcx - 1]                                         \n\t"
+        "jrcxz loop_comb_tail_prepare%=                             \n\t"
+        "jmp loop_comb_begin%=                                      \n\t"
+
+        "loop_comb_tail_prepare%=:                                  \n\t"
+        "mov rcx, %[tail]                                           \n\t" // mov preserves all flags
+        "jrcxz loop_comb_end%=                                      \n\t"
+
+        "loop_comb_tail_begin%=:                                    \n\t"
+        COMBINED_STEP(0, 0)
+        "lea %[pos_src], [%[pos_src] + 8]                           \n\t"
+        "lea %[pos_dest], [%[pos_dest] + 16]                        \n\t"
+        "lea rcx, [rcx - 1]                                         \n\t"
+        "jrcxz loop_comb_end%=                                      \n\t"
+        "jmp loop_comb_tail_begin%=                                 \n\t"
+
+        "loop_comb_end%=:                                           \n\t"
+        "mov %[j], rcx                                              \n\t" // Update states to match destruction
+        "mov %[tail], rcx                                           \n\t"
+        ".att_syntax prefix                                         \n\t"
+
+        :   [pos_src] "=&r" (pos_src),
+            [pos_dest] "=&r" (pos_dest),
+            [j] "+&r" (j),
+            [tail] "+&r" (tail),
+            [high] "=&r" (high),
+            [low] "=&r" (low),
+            [_a] "=&r" (_a)
+        :   [src] "r" (src),
+            [dest] "r" (dest)
+        :   "cc",
+            "memory",
+            "rdx",
+            "rcx"
+    );
+#undef COMBINED_STEP
+
+#else
+
+    for(uint64_t i=0; i<count; i++)
+    {
+        uint64_t value = src[i];
+
+        uint128_t carry = 0;
+        #pragma GCC unroll 32
+        for(uint64_t j=i + 1; j<count; j++)
+        {
+            carry += dest[i+j] + MUL(value, src[j]);
+            dest[i+j] = LOW(carry);
+            carry = HIGH(carry);
+        }
+        dest[i+count] = LOW(carry);
+    }
+
+    uint128_t carry = 0;
+    #pragma GCC unroll 32
+    for(uint64_t i=0; i<count; i++)
+    {
+        uint64_t value = src[i];
+        uint128_t u = MUL(value, value);
+
+        carry += (2 * (uint128_t)dest[2 * i]) + LOW(u);
+        dest[2 * i] = LOW(carry);
+        carry = HIGH(carry);
+
+        carry += 2 * (uint128_t)dest[(2 * i) + 1] + HIGH(u);
+        dest[(2 * i) + 1] = LOW(carry);
+        carry = HIGH(carry);
+    }
+
+#endif
+
+    num_normalize(num_res);
+}
+
+num_p num_sqr_classic(num_p num)
 {
     num_p num_res = num_create(CLU_ARGS(2 * num->count, 0));
     num_sqr_classic_buffer(num_res, num);
@@ -1806,33 +2070,6 @@ static void num_ssm_sub_mod_immed(
         // clobber
         :   "cc",
             "memory"
-    );
-
-#elif !defined(NO_ASSEMBLY) && defined(__linux__)
-
-    uint64_t count = n;
-    uint64_t tmp1, tmp2; // Two temporaries required for the in-place math
-
-    __asm__ volatile (
-        "cbz %[count], 2f\n\t"               // If count == 0, jump to label 2
-
-        "cmp xzr, xzr\n\t"                   // SET the carry flag (C=1 means NO borrow)
-
-        "1:\n\t"
-        "ldr %[tmp1], [%[src_2]], #8\n\t"    // tmp1 = *src_2, then src_2 += 8
-        "ldr %[tmp2], [%[dest]]\n\t"         // tmp2 = *dest (NO post-increment yet)
-
-        "sbcs %[tmp2], %[tmp2], %[tmp1]\n\t" // tmp2 = tmp2 - tmp1 - (1 - C), update C
-
-        "str %[tmp2], [%[dest]], #8\n\t"     // *dest = tmp2, then dest += 8
-
-        "sub %[count], %[count], #1\n\t"     // count-- (leaves flags untouched)
-        "cbnz %[count], 1b\n\t"              // Loop if count != 0
-        "2:\n"
-        : [dest] "+r" (dest), [src_2] "+r" (src_2), [count] "+r" (count),
-          [tmp1] "=&r" (tmp1), [tmp2] "=&r" (tmp2)
-        :
-        : "cc", "memory"
     );
 
 #else
@@ -2808,31 +3045,114 @@ static void num_ssm_sqr_mod_span(num_p num_aux, num_p num, uint64_t pos, uint64_
     num_ssm_sub_mod(num, pos, num_aux, 0, num_aux, n, n);
 }
 
+static void num_ssm_sqr_pointwise(
+    num_p num_aux_1,
+    num_p num_aux_2,
+    num_p num_fft,
+    ssm_params_p p
+);
+
+// KEEPS NUM_1 NUM_2
+static void num_ssm_sqr_wrap(
+    num_p num_aux_1,
+    num_p num_aux_2,
+    num_p num_fft,
+    num_p num,
+    uint64_t pos,
+    ssm_params_p p
+)
+{
+    CLU_HANDLER_IS_SAFE(num)
+    assert(num)
+
+    num_ssm_prepare_wrap(num_aux_2, num_fft, num, pos, p);
+
+    num_ssm_sqr_pointwise(
+        num_aux_1,
+        num_aux_2,
+        num_fft,
+        p
+    );
+
+    num_ssm_fft_inv(num_aux_2, num_fft, p);
+    num_ssm_depad_wrap(
+        num_aux_1,
+        num_aux_2,
+        num,
+        pos,
+        num_fft,
+        p
+    );
+}
+
+// num_aux_1->size >= p->n
+// num_aux_2->size >= 2 * p->n
+static void num_ssm_sqr_pointwise(
+    num_p num_aux_1,
+    num_p num_aux_2,
+    num_p num_fft,
+    ssm_params_p p
+)
+{
+    CLU_HANDLER_IS_SAFE(num_aux_1)
+    CLU_HANDLER_IS_SAFE(num_aux_2)
+    CLU_HANDLER_IS_SAFE(num_fft)
+    assert(num_aux_1)
+    assert(num_aux_2)
+    assert(num_fft)
+    assert(num_aux_1->size >= p->n)
+    assert(num_aux_2->size >= 2 * p->n)
+
+    if(!ssm_is_recursive(p->n))
+    {
+        for(uint64_t i=0; i<p->K; i++)
+        {
+            num_ssm_sqr_mod_span(num_aux_2, num_fft, i * p->n, p->n);
+        }
+        return;
+    }
+
+    ssm_params_t p_next = ssm_get_params_wrap(p->n);
+    num_p num_fft_next = num_create_dirty(CLU_ARGS(p_next.n * p_next.K, 0));
+    for(uint64_t i=0; i<p->K; i++)
+    {
+        // NOLINTNEXTLINE(readability-suspicious-call-argument)
+        num_ssm_sqr_wrap(
+            num_aux_1,
+            num_aux_2,
+            num_fft_next,
+            num_fft,
+            i * p->n,
+            &p_next
+        );
+    }
+    num_free(num_fft_next);
+}
+
 STATIC num_p num_sqr_ssm(num_p num)
 {
     CLU_HANDLER_IS_SAFE(num)
     assert(num)
 
-    uint64_t count = 2 * num->count;
-    ssm_params_t p = ssm_get_params(count);
+    ssm_params_t p = ssm_get_params(2 * num->count);
+    num_p num_aux_1 = num_create_dirty(CLU_ARGS(p.n, 0));
     num_p num_aux_2 = num_create_dirty(CLU_ARGS(2 * p.n, 0));
     num_p num_fft = num_ssm_prepare_no_wrap(num_aux_2, num, &p);
     num_free(num);
 
-    // num_ssm_sqr_pointwise();
-    for(uint64_t i=0; i<p.K; i++)
-    {
-        // TODO: recursive fft
-        num_ssm_sqr_mod_span(num_aux_2, num_fft, i * p.n, p.n);
-    }
+    num_ssm_sqr_pointwise(
+        num_aux_1,
+        num_aux_2,
+        num_fft,
+        &p
+    );
+    num_free(num_aux_1);
 
     num_ssm_fft_inv(num_aux_2, num_fft, &p);
     num_free(num_aux_2);
 
     return num_ssm_depad_no_wrap(num_fft, &p);
 }
-
-
 
 // Returns quocient
 // NUM becomes remainder
