@@ -1653,7 +1653,6 @@ static void num_sqr_classic_buffer(num_p num_res, num_p num)
     num_normalize(num_res);
 }
 
-// STATIC num_p num_sqr_classic(num_p num) revert this before PR
 num_p num_sqr_classic(num_p num)
 {
     num_p num_res = num_create(CLU_ARGS(2 * num->count, 0));
