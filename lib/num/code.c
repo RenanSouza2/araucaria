@@ -1639,11 +1639,13 @@ static void num_sqr_classic_buffer(num_p num_res, num_p num)
     for(uint64_t i=0; i<count; i++)
     {
         uint64_t value = src[i];
-        carry += (2 * (uint128_t)dest[2 * i]) + MUL(value, value);
+        uint128_t u = MUL(value, value);
+
+        carry += (2 * (uint128_t)dest[2 * i]) + LOW(u);
         dest[2 * i] = LOW(carry);
         carry = HIGH(carry);
 
-        carry += 2 * (uint128_t)dest[(2 * i) + 1];
+        carry += 2 * (uint128_t)dest[(2 * i) + 1] + HIGH(u);
         dest[(2 * i) + 1] = LOW(carry);
         carry = HIGH(carry);
     }
