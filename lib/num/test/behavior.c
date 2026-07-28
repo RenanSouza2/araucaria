@@ -2351,6 +2351,10 @@ static void test_num_sqr(bool show)
         (2, UINT64_MAX, UINT64_MAX),
         (4, UINT64_MAX, UINT64_MAX - 1, 0, 1)
     )
+    TEST_NUM_SQR(9,
+        (3, UINT64_MAX, UINT64_MAX, UINT64_MAX),
+        (6, UINT64_MAX, UINT64_MAX, UINT64_MAX - 1, 0, 0, 1)
+    )
 
     #undef TEST_NUM_SQR
 
