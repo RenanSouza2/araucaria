@@ -919,20 +919,14 @@ STATIC int64_t num_cmp_offset(num_p num_1, uint64_t pos_1, num_p num_2) // TODO 
 
 // keeps NUM_2
 // TODO TEST
-static void num_add_offset(num_p num_1, uint64_t pos_1, num_p num_2, uint64_t pos_2)
+static void num_add_offset(num_p num_1, uint64_t pos_1, num_p num_2)
 {
     CLU_HANDLER_IS_SAFE(num_1)
     CLU_HANDLER_IS_SAFE(num_2)
     assert(num_1)
     assert(num_2)
 
-    if(num_2->count <= pos_2)
-    {
-        return;
-    }
-
-    uint64_t delta = pos_1 - pos_2;
-    uint64_t count_max = delta + num_2->count;
+    uint64_t count_max = pos_1 + num_2->count;
     assert(num_1->size >= count_max);
 
     if(num_1->count < count_max)
@@ -941,11 +935,11 @@ static void num_add_offset(num_p num_1, uint64_t pos_1, num_p num_2, uint64_t po
     }
 
     uint64_t carry = 0;
-    for(uint64_t i=pos_2; i<num_2->count; i++)
+    for(uint64_t i=0; i<num_2->count; i++)
     {
         uint64_t sum;
-        uint64_t c1 = (uint64_t)__builtin_add_overflow(num_1->chunk[delta + i], num_2->chunk[i], &sum);
-        uint64_t c2 = (uint64_t)__builtin_add_overflow(sum, carry, &num_1->chunk[delta + i]);
+        uint64_t c1 = (uint64_t)__builtin_add_overflow(num_1->chunk[pos_1 + i], num_2->chunk[i], &sum);
+        uint64_t c2 = (uint64_t)__builtin_add_overflow(sum, carry, &num_1->chunk[pos_1 + i]);
         carry = c1 | c2; // Combine overflow states
     }
 
@@ -953,8 +947,6 @@ static void num_add_offset(num_p num_1, uint64_t pos_1, num_p num_2, uint64_t po
     {
         num_add_uint_offset(num_1, count_max, carry);
     }
-
-    // num_normalize(num_1);
 }
 
 // keeps NUM2
@@ -2943,7 +2935,7 @@ STATIC num_p num_ssm_depad_no_wrap(num_p num, ssm_params_p p)
     {
         num_t block;
         num_span(&block, num, p->n * i, p->n * (i + 1));
-        num_add_offset(num_res, p->M * i, &block, 0);
+        num_add_offset(num_res, p->M * i, &block);
     }
 
     num_free(num);
@@ -3335,7 +3327,7 @@ static num_p num_div_mod_bz_rec(
         while(num_cmp_offset(num_1, k * i, num_aux_2) < 0)
         {
             num_q_tmp = num_sub_uint(num_q_tmp, 1);
-            num_add_offset(num_1, k * i, num_2, 0);
+            num_add_offset(num_1, k * i, num_2);
         }
         num_sub_offset(num_1, k * i, num_aux_2);
         num_free(num_aux_2);
@@ -3343,7 +3335,7 @@ static num_p num_div_mod_bz_rec(
         num_q[i] = num_q_tmp;
     }
     num_q[0] = num_expand_to(num_q[0], k + num_q[1]->count);
-    num_add_offset(num_q[0], k, num_q[1], 0);
+    num_add_offset(num_q[0], k, num_q[1]);
 
     num_free(num_q[1]);
     return num_q[0];
@@ -3377,14 +3369,14 @@ static num_p num_div_mod_bz(num_p num_1, num_p num_2)
         num_p num_q_tmp = num_div_mod_bz_rec(num_aux, &num_1_1, num_2, f, true);
         num_normalize(num_1);
         num_q_tmp = num_expand_to(num_q_tmp, n_2 + num_q->count);
-        num_add_offset(num_q_tmp, n_2, num_q, 0);
+        num_add_offset(num_q_tmp, n_2, num_q);
         num_free(num_q);
         num_q = num_q_tmp;
     }
 
     num_p num_q_tmp = num_div_mod_bz_rec(num_aux, num_1, num_2, f, false);
     num_q_tmp = num_expand_to(num_q_tmp, n_1 - n_2 + num_q->count);
-    num_add_offset(num_q_tmp, n_1 - n_2, num_q, 0);
+    num_add_offset(num_q_tmp, n_1 - n_2, num_q);
 
     num_free(num_aux);
     num_free(num_q);
@@ -3531,7 +3523,7 @@ num_p num_add(num_p num_1, num_p num_2)
 
     uint64_t count = num_1->count > num_2->count ? num_1->count : num_2->count;
     num_1 = num_expand_to(num_1, count + 1);
-    num_add_offset(num_1, 0, num_2, 0);
+    num_add_offset(num_1, 0, num_2);
 
     num_free(num_2);
     return num_1;
@@ -3697,7 +3689,7 @@ static num_p num_base_to_rec(num_p num, num_p num_bases[], uint64_t i)
     num_q = num_base_to_rec(num_q, num_bases, i - 1);
     num_r = num_base_to_rec(num_r, num_bases, i - 1);
     num_r = num_expand_to(num_r, B(i) + num_q->count);
-    num_add_offset(num_r, B(i), num_q, 0);
+    num_add_offset(num_r, B(i), num_q);
     num_free(num_q);
     return num_r;
 }
