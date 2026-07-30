@@ -1748,11 +1748,16 @@ static void num_ssm_add_uint(num_p num_fft, uint64_t pos, uint64_t n, uint64_t v
     CLU_HANDLER_IS_SAFE(num_fft)
     assert(num_fft)
 
-    uint64_t carry = value;
+    uint64_t * restrict chunk = num_fft->chunk;
+
+    uint128_t carry = value;
     for(uint64_t i = 0; i < n && carry; i++)
     {
-        carry = (uint64_t)__builtin_add_overflow(num_fft->chunk[pos + i], carry, &num_fft->chunk[pos + i]);
+        uint128_t sum = U128(chunk[pos + i]) + carry;
+        chunk[pos + i] = LOW(sum);
+        carry = HIGH(sum);
     }
+    assert(!carry);
 }
 
 static void num_ssm_sub_uint(num_p num_fft, uint64_t pos, uint64_t n, uint64_t value)
@@ -1760,10 +1765,14 @@ static void num_ssm_sub_uint(num_p num_fft, uint64_t pos, uint64_t n, uint64_t v
     CLU_HANDLER_IS_SAFE(num_fft)
     assert(num_fft)
 
-    uint64_t borrow = value;
+    uint64_t * restrict chunk = num_fft->chunk;
+
+    uint128_t borrow = value;
     for(uint64_t i = 0; i < n && borrow; i++)
     {
-        borrow = (uint64_t)__builtin_sub_overflow(num_fft->chunk[pos + i], borrow, &num_fft->chunk[pos + i]);
+        uint128_t diff = U128(chunk[pos + i]) - borrow;
+        chunk[pos + i] = LOW(diff);
+        borrow = HIGH(diff) & 1;
     }
 }
 
@@ -1775,9 +1784,13 @@ static void num_ssm_normalize(num_p num_fft, uint64_t pos, uint64_t n)
     assert(num_fft->chunk[pos + n - 1] <= 2)
 
     uint64_t value = num_fft->chunk[pos + n - 1];
+    if(value == 0)
+    {
+        return;
+    }
+
     num_fft->chunk[pos + n - 1] = 0;
     num_ssm_sub_uint(num_fft, pos, n, value);
-
     if(num_fft->chunk[pos + n - 1] != UINT64_MAX)
     {
         return;
