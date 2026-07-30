@@ -435,13 +435,13 @@ STATIC num_p num_expand_to(num_p num, uint64_t size)
     return num_new;
 }
 
-static void num_set_count(num_p num, uint64_t count)
+static void num_clear(num_p num)
 {
     CLU_HANDLER_IS_SAFE(num);
     assert(num);
 
-    num->count = count;
-    memset(&num->chunk[count], 0, (num->size - count) * sizeof(uint64_t));
+    num->count = 0;
+    memset(num->chunk, 0, num->size * sizeof(uint64_t));
 }
 
 STATIC num_p num_normalize(num_p num)
@@ -493,7 +493,7 @@ void num_head_trim(num_p num, uint64_t count) // TODO test
 
     if(count >= num->count)
     {
-        num_set_count(num, 0);
+        num_clear(num);
         return;
     }
 
@@ -750,16 +750,21 @@ STATIC void num_add_uint_offset(num_p num, uint64_t pos, uint64_t value)
 
     assert(pos < num->count);
 
-    uint64_t carry = value;
-    for(uint64_t i=pos; i<num->count && carry; i++)
+    uint64_t count = num->count;
+    uint64_t * restrict chunk = num->chunk;
+
+    uint128_t carry = value;
+    for(uint64_t i = pos; i < count && carry; i++)
     {
-        carry = (uint64_t)__builtin_add_overflow(num->chunk[i], carry, &num->chunk[i]);
+        uint128_t sum = U128(chunk[i]) + carry;
+        chunk[i] = LOW(sum);
+        carry = HIGH(sum);
     }
 
     if(carry)
     {
         assert(num->size > num->count);
-        num->chunk[num->count] = carry;
+        chunk[num->count] = LOW(carry);
         num->count++;
     }
 }
@@ -783,51 +788,6 @@ STATIC void num_sub_uint_offset(num_p num, uint64_t pos, uint64_t value)
     assert(borrow == 0);
 
     num_normalize(num);
-}
-
-// keeps NUM
-// TODO remove expand here
-static void num_add_mul_uint_offset(
-    num_p num_res, uint64_t pos_res,
-    num_p num, uint64_t pos,
-    uint64_t value
-)
-{
-    CLU_HANDLER_IS_SAFE(num_res)
-    CLU_HANDLER_IS_SAFE(num)
-    assert(num_res)
-    assert(num)
-
-    if(value == 0 || pos >= num->count)
-    {
-        return;
-    }
-
-    uint64_t iter_count = num->count - pos;
-    uint64_t target_count = pos_res + iter_count;
-    assert(num_res->size >= target_count);
-
-    if(num_res->count < target_count)
-    {
-        num_res->count = target_count;
-    }
-
-    uint64_t * restrict dest = num_res->chunk;
-    const uint64_t * restrict src = num->chunk;
-
-    uint128_t carry = 0;
-    #pragma GCC unroll 32
-    for(uint64_t i = 0; i < iter_count; i++)
-    {
-        carry += dest[pos_res + i] + MUL(src[pos + i], value);
-        dest[pos_res + i] = LOW(carry);
-        carry = HIGH(carry);
-    }
-
-    if(carry)
-    {
-        num_add_uint_offset(num_res, target_count, LOW(carry));
-    }
 }
 
 // BITS shoud be less than 64
@@ -981,7 +941,8 @@ STATIC void num_sub_offset(num_p num_1, uint64_t pos_1, num_p num_2)
 
 // preserves NUM
 // num_res->size >= num->count + 1
-static num_p num_mul_uint_buffer(num_p num_res, num_p num, uint64_t value) // TODO TEST
+// r is not zero
+static void num_mul_uint_buffer(num_p num_res, num_p num, uint64_t value) // TODO TEST
 {
     CLU_HANDLER_IS_SAFE(num_res)
     CLU_HANDLER_IS_SAFE(num)
@@ -989,21 +950,23 @@ static num_p num_mul_uint_buffer(num_p num_res, num_p num, uint64_t value) // TO
     assert(num)
     assert(num_res->size >= num->count + 1)
 
-    if(value == 0 || num->count == 0)
-    {
-        num_set_count(num_res, 0);
-        return num_res;
-    }
+    uint64_t count = num->count;
+    uint64_t * restrict dest = num_res->chunk;
+    const uint64_t * restrict src = num->chunk;
 
-    num_res->count = num->count + 1;
-    num_res->chunk[0] = 0;
-    for(uint64_t i=0; i<num->count; i++)
+    num_res->count = count + 1;
+
+    uint128_t carry = 0;
+    #pragma GCC unroll 32
+    for(uint64_t i = 0; i < count; i++)
     {
-        uint128_t u = MUL(num->chunk[i], value);
-        num_res->chunk[i+1] = HIGH(u);
-        num_add_uint_offset(num_res, i, LOW(u));
+        carry += MUL(src[i], value);
+        dest[i] = LOW(carry);
+        carry = HIGH(carry);
     }
-    return num_normalize(num_res);
+    dest[count] = LOW(carry);
+
+    num_normalize(num_res);
 }
 
 #if !defined(NO_ASSEMBLY) && defined(__linux__)
@@ -3237,7 +3200,7 @@ static num_p num_div_mod_classic(num_p num_aux, num_p num_1, num_p num_2)
             r = (uint64_t)(value_1 / value_2);
         }
 
-        num_aux = num_mul_uint_buffer(num_aux, num_2, r);
+        num_mul_uint_buffer(num_aux, num_2, r);
         while(num_cmp_offset(num_1, i, num_aux) < 0)
         {
             r--;
@@ -3520,9 +3483,16 @@ num_p num_mul_uint(num_p num, uint64_t value)
     CLU_HANDLER_IS_SAFE(num)
     assert(num)
 
-    num_p num_res = num_create(CLU_ARGS(num->count + 1, 0));
-    num_add_mul_uint_offset(num_res, 0, num, 0, value);
+    if(value == 0)
+    {
+        num_clear(num);
+        return num;
+    }
+
+    num_p num_res = num_create_dirty(CLU_ARGS(num->count + 1, 0));
+    num_mul_uint_buffer(num_res, num, value);
     num_free(num);
+
     return num_res;
 }
 
