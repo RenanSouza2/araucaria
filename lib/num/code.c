@@ -769,10 +769,16 @@ STATIC void num_sub_uint_offset(num_p num, uint64_t pos, uint64_t value)
     CLU_HANDLER_IS_SAFE(num);
     assert(num);
 
-    uint64_t borrow = value;
-    for(uint64_t i = pos; i < num->count && borrow; i++)
+    uint128_t borrow = value;
+
+    uint64_t count = num->count;
+    uint64_t * restrict chunk = num->chunk;
+
+    for(uint64_t i = pos; i < count && borrow; i++)
     {
-        borrow = (uint64_t)__builtin_sub_overflow(num->chunk[i], borrow, &num->chunk[i]);
+        uint128_t diff = U128(chunk[i]) - borrow;
+        chunk[i] = LOW(diff);
+        borrow = HIGH(diff) & 1;
     }
     assert(borrow == 0);
 
@@ -806,26 +812,21 @@ static void num_add_mul_uint_offset(
         num_res->count = target_count;
     }
 
-    uint64_t carry = 0;
-
     uint64_t * restrict dest = num_res->chunk;
     const uint64_t * restrict src = num->chunk;
 
+    uint128_t carry = 0;
+    #pragma GCC unroll 32
     for(uint64_t i = 0; i < iter_count; i++)
     {
-        uint64_t dest_idx = pos_res + i;
-
-        uint128_t u = MUL(src[pos + i], value);
-        u += dest[dest_idx];
-        u += carry;
-
-        dest[dest_idx] = LOW(u);
-        carry = HIGH(u);
+        carry += dest[pos_res + i] + MUL(src[pos + i], value);
+        dest[pos_res + i] = LOW(carry);
+        carry = HIGH(carry);
     }
 
     if(carry)
     {
-        num_add_uint_offset(num_res, target_count, carry);
+        num_add_uint_offset(num_res, target_count, LOW(carry));
     }
 }
 
@@ -938,7 +939,7 @@ static void num_add_offset(num_p num_1, uint64_t pos_1, num_p num_2)
     #pragma GCC unroll 32
     for(uint64_t i=0; i<num_2->count; i++)
     {
-        carry += (uint128_t)num_2->chunk[i] + num_1->chunk[pos_1 + i];
+        carry += U128(num_2->chunk[i]) + num_1->chunk[pos_1 + i];
         num_1->chunk[pos_1 + i] = LOW(carry);
         carry = HIGH(carry);
     }
@@ -957,23 +958,21 @@ STATIC void num_sub_offset(num_p num_1, uint64_t pos_1, num_p num_2)
     CLU_HANDLER_IS_SAFE(num_2)
     assert(num_1)
     assert(num_2)
+    assert(num_1->count >= num_2->count + pos_1);
 
-    uint64_t borrow = 0;
-    uint64_t i = 0;
-    for(; i < num_2->count; i++)
+    uint128_t borrow = 0;
+    #pragma GCC unroll 32
+    for(uint64_t i = 0; i < num_2->count; i++)
     {
-        uint64_t diff;
-        uint64_t b1 = (uint64_t)__builtin_sub_overflow(num_1->chunk[pos_1 + i], num_2->chunk[i], &diff);
-        uint64_t b2 = (uint64_t)__builtin_sub_overflow(diff, borrow, &num_1->chunk[pos_1 + i]);
-        borrow = b1 | b2;
+        uint128_t diff = U128(num_1->chunk[pos_1 + i]) - num_2->chunk[i] - borrow;
+        num_1->chunk[pos_1 + i] = LOW(diff);
+        borrow = HIGH(diff) & 1;
     }
 
-    // 2. Propagate any leftover borrow upwards
-    for(uint64_t j = pos_1 + i; j < num_1->count && borrow; j++)
+    if(borrow)
     {
-        borrow = (uint64_t)__builtin_sub_overflow(num_1->chunk[j], borrow, &num_1->chunk[j]);
+        num_sub_uint_offset(num_1, pos_1 + num_2->count, LOW(borrow));
     }
-    assert(borrow == 0);
 
     num_normalize(num_1);
 }
@@ -1633,11 +1632,11 @@ static void num_sqr_classic_buffer(num_p num_res, num_p num)
         uint64_t value = src[i];
         uint128_t u = MUL(value, value);
 
-        carry += (2 * (uint128_t)dest[2 * i]) + LOW(u);
+        carry += (2 * U128(dest[2 * i])) + LOW(u);
         dest[2 * i] = LOW(carry);
         carry = HIGH(carry);
 
-        carry += 2 * (uint128_t)dest[(2 * i) + 1] + HIGH(u);
+        carry += 2 * U128(dest[(2 * i) + 1]) + HIGH(u);
         dest[(2 * i) + 1] = LOW(carry);
         carry = HIGH(carry);
     }
@@ -1891,7 +1890,7 @@ STATIC void num_ssm_add_mod_immed(
     #pragma GCC unroll 8
     for(uint64_t i = 0; i < n; i++)
     {
-        carry += (uint128_t)dest[i] + src_2[i];
+        carry += U128(dest[i]) + src_2[i];
         dest[i] = LOW(carry);
         carry = HIGH(carry);
     }
