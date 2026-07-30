@@ -797,6 +797,48 @@ static void time_assembly_sqr()
 #endif
 }
 
+[[maybe_unused]]
+static void time_assembly_div()
+{
+#ifdef DEBUG
+    uint64_t base = 21;
+#else
+    uint64_t base = 27;
+#endif
+
+    tprintf("base: " U64P() "", base);
+
+    // Generate a massive dividend (num_1) and a divisor roughly half its size (num_2)
+    num_p num_2 = num_generate_1(base, 2);
+    num_p num_1 = num_generate_1(base + 1, 3);
+
+    tprintf("num_1->count: " U64P() "", num_1->count);
+    tprintf("num_2->count: " U64P() "", num_2->count);
+
+    TIME_SETUP
+
+    num_p num_1_c = num_copy(num_1);
+    num_p num_2_c = num_copy(num_2);
+
+    TIME_RESET
+    // clu_log_level_set(CLU_LOG_DYNAMIC);
+    num_p num_q = num_div(num_1_c, num_2_c);
+    TIME_END(t1)
+
+    tprintf("time div         : %.3f", dtime(t1));
+
+    num_free(num_q);
+    num_free(num_1);
+    num_free(num_2);
+
+#ifdef DEBUG
+    uint64_t count = clu_get_register_count();
+    tprintf("total allocations : " U64P() "", count);
+    tprintf("max occupancy     : " U64P() "", clu_get_max_occupancy());
+    assert(clu_mem_is_empty());
+#endif
+}
+
 
 
 // int main(int argc, char** argv)
@@ -827,19 +869,12 @@ int main()
     // flt_num_pi_3(1000);
     // mem_1(21);
     // time_assembly_mul();
-    time_assembly_sqr();
-
-    // for(uint64_t n=1024; n<4096; n++)
-    // {
-    //     ssm_params_t t = ssm_get_params(n);
-    //     printf("\n%lu: %lu", n, t.n);
-    //     while(ssm_is_recursive(t.n))
-    //     {
-    //         t = ssm_get_params(t.n);
-    //         printf(", %lu", t.n);
-    //     }
-    // }
+    // time_assembly_sqr();
+    time_assembly_div();
 
     printf("\n");
     return 0;
 }
+
+// time_assembly_div       | base: 27
+// time_assembly_div       | time div         : 48.848

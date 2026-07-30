@@ -3023,7 +3023,7 @@ static void num_ssm_sqr_pointwise(
     ssm_params_p p
 );
 
-// KEEPS NUM_1 NUM_2
+// KEEPS NUM
 static void num_ssm_sqr_wrap(
     num_p num_aux_1,
     num_p num_aux_2,
