@@ -934,18 +934,18 @@ static void num_add_offset(num_p num_1, uint64_t pos_1, num_p num_2)
         num_1->count = count_max;
     }
 
-    uint64_t carry = 0;
+    uint128_t carry = 0;
+    #pragma GCC unroll 32
     for(uint64_t i=0; i<num_2->count; i++)
     {
-        uint64_t sum;
-        uint64_t c1 = (uint64_t)__builtin_add_overflow(num_1->chunk[pos_1 + i], num_2->chunk[i], &sum);
-        uint64_t c2 = (uint64_t)__builtin_add_overflow(sum, carry, &num_1->chunk[pos_1 + i]);
-        carry = c1 | c2; // Combine overflow states
+        carry += (uint128_t)num_2->chunk[i] + num_1->chunk[pos_1 + i];
+        num_1->chunk[pos_1 + i] = LOW(carry);
+        carry = HIGH(carry);
     }
 
     if(carry)
     {
-        num_add_uint_offset(num_1, count_max, carry);
+        num_add_uint_offset(num_1, count_max, LOW(carry));
     }
 }
 
