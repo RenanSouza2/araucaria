@@ -1967,13 +1967,13 @@ STATIC void num_ssm_sub_mod(
 
 #else
 
-    uint64_t borrow = 0;
-    for(uint64_t i=0; i<n; i++)
+    uint128_t borrow = 0;
+    #pragma GCC unroll 8
+    for(uint64_t i = 0; i < n; i++)
     {
-        uint64_t diff;
-        uint64_t b1 = (uint64_t)__builtin_sub_overflow(src_1[i], src_2[i], &diff);
-        uint64_t b2 = (uint64_t)__builtin_sub_overflow(diff, borrow, &dest[i]);
-        borrow = b1 | b2;
+        uint128_t diff = U128(src_1[i]) - src_2[i] - borrow;
+        dest[i] = LOW(diff);
+        borrow = HIGH(diff) & 1;
     }
 
 #endif
@@ -2041,12 +2041,13 @@ static void num_ssm_sub_mod_immed(
 
 #else
 
-    uint64_t borrow = 0;
-    for(uint64_t i=0; i<n; i++)
+    uint128_t borrow = 0;
+    #pragma GCC unroll 8
+    for(uint64_t i = 0; i < n; i++)
     {
-        uint64_t b1 = (uint64_t)__builtin_sub_overflow(dest[i], src_2[i], &dest[i]);
-        uint64_t b2 = (uint64_t)__builtin_sub_overflow(dest[i], borrow, &dest[i]);
-        borrow = b1 | b2;
+        uint128_t diff = U128(dest[i]) - src_2[i] - borrow;
+        dest[i] = LOW(diff);
+        borrow = HIGH(diff) & 1;
     }
 
 #endif
@@ -2117,13 +2118,16 @@ STATIC void num_ssm_opposite(num_p num_fft, uint64_t chunk_pos, uint64_t n)
 
 #else
 
-    uint64_t borrow = (uint64_t)__builtin_sub_overflow(1, dest[0], &dest[0]);
+    uint128_t borrow = U128(1) - dest[0];
+    dest[0] = LOW(borrow);
+    borrow = HIGH(borrow) & 1;
+
+    #pragma GCC unroll 8
     for(uint64_t i = 1; i < n; i++)
     {
-        uint64_t diff;
-        uint64_t b1 = (uint64_t)__builtin_sub_overflow(0, dest[i], &diff);
-        uint64_t b2 = (uint64_t)__builtin_sub_overflow(diff, borrow, &dest[i]);
-        borrow = b1 | b2;
+        uint128_t diff = U128(0) - dest[i] - borrow;
+        dest[i] = LOW(diff);
+        borrow = HIGH(diff) & 1;
     }
 
 #endif
