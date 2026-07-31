@@ -994,8 +994,6 @@ static void num_mul_uint_buffer(num_p num_res, num_p num, uint64_t value) // TOD
 
 #endif
 
-// time_mul_classic_benchmark      | time mul: 34.397
-
 // KEEPS NUM_1 NUM_2
 num_p num_mul_classic(num_p num_1, num_p num_2)
 {
@@ -1081,6 +1079,7 @@ num_p num_mul_classic(num_p num_1, num_p num_2)
         "lea %[src_1], [%[src_1] + 8]                   \n\t" // src_1 += 8
         "lea %[dest], [%[dest] + 8]                     \n\t" // dest += 8
         "dec %[i]                                       \n\t" // i--
+        "jz loop_1_skip%=                               \n\t" // <--- ADDED: Skip loop 1 if i == 0
 
         "loop_1_begin%=:                                \n\t"
 
@@ -1142,6 +1141,8 @@ num_p num_mul_classic(num_p num_1, num_p num_2)
         "lea %[dest], [%[dest] + 8]                     \n\t" // dest += 8
         "dec %[i]                                       \n\t" // i--
         "jnz loop_1_begin%=                             \n\t"
+
+        "loop_1_skip%=:                                 \n\t" // <--- ADDED: Target label for the skip
 
         "mov %[j], %[count_1]                           \n\t" // j == count_1
         "shl %[j], 3                                    \n\t" // j *= 8
