@@ -1,51 +1,33 @@
 on: [push]
 
 jobs:
-  build_linux:
-    runs-on: ubuntu-26.04
+  ci:
+    name: ${{ matrix.cmd }} (${{ matrix.os }}, ${{ matrix.assembly }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-26.04, macos-latest]
+        cmd: [build, test]
+        assembly: [default, no_assembly]
     steps:
     - uses: actions/checkout@v6
-    - run: git submodule update --init --recursive
-    - run: make build FLAGS_EXTRA=-fanalyzer
-  build_linux_no_assembly:
-    runs-on: ubuntu-26.04
-    steps:
-    - uses: actions/checkout@v6
-    - run: git submodule update --init --recursive
-    - run: make build FLAGS_EXTRA="-fanalyzer -DNO_ASSEMBLY"
-  test_linux:
-    runs-on: ubuntu-26.04
-    steps:
-    - uses: actions/checkout@v6
-    - run: git submodule update --init --recursive
-    - run: make test
-  test_linux_no_assembly:
-    runs-on: ubuntu-26.04
-    steps:
-    - uses: actions/checkout@v6
-    - run: git submodule update --init --recursive
-    - run: make test FLAGS_EXTRA=-DNO_ASSEMBLY
-  build_mac:
-    runs-on: macos-latest
-    steps:
-    - uses: actions/checkout@v6
-    - run: git submodule update --init --recursive
-    - run: make build
-  build_mac_no_assembly:
-    runs-on: macos-latest
-    steps:
-    - uses: actions/checkout@v6
-    - run: git submodule update --init --recursive
-    - run: make build FLAGS_EXTRA=-DNO_ASSEMBLY
-  test_mac:
-    runs-on: macos-latest
-    steps:
-    - uses: actions/checkout@v6
-    - run: git submodule update --init --recursive
-    - run: make test
-  test_mac_no_assembly:
-    runs-on: macos-latest
-    steps:
-    - uses: actions/checkout@v6
-    - run: git submodule update --init --recursive
-    - run: make test FLAGS_EXTRA=-DNO_ASSEMBLY
+    
+    - name: Checkout submodules
+      run: git submodule update --init --recursive
+      
+    - name: Run Makefile
+      run: |
+        FLAGS=""
+        
+        # Apply static analysis exclusively on Linux builds
+        if [ "${{ matrix.os }}" = "ubuntu-26.04" ] && [ "${{ matrix.cmd }}" = "build" ]; then
+          FLAGS="-fanalyzer"
+        fi
+        
+        # Append assembly override if matrix dictates
+        if [ "${{ matrix.assembly }}" = "no_assembly" ]; then
+          FLAGS="$FLAGS -DNO_ASSEMBLY"
+        fi
+        
+        make ${{ matrix.cmd }} FLAGS_EXTRA="$FLAGS"
