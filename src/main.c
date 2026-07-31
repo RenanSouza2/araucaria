@@ -801,9 +801,9 @@ static void time_assembly_sqr()
 static void time_assembly_div()
 {
 #ifdef DEBUG
-    uint64_t base = 21;
+    uint64_t base = 28;
 #else
-    uint64_t base = 27;
+    uint64_t base = 28;
 #endif
 
     tprintf("base: " U64P() "", base);
