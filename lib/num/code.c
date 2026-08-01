@@ -901,6 +901,11 @@ static void num_add_offset(num_p num_1, uint64_t pos_1, num_p num_2)
     assert(num_1)
     assert(num_2)
 
+    if(num_2->count == 0)
+    {
+        return;
+    }
+
     uint64_t count_src = num_2->count;
     uint64_t count_max = pos_1 + count_src;
     assert(num_1->size >= count_max);
@@ -2177,6 +2182,7 @@ void num_ssm_shl(
     constexpr uint64_t mask = 0x3f;
 
     uint64_t count = bits >> chunk_bits_log_2;
+    assert(count < n);
     bits &= mask;
 
     uint64_t * restrict dest = &num_fft_res->chunk[pos_res];
