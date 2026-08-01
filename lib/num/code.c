@@ -913,7 +913,7 @@ static void num_add_offset(num_p num_1, uint64_t pos_1, num_p num_2)
     uint64_t * restrict dest = num_1->chunk;
     const uint64_t * restrict src = num_2->chunk;
     uint128_t carry = 0;
-    
+
     #pragma GCC unroll 32
     for(uint64_t i = 0; i < count_src; i++)
     {
@@ -935,14 +935,14 @@ void num_sub_offset(num_p num_1, uint64_t pos_1, num_p num_2)
     CLU_HANDLER_IS_SAFE(num_2)
     assert(num_1)
     assert(num_2)
-    
+
     uint64_t count_src = num_2->count;
     assert(num_1->count >= count_src + pos_1);
 
     uint64_t * restrict dest = num_1->chunk;
     const uint64_t * restrict src = num_2->chunk;
     uint128_t borrow = 0;
-    
+
     #pragma GCC unroll 32
     for(uint64_t i = 0; i < count_src; i++)
     {
@@ -3033,7 +3033,6 @@ static void num_ssm_sqr_mod_span(num_p num_aux, num_p num, uint64_t pos, uint64_
     num_t num_aux_piece;
     num_span(&num_aux_piece, num, pos, pos + n);
 
-    // TODO: USE ASSEMBLY
     num_sqr_classic_buffer(num_aux, &num_aux_piece);
 
     memmove(&num_aux->chunk[n], &num_aux->chunk[n-1], n * sizeof(uint64_t));
@@ -3208,32 +3207,38 @@ static num_p num_div_mod_classic(num_p num_aux, num_p num_1, num_p num_2)
     assert(num_aux->size >= num_2->count+1);
     assert(num_1->count >= num_2->count);
 
-    uint64_t count = num_1->count - num_2->count + 1;
+    uint64_t count_2 = num_2->count;
+    uint64_t count = num_1->count - count_2 + 1;
     num_p num_q = num_create_dirty(CLU_ARGS(count, count));
-    uint64_t value_2 = num_2->chunk[num_2->count-1];
+
+    uint64_t * restrict dest = num_q->chunk;
+    uint64_t * src_1 = num_1->chunk;
+    uint64_t value_2 = num_2->chunk[count_2 - 1];
+
     for(uint64_t i = count - 1; i != UINT64_MAX; i--)
     {
         if(num_cmp_offset(num_1, i, num_2) < 0)
         {
-            num_q->chunk[i] = 0;
+            dest[i] = 0;
             continue;
         }
 
-        if(num_1->count == num_2->count + i)
+        uint64_t current_count_1 = num_1->count;
+        if(current_count_1 == count_2 + i)
         {
-            num_q->chunk[i] = 1;
+            dest[i] = 1;
             num_sub_offset(num_1, i, num_2);
             continue;
         }
 
         uint64_t r;
-        if(num_1->chunk[num_1->count-1] == value_2)
+        if(src_1[current_count_1 - 1] == value_2)
         {
             r = UINT64_MAX;
         }
         else
         {
-            uint128_t value_1 = U128HL(num_1->chunk[num_1->count-1], num_1->chunk[num_1->count-2]);
+            uint128_t value_1 = U128HL(src_1[current_count_1 - 1], src_1[current_count_1 - 2]);
             r = U64(value_1 / value_2);
         }
 
@@ -3244,7 +3249,7 @@ static num_p num_div_mod_classic(num_p num_aux, num_p num_1, num_p num_2)
             num_sub_offset(num_aux, 0, num_2);
         }
 
-        num_q->chunk[i] = r;
+        dest[i] = r;
         num_sub_offset(num_1, i, num_aux);
     }
 
