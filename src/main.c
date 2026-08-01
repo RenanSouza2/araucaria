@@ -875,6 +875,3 @@ int main()
     printf("\n");
     return 0;
 }
-
-// time_assembly_div       | base: 27
-// time_assembly_div       | time div         : 48.848
