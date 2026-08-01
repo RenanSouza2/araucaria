@@ -1,15 +1,10 @@
-#ifndef SIG_STRUCT_H
-#define SIG_STRUCT_H
+#ifndef FILE_STRUCT_H
+#define FILE_STRUCT_H
 
 #include <stdio.h>
 
 #include "../../mods/macros/struct.h"
-
-#include "../num/struct.h"
-
-#define POSITIVE 1
-#define NEGATIVE 2
-#define ZERO 3
+#include "../../mods/macros/uint.h" // IWYU pragma: keep
 
 STRUCT(file)
 {
@@ -17,12 +12,6 @@ STRUCT(file)
     uint64_t amount;
     uint64_t count;
     uint64_t pos;
-};
-
-STRUCT(sig_num)
-{
-    uint64_t signal;
-    num_p num;
 };
 
 #endif
