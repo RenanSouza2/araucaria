@@ -1,19 +1,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "debug.h"
-#include "../../mods/clu/header.h"
+#include "debug.h" // IWYU pragma: keep
+#include "../../mods/clu/header.h" // IWYU pragma: keep
 #include "../../mods/macros/assert.h" // IWYU pragma: keep
-
-#include "../num/header.h"
-#include "../num/struct.h"
 
 
 
 #ifdef DEBUG
-
-#include "../num/debug.h"
-
 #endif
 
 
@@ -29,11 +23,7 @@ static void fseek_safe(FILE *fp, long pos, int whence)
 static uint64_t ftell_safe(FILE *fp)
 {
     int64_t res = ftell(fp);
-    if (res < 0)
-    {
-        exit(EXIT_FAILURE);
-    }
-
+    assert(res >= 0);
     return (uint64_t)res;
 }
 
