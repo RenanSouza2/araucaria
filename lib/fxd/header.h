@@ -4,6 +4,7 @@
 #include <stdbool.h>
 
 #include "struct.h"
+#include "../file/struct.h"
 
 void fxd_num_display_dec(fxd_num_t fxd);
 void fxd_num_display(fxd_num_t fxd);

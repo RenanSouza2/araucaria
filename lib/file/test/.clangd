@@ -1,0 +1,5 @@
+Diagnostics:
+  ClangTidy:
+    Remove:
+      - "readability-function-cognitive-complexity"
+      - "performance-no-int-to-ptr"

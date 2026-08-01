@@ -5,6 +5,7 @@
 #include "../../mods/clu/header.h"
 #include "../../mods/macros/assert.h" // IWYU pragma: keep
 
+#include "../file/header.h"
 #include "../sig/header.h"
 #include "../num/header.h"
 #include "../num/struct.h"
