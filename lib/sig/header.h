@@ -5,6 +5,7 @@
 #include <stdbool.h>
 
 #include "struct.h"
+#include "../file/struct.h"
 
 void sig_num_display(sig_num_t sig, bool full);
 void sig_num_display_tag(const char tag[], sig_num_t sig);
@@ -37,18 +38,6 @@ sig_num_t sig_num_sqr(sig_num_t sig);
 sig_num_t sig_num_div(sig_num_t sig_1, sig_num_t sig_2);
 
 sig_num_t sig_num_mul_int(sig_num_t sig, int64_t value);
-
-file_t file_write_open(const char file_path[], uint64_t amount);
-void file_write_close(file_p fp);
-void file_write_uint64(file_p fp, uint64_t value);
-void file_write_int64(file_p fp, int64_t value);
-void file_write_start(file_p fp);
-void file_write_end(file_p fp);
-
-FILE* file_read_open(const char file_path[]);
-void file_read_move_to_index(FILE *fp, uint64_t index);
-uint64_t file_read_uint64(FILE *fp);
-int64_t file_read_int64(FILE *fp);
 
 void file_write_sig_num_raw(file_p fp, sig_num_t sig);
 void file_write_sig_num(file_p fp, sig_num_t sig);

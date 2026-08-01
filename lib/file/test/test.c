@@ -10,8 +10,6 @@ static void test_file_num()
 {
     TEST_LIB
 
-    bool show = false;
-
     TEST_ASSERT_MEM_EMPTY
 }
 
