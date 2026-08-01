@@ -573,10 +573,10 @@ num_p num_wrap_uint128(uint128_t value)
 {
     if(value <= UINT64_MAX)
     {
-        return num_wrap((uint64_t)value);
+        return num_wrap(U64(value));
     }
 
-    num_p num = num_create(CLU_ARGS(2, 2));
+    num_p num = num_create_dirty(CLU_ARGS(2, 2));
     num->chunk[0] = LOW(value);
     num->chunk[1] = HIGH(value);
     return num;
@@ -648,7 +648,7 @@ static uint64_t get_ftell(FILE* fp)
 {
     int64_t res = ftell(fp);
     assert(res >= 0);
-    return (uint64_t)res;
+    return U64(res);
 }
 
 num_p num_read_dec(const char file_name[])
@@ -802,19 +802,22 @@ STATIC void num_shl_core(num_p num, uint64_t bits) // TODO test
         return;
     }
 
+    uint64_t count = num->count;
+    uint64_t * restrict chunk = num->chunk;
+
     uint64_t carry = 0;
-    for(uint64_t i=0; i<num->count; i++)
+    for(uint64_t i = 0; i < count; i++)
     {
-        uint64_t value = num->chunk[i];
-        num->chunk[i] = (value << bits) | carry;
+        uint64_t value = chunk[i];
+        chunk[i] = (value << bits) | carry;
         carry = value >> (chunk_bits - bits);
     }
 
     if(carry)
     {
-        assert(num->size > num->count);
-        num->chunk[num->count] = carry;
-        num->count++;
+        assert(num->size > count);
+        chunk[count] = carry;
+        num->count = count + 1;
     }
 }
 
@@ -830,16 +833,19 @@ STATIC void num_shr_core(num_p num, uint64_t bits) // TODO test
         return;
     }
 
+    uint64_t count = num->count;
+    uint64_t * restrict chunk = num->chunk;
     uint64_t carry = 0;
-    for(uint64_t i=num->count-1; i!=UINT64_MAX; i--)
+
+    for(uint64_t i = count - 1; i != UINT64_MAX; i--)
     {
-        uint64_t value = num->chunk[i];
-        num->chunk[i] = (value >> bits) | carry;
+        uint64_t value = chunk[i];
+        chunk[i] = (value >> bits) | carry;
         carry = value << (chunk_bits - bits);
     }
+
     num_normalize(num);
 }
-
 
 
 STATIC int64_t num_cmp_offset(num_p num_1, uint64_t pos_1, num_p num_2) // TODO TEST
@@ -849,20 +855,26 @@ STATIC int64_t num_cmp_offset(num_p num_1, uint64_t pos_1, num_p num_2) // TODO 
     assert(num_1)
     assert(num_2)
 
-    if(num_1->count > num_2->count + pos_1)
+    uint64_t count_1 = num_1->count;
+    uint64_t count_2 = num_2->count;
+
+    if(count_1 > count_2 + pos_1)
     {
         return 1;
     }
 
-    if(num_1->count < num_2->count + pos_1)
+    if(count_1 < count_2 + pos_1)
     {
         return -1;
     }
 
-    for(uint64_t i = num_2->count-1; i != UINT64_MAX; i--)
+    const uint64_t * restrict chunk_1 = num_1->chunk;
+    const uint64_t * restrict chunk_2 = num_2->chunk;
+
+    for(uint64_t i = count_2 - 1; i != UINT64_MAX; i--)
     {
-        uint64_t value_1 = num_1->chunk[pos_1 + i];
-        uint64_t value_2 = num_2->chunk[i];
+        uint64_t value_1 = chunk_1[pos_1 + i];
+        uint64_t value_2 = chunk_2[i];
 
         if(value_1 > value_2)
         {
@@ -3134,30 +3146,38 @@ num_p num_div_mod_uint(num_p num, uint64_t value)
     assert(num);
     assert(value);
 
-    num_p num_q = num_create_dirty(CLU_ARGS(num->count, num->count));
-    for(uint64_t i = num->count - 1; i != UINT64_MAX; i--)
+    uint64_t initial_count = num->count;
+    num_p num_q = num_create_dirty(CLU_ARGS(initial_count, initial_count));
+
+    uint64_t * restrict dest = num_q->chunk;
+    uint64_t * src = num->chunk; // Cached to avoid double indirection
+
+    for(uint64_t i = initial_count - 1; i != UINT64_MAX; i--)
     {
-        if((num->count < i) || ((num->count - 1 == i) && (num->chunk[i] < value)))
+        uint64_t current_count = num->count; // Read once per iteration
+        if((current_count < i) || ((current_count - 1 == i) && (src[i] < value)))
         {
-            num_q->chunk[i] = 0;
+            dest[i] = 0;
             continue;
         }
 
-        if(num->count - 1 == i)
+        if(current_count - 1 == i)
         {
-            uint64_t r = num->chunk[i] / value;
-            num_q->chunk[i] = r;
+            uint64_t r = src[i] / value;
+            dest[i] = r;
             num_sub_uint_offset(num, i, r * value);
             continue;
         }
 
-        uint128_t value_1 = U128HL(num->chunk[i + 1], num->chunk[i]);
-        uint64_t r = (uint64_t)(value_1 / value);
+        uint128_t value_1 = U128HL(src[i + 1], src[i]);
+        uint64_t r = U64(value_1 / value);
         value_1 = MUL(r, value);
-        num_sub_uint_offset(num, i+1, HIGH(value_1));
+
+        num_sub_uint_offset(num, i + 1, HIGH(value_1));
         num_sub_uint_offset(num, i  , LOW(value_1));
-        num_q->chunk[i] = r;
+        dest[i] = r;
     }
+
     num_normalize(num_q);
     return num_q;
 }
@@ -3202,7 +3222,7 @@ static num_p num_div_mod_classic(num_p num_aux, num_p num_1, num_p num_2)
         else
         {
             uint128_t value_1 = U128HL(num_1->chunk[num_1->count-1], num_1->chunk[num_1->count-2]);
-            r = (uint64_t)(value_1 / value_2);
+            r = U64(value_1 / value_2);
         }
 
         num_mul_uint_buffer(num_aux, num_2, r);
