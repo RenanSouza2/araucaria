@@ -3302,8 +3302,7 @@ static num_p num_div_mod_bz_rec(
     num_p num_aux,
     num_p num_1,
     num_p num_2,
-    bz_frame_t f[],
-    bool memoize
+    bz_frame_t f[]
 )
 {
     CLU_HANDLER_IS_SAFE(num_1)
@@ -3335,8 +3334,7 @@ static num_p num_div_mod_bz_rec(
             num_aux,
             &num_1_1,
             &f->num_2_1,
-            &f[1],
-            (bool)(memoize || i)
+            &f[1]
         );
         num_normalize(num_1);
 
@@ -3389,7 +3387,7 @@ static num_p num_div_mod_bz(num_p num_1, num_p num_2)
         num_t num_1_1;
         num_span(&num_1_1, num_1, n_1 - (2 * n_2), num_1->count);
 
-        num_p num_q_tmp = num_div_mod_bz_rec(num_aux, &num_1_1, num_2, f, true);
+        num_p num_q_tmp = num_div_mod_bz_rec(num_aux, &num_1_1, num_2, f);
         num_normalize(num_1);
         num_q_tmp = num_expand_to(num_q_tmp, n_2 + num_q->count);
         num_add_offset(num_q_tmp, n_2, num_q);
@@ -3397,7 +3395,7 @@ static num_p num_div_mod_bz(num_p num_1, num_p num_2)
         num_q = num_q_tmp;
     }
 
-    num_p num_q_tmp = num_div_mod_bz_rec(num_aux, num_1, num_2, f, false);
+    num_p num_q_tmp = num_div_mod_bz_rec(num_aux, num_1, num_2, f);
     num_q_tmp = num_expand_to(num_q_tmp, n_1 - n_2 + num_q->count);
     num_add_offset(num_q_tmp, n_1 - n_2, num_q);
 
