@@ -2953,7 +2953,12 @@ num_p num_ssm_depad_no_wrap(num_p num, ssm_params_p p)
 }
 
 // num_aux->size >= 2 * n
-static num_p num_ssm_prepare_no_wrap(num_p num_aux, num_p num, ssm_params_p p)
+static num_p num_ssm_prepare_no_wrap(
+    num_p num_aux,
+    num_p num,
+    ssm_params_p p,
+    bool free_inputs
+)
 {
     CLU_HANDLER_IS_SAFE(num_aux)
     CLU_HANDLER_IS_SAFE(num)
@@ -2962,12 +2967,17 @@ static num_p num_ssm_prepare_no_wrap(num_p num_aux, num_p num, ssm_params_p p)
     assert(num_aux->size >= 2 * p->n)
 
     num_p num_fft = num_ssm_pad_no_wrap(num, p);
+    if(free_inputs)
+    {
+        num_free(num);
+    }
+
     num_ssm_fft_fwd(num_aux, num_fft, p);
     return num_fft;
 }
 
 // KEEPS NUM_1 NUM_2
-num_p num_mul_ssm(num_p num_1, num_p num_2)
+num_p num_mul_ssm(num_p num_1, num_p num_2, bool free_inputs)
 {
     CLU_HANDLER_IS_SAFE(num_1)
     CLU_HANDLER_IS_SAFE(num_2)
@@ -2977,8 +2987,8 @@ num_p num_mul_ssm(num_p num_1, num_p num_2)
     ssm_params_t p = ssm_get_params(num_1->count + num_2->count);
     num_p num_aux_1 = num_create_dirty(CLU_ARGS(p.n, 0));
     num_p num_aux_2 = num_create_dirty(CLU_ARGS(2 * p.n, 0));
-    num_p num_fft_1 = num_ssm_prepare_no_wrap(num_aux_2, num_1, &p);
-    num_p num_fft_2 = num_ssm_prepare_no_wrap(num_aux_2, num_2, &p);
+    num_p num_fft_1 = num_ssm_prepare_no_wrap(num_aux_2, num_1, &p, free_inputs);
+    num_p num_fft_2 = num_ssm_prepare_no_wrap(num_aux_2, num_2, &p, free_inputs);
 
     num_ssm_mul_pointwise(
         num_aux_1,
@@ -3006,7 +3016,7 @@ static bool mul_is_classic(uint64_t count_1, uint64_t count_2)
 }
 
 // KEEPS NUM_1 NUM_2
-num_p num_mul_core(num_p num_1, num_p num_2)
+num_p num_mul_core(num_p num_1, num_p num_2, bool free_inputs)
 {
     CLU_HANDLER_IS_SAFE(num_1)
     CLU_HANDLER_IS_SAFE(num_2)
@@ -3020,10 +3030,16 @@ num_p num_mul_core(num_p num_1, num_p num_2)
 
     if(mul_is_classic(num_1->count, num_2->count))
     {
-        return num_mul_classic(num_1, num_2);
+        num_p num_res =  num_mul_classic(num_1, num_2);
+        if(free_inputs)
+        {
+            num_free(num_1);
+            num_free(num_2);
+        }
+        return num_res;
     }
 
-    return num_mul_ssm(num_1, num_2);
+    return num_mul_ssm(num_1, num_2, free_inputs);
 }
 
 
@@ -3138,8 +3154,7 @@ num_p num_sqr_ssm(num_p num)
     ssm_params_t p = ssm_get_params(2 * num->count);
     num_p num_aux_1 = num_create_dirty(CLU_ARGS(p.n, 0));
     num_p num_aux_2 = num_create_dirty(CLU_ARGS(2 * p.n, 0));
-    num_p num_fft = num_ssm_prepare_no_wrap(num_aux_2, num, &p);
-    num_free(num);
+    num_p num_fft = num_ssm_prepare_no_wrap(num_aux_2, num, &p, true);
 
     num_ssm_sqr_pointwise(
         num_aux_1,
@@ -3344,7 +3359,7 @@ static num_p num_div_mod_bz_rec(
             continue;
         }
 
-        num_p num_aux_2 = num_mul_core(num_q_tmp, &f->num_2_0);
+        num_p num_aux_2 = num_mul_core(num_q_tmp, &f->num_2_0, false);
         while(num_cmp_offset(num_1, k * i, num_aux_2) < 0)
         {
             num_q_tmp = num_sub_uint(num_q_tmp, 1);
@@ -3404,7 +3419,7 @@ static num_p num_div_mod_bz(num_p num_1, num_p num_2)
     return num_q_tmp;
 }
 
-// Forces the biggest chunk of the divident to be >= 2^63
+// Forces the most significant chunk of the divident to be >= 2^63
 uint64_t num_div_normalize(num_p *num_1, num_p *num_2) // TODO TEST
 {
     CLU_HANDLER_IS_SAFE(*num_1);
@@ -3414,7 +3429,6 @@ uint64_t num_div_normalize(num_p *num_1, num_p *num_2) // TODO TEST
 
     uint64_t bits = chunk_bits - stdc_bit_width((*num_2)->chunk[(*num_2)->count-1]);
     (*num_1) = num_expand_to((*num_1), (*num_1)->count + 1);
-    // (*num_2) = num_expand_to((*num_2), (*num_2)->count + 1);
     num_shl_core(*num_1, bits);
     num_shl_core(*num_2, bits);
     return bits;
@@ -3577,10 +3591,7 @@ num_p num_mul(num_p num_1, num_p num_2)
     assert(num_1)
     assert(num_2)
 
-    num_p num_res = num_mul_core(num_1, num_2);
-    num_free(num_1);
-    num_free(num_2);
-    return num_res;
+    return num_mul_core(num_1, num_2, true);
 }
 
 num_p num_sqr(num_p num)
