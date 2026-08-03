@@ -3015,7 +3015,6 @@ static bool mul_is_classic(uint64_t count_1, uint64_t count_2)
     return (bool)((count_1 < threshold) || (count_2 < threshold));
 }
 
-// KEEPS NUM_1 NUM_2
 num_p num_mul_core(num_p num_1, num_p num_2, bool free_inputs)
 {
     CLU_HANDLER_IS_SAFE(num_1)
@@ -3156,12 +3155,7 @@ num_p num_sqr_ssm(num_p num)
     num_p num_aux_2 = num_create_dirty(CLU_ARGS(2 * p.n, 0));
     num_p num_fft = num_ssm_prepare_no_wrap(num_aux_2, num, &p, true);
 
-    num_ssm_sqr_pointwise(
-        num_aux_1,
-        num_aux_2,
-        num_fft,
-        &p
-    );
+    num_ssm_sqr_pointwise(num_aux_1, num_aux_2, num_fft, &p);
     num_free(num_aux_1);
 
     num_ssm_fft_inv(num_aux_2, num_fft, &p);
