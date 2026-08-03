@@ -2154,25 +2154,26 @@ static void test_num_mul(bool show)
 {
     TEST_FN_OPEN
 
-    #define TEST_NUM_MUL(TAG, FN, NUM_1, NUM_2, RES)        \
+// Change FN to CALL and remove the hardcoded (num_1, num_2)
+    #define TEST_NUM_MUL(TAG, CALL, NUM_1, NUM_2, RES)      \
     {                                                       \
         TEST_CASE_OPEN(TAG)                                 \
         {                                                   \
             num_p num_1 = num_create_immed(ARG_OPEN NUM_1); \
             num_p num_2 = num_create_immed(ARG_OPEN NUM_2); \
-            num_p num_res = FN(num_1, num_2);               \
-            assert(num_immed(num_res, ARG_OPEN RES))        \
+            num_p num_res = CALL;                           \
+            assert(num_immed(num_res, ARG_OPEN RES));       \
             num_free(num_1);                                \
             num_free(num_2);                                \
         }                                                   \
         TEST_CASE_CLOSE                                     \
-    }                                                       \
+    }
 
-    #define TEST_NUM_MUL_BATCH(TAG, NUM_1, NUM_2, RES)                          \
-    {                                                                           \
-        TEST_NUM_MUL((10 * (TAG)) + 1, num_mul_classic, NUM_1, NUM_2, RES)      \
-        TEST_NUM_MUL((10 * (TAG)) + 2, num_mul_ssm    , NUM_1, NUM_2, RES)      \
-        TEST_NUM_MUL((10 * (TAG)) + 3, num_mul_core   , NUM_1, NUM_2, RES)      \
+    #define TEST_NUM_MUL_BATCH(TAG, NUM_1, NUM_2, RES)                                              \
+    {                                                                                               \
+        TEST_NUM_MUL((10 * (TAG)) + 1, num_mul_classic(num_1, num_2),        NUM_1, NUM_2, RES)     \
+        TEST_NUM_MUL((10 * (TAG)) + 2, num_mul_ssm(num_1, num_2, false),     NUM_1, NUM_2, RES)     \
+        TEST_NUM_MUL((10 * (TAG)) + 3, num_mul_core(num_1, num_2, false),    NUM_1, NUM_2, RES)     \
     }
 
     TEST_NUM_MUL_BATCH(1,
@@ -2984,7 +2985,7 @@ static void test_fuzz_num_ssm_mul(bool show)
     {                                                       \
         num_p num_1 = num_create_rand(COUNT_1);             \
         num_p num_2 = num_create_rand(COUNT_2);             \
-        num_p num_res_1 = num_mul_ssm(num_1, num_2);        \
+        num_p num_res_1 = num_mul_ssm(num_1, num_2, false); \
         num_p num_res_2 = num_mul_classic(num_1, num_2);    \
         assert(num_eq_dbg(num_res_1, num_res_2));           \
         num_free(num_1);                                    \
