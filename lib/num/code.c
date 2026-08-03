@@ -3024,6 +3024,11 @@ num_p num_mul_core(num_p num_1, num_p num_2, bool free_inputs)
 
     if(num_1->count == 0 || num_2->count == 0)
     {
+        if(free_inputs)
+        {
+            num_free(num_1);
+            num_free(num_2);
+        }
         return num_wrap(0);
     }
 

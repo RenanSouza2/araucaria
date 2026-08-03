@@ -3062,6 +3062,8 @@ static void test_fuzz_num_bz_div(bool show)
 {
     TEST_FN_OPEN
 
+    clu_log_level_set(CLU_LOG_DYNAMIC);
+
     #define TEST_FUZZ_NUM_BZ_DIV(TAG, COUNT_1, COUNT_2, RUNS)               \
     {                                                                       \
         TEST_FUZZ_CASE_OPEN(TAG, RUNS)                                      \
@@ -3079,10 +3081,14 @@ static void test_fuzz_num_bz_div(bool show)
                 num_display_full("num_r", num_r);                           \
                 assert(false);                                              \
             }                                                               \
+            tprintf("a");   \
             num_p num_aux = num_mul(num_copy(num_q), num_copy(num_2));      \
+            tprintf("b");   \
             num_aux = num_add(num_aux, num_copy(num_r));                    \
+            tprintf("c");   \
             if(!num_eq_dbg(num_copy(num_aux), num_copy(num_1)))             \
             {                                                               \
+                tprintf("d");   \
                 printf("\nentries");                                        \
                 num_display_full("num_1", num_1);                           \
                 num_display_full("num_2", num_2);                           \
@@ -3090,6 +3096,7 @@ static void test_fuzz_num_bz_div(bool show)
                 num_display_full("num_aux", num_aux);                       \
                 assert(false);                                              \
             }                                                               \
+            tprintf("e");   \
             num_free(num_1);                                                \
             num_free(num_2);                                                \
             num_free(num_aux);                                              \
