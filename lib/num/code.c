@@ -423,6 +423,11 @@ num_p num_realloc_disk(CLU_PARAMS(num_p num))
     CLU_HANDLER_IS_SAFE(num);
     assert(num);
 
+    if(num->is_mmap)
+    {
+        return num;
+    }
+
     num_p num_res = num_create_disk(CLU_ARGS_RELAY(num->count, num->count));
     memcpy(num_res->chunk, num->chunk, num->count * sizeof(uint64_t));
     num_free(num);

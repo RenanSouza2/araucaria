@@ -21,6 +21,7 @@ sig_num_t sig_num_wrap_int128(int128_t value);
 sig_num_t sig_num_wrap_num(num_p num);
 sig_num_t sig_num_wrap_str(const char str[]);
 sig_num_t sig_num_copy(sig_num_t sig);
+sig_num_t sig_num_realloc_disk(sig_num_t sig);
 sig_num_t sig_num_head_grow(sig_num_t sig, uint64_t count);
 sig_num_t sig_num_head_trim(sig_num_t sig, uint64_t count);
 

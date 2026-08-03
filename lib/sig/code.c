@@ -226,6 +226,15 @@ sig_num_t sig_num_copy(sig_num_t sig)
     return sig_num_create(sig.signal, num);
 }
 
+sig_num_t sig_num_realloc_disk(sig_num_t sig)
+{
+    CLU_SIG_IS_SAFE(sig);
+    assert(sig.num);
+
+    num_p num = num_realloc_disk(CLU_ARGS(sig.num));
+    return sig_num_create(sig.signal, num);
+}
+
 sig_num_t sig_num_head_grow(sig_num_t sig, uint64_t count) // TODO test
 {
     CLU_SIG_IS_SAFE(sig);
