@@ -418,6 +418,17 @@ num_p num_create_dirty(CLU_PARAMS(uint64_t size, uint64_t count))
     return num;
 }
 
+num_p num_realloc_disk(CLU_PARAMS(num_p num))
+{
+    CLU_HANDLER_IS_SAFE(num);
+    assert(num);
+
+    num_p num_res = num_create_disk(CLU_ARGS_RELAY(num->count, num->count));
+    memcpy(num_res->chunk, num->chunk, num->count * sizeof(uint64_t));
+    num_free(num);
+    return num_res;
+}
+
 num_p num_expand_to(num_p num, uint64_t size)
 {
     CLU_HANDLER_IS_SAFE(num);
@@ -3418,7 +3429,7 @@ static num_p num_div_mod_bz(num_p num_1, num_p num_2)
     return num_q_tmp;
 }
 
-// Forces the most significant chunk of the divident to be >= 2^63
+// Forces the most significant chunk of the dividend to be >= 2^63
 uint64_t num_div_normalize(num_p *num_1, num_p *num_2) // TODO TEST
 {
     CLU_HANDLER_IS_SAFE(*num_1);
