@@ -880,3 +880,4 @@ int main()
 // time_assembly_mul       | time mul: 15.498 | claude v1
 // time_assembly_mul       | time mul: 12.574 | claude v2
 // time_assembly_mul       | time mul: 9.441 | claude v3
+// time_assembly_mul       | time mul: 9.121 | claude v4

@@ -2726,37 +2726,50 @@ static void num_ssm_mul_mod_span(
     // two. The two products plus dest plus carry exceed 128 bits, so the carry is kept
     // as two words (c0 full width, c1 a single bit) rather than a uint128_t.
     uint64_t i = 1;
-    for(; i + 1 < count; i += 2)
+    for(; i + 2 < count; i += 3)
     {
         uint64_t a = src_1[i];
         uint64_t b = src_1[i + 1];
+        uint64_t c = src_1[i + 2];
 
         uint64_t c0 = 0;
         uint64_t c1 = 0;
-        uint64_t prev = 0; // src_2[j - 1], zero at j == 0
+        uint64_t prev_1 = 0; // src_2[j - 1], zero at j == 0
+        uint64_t prev_2 = 0; // src_2[j - 2], zero at j <= 1
 
         #pragma GCC unroll 8
         for(uint64_t j = 0; j < count; j++)
         {
             uint64_t cur = src_2[j];
             uint128_t p1 = MUL(a, cur);
-            uint128_t p2 = MUL(b, prev);
-            prev = cur;
+            uint128_t p2 = MUL(b, prev_1);
+            uint128_t p3 = MUL(c, prev_2);
+            prev_2 = prev_1;
+            prev_1 = cur;
 
-            uint128_t sum = U128(dest[i + j]) + LOW(p1) + LOW(p2) + c0;
+            uint128_t sum = U128(dest[i + j]) + LOW(p1) + LOW(p2) + LOW(p3) + c0;
             dest[i + j] = LOW(sum);
 
-            uint128_t acc = U128(HIGH(sum)) + HIGH(p1) + HIGH(p2) + c1;
+            uint128_t acc = U128(HIGH(sum)) + HIGH(p1) + HIGH(p2) + HIGH(p3) + c1;
             c0 = LOW(acc);
             c1 = HIGH(acc);
         }
 
-        // j == count contributes only b * src_2[count - 1]; these two words are
-        // written for the first time by this row pair, so they are assigned
-        uint128_t p2 = MUL(b, prev);
-        uint128_t sum = U128(LOW(p2)) + c0;
+        // the three words past the row block are written for the first time here, so
+        // they are assigned; prev_1 is src_2[count - 1] and prev_2 is src_2[count - 2]
+        uint128_t p2 = MUL(b, prev_1);
+        uint128_t p3 = MUL(c, prev_2);
+        uint128_t sum = U128(LOW(p2)) + LOW(p3) + c0;
         dest[i + count] = LOW(sum);
-        dest[i + count + 1] = LOW(U128(HIGH(sum)) + HIGH(p2) + c1);
+
+        uint128_t acc = U128(HIGH(sum)) + HIGH(p2) + HIGH(p3) + c1;
+        c0 = LOW(acc);
+        c1 = HIGH(acc);
+
+        uint128_t p4 = MUL(c, prev_1);
+        sum = U128(LOW(p4)) + c0;
+        dest[i + count + 1] = LOW(sum);
+        dest[i + count + 2] = LOW(U128(HIGH(sum)) + HIGH(p4) + c1);
     }
 
     for(; i < count; i++)
