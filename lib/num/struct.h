@@ -12,10 +12,11 @@ constexpr uint64_t chunk_bits_log_2 = 6;
 [[maybe_unused]]
 constexpr uint64_t chunk_bits = 64;
 
-STRUCT(num_config)
+STRUCT(araucaria_disk_config)
 {
     uint64_t disk_threshold;
     const char* disk_path;
+    bool is_set;
 };
 
 STRUCT(num)

@@ -9,7 +9,8 @@
 PLACEHOLDER(num_config)
 PLACEHOLDER(num)
 
-void num_config_set(num_config_p config);
+void araucaria_disk_config_set(araucaria_disk_config_p config);
+bool araucaria_disk_config_is_set();
 
 void num_display_dec(num_p num);
 void num_display_opts(num_p num, const char tag[], bool length, bool full);
