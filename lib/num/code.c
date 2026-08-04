@@ -2722,7 +2722,44 @@ static void num_ssm_mul_mod_span(
     }
     dest[count] = LOW(carry);
 
-    for(uint64_t i = 1; i < count; i++)
+    // Two rows of src_1 per pass: one dest load/store per two multiplies instead of
+    // two. The two products plus dest plus carry exceed 128 bits, so the carry is kept
+    // as two words (c0 full width, c1 a single bit) rather than a uint128_t.
+    uint64_t i = 1;
+    for(; i + 1 < count; i += 2)
+    {
+        uint64_t a = src_1[i];
+        uint64_t b = src_1[i + 1];
+
+        uint64_t c0 = 0;
+        uint64_t c1 = 0;
+        uint64_t prev = 0; // src_2[j - 1], zero at j == 0
+
+        #pragma GCC unroll 8
+        for(uint64_t j = 0; j < count; j++)
+        {
+            uint64_t cur = src_2[j];
+            uint128_t p1 = MUL(a, cur);
+            uint128_t p2 = MUL(b, prev);
+            prev = cur;
+
+            uint128_t sum = U128(dest[i + j]) + LOW(p1) + LOW(p2) + c0;
+            dest[i + j] = LOW(sum);
+
+            uint128_t acc = U128(HIGH(sum)) + HIGH(p1) + HIGH(p2) + c1;
+            c0 = LOW(acc);
+            c1 = HIGH(acc);
+        }
+
+        // j == count contributes only b * src_2[count - 1]; these two words are
+        // written for the first time by this row pair, so they are assigned
+        uint128_t p2 = MUL(b, prev);
+        uint128_t sum = U128(LOW(p2)) + c0;
+        dest[i + count] = LOW(sum);
+        dest[i + count + 1] = LOW(U128(HIGH(sum)) + HIGH(p2) + c1);
+    }
+
+    for(; i < count; i++)
     {
         v1 = src_1[i];
         carry = 0;
