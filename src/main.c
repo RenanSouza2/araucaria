@@ -878,3 +878,4 @@ int main()
 
 // time_assembly_mul       | time mul: 16.420 | original apple
 // time_assembly_mul       | time mul: 15.498 | claude v1
+// time_assembly_mul       | time mul: 12.574 | claude v2
