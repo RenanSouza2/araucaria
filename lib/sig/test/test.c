@@ -388,7 +388,7 @@ static void test_sig_num_shr(bool show)
     TEST_SIG_NUM_SHR(9, (POSITIVE, 2, 2, 0), 1, (POSITIVE, 2, 1, 0));
     TEST_SIG_NUM_SHR(10, (POSITIVE, 2, 2, 0), 2, (POSITIVE, 1, 0x8000000000000000));
     TEST_SIG_NUM_SHR(11, (POSITIVE, 2, 2, 0), 64, (POSITIVE, 1, 2));
-    TEST_SIG_NUM_SHR(11, (POSITIVE, 2, 2, 0), 65, (POSITIVE, 1, 1));
+    TEST_SIG_NUM_SHR(12, (POSITIVE, 2, 2, 0), 65, (POSITIVE, 1, 1));
 
     #undef TEST_SIG_NUM_SHR
 

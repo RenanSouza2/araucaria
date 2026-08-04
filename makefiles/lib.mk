@@ -17,6 +17,8 @@ debug.o: code.c
 	echo "building $(PRJ_NAME) debug $(DIR)"
 	gcc -o $@ $^ $(FLAGS) $(FLAGS_DBG) $(FLAGS_CMP) $(FLAGS_EXTRA)
 
+-include lib.d debug.d
+
 
 
 clean c:
@@ -24,7 +26,7 @@ clean c:
 
 _clean:
 	echo "cleaning $(PRJ_NAME) $(DIR)"
-	rm -f *.o
+	rm -f *.o *.d
 	$(MAKE) clean --directory=test -j
 
 

@@ -21,6 +21,44 @@ static char* format_buffer(const char* func)
 #undef FUNC_TAG
 #define FUNC_TAG format_buffer(__func__)
 
+static unsigned int seed_base;
+
+// Seeds rand() and reports the seed so a failing case can be replayed
+// with SEED=<value> ./runner_test_N_xxx
+static void test_seed_init()
+{
+    const char *seed_env = getenv("SEED");
+    seed_base = seed_env
+        ? (unsigned int)strtoul(seed_env, nullptr, 10)
+        : (unsigned int)time(nullptr);
+
+    printf("\n%s seed: %u\n", NAME, seed_base);
+    srand(seed_base);
+}
+
+// Every fuzz iteration executes in a fresh fork of the main process, so it
+// inherits whatever rand() state the parent holds — and the parent never
+// advances it, because the case body only ever runs in the child. Without an
+// explicit reseed each iteration therefore generates byte-identical operands
+// and RUNS=100 tests one input a hundred times.
+//
+// Deriving the seed from _tag (which TEST_FUZZ_CASE_OPEN sets to
+// TAG * 1000000 + iteration) keeps every iteration distinct while staying
+// reproducible: the same SEED replays the same operands for the same tag.
+static void fuzz_seed(uint64_t tag)
+{
+    // rand() is LCG-based, so consecutive seeds yield strongly correlated first
+    // outputs. Mix the tag before seeding or successive iterations would draw
+    // near-identical operands.
+    uint32_t x = (uint32_t)(seed_base + tag);
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    srand(x);
+}
+
 
 
 static void test_uint_from_char(bool show)
@@ -241,8 +279,8 @@ static void test_num_expand_to(bool show)
 
     TEST_NUM_EXPAND_TO(1, (0), 2)
     TEST_NUM_EXPAND_TO(2, (2, 1, 2), 2)
-    TEST_NUM_EXPAND_TO(2, (2, 1, 2), 3)
-    TEST_NUM_EXPAND_TO(3, (2, 1, 2), 10)
+    TEST_NUM_EXPAND_TO(3, (2, 1, 2), 3)
+    TEST_NUM_EXPAND_TO(4, (2, 1, 2), 10)
 
     #undef TEST_NUM_EXPAND_TO
 
@@ -480,7 +518,7 @@ static void test_num_wrap_hex(bool show)
     TEST_NUM_WRAP_HEX(12, "")
     TEST_NUM_WRAP_HEX(13, "0")
     TEST_NUM_WRAP_HEX(14, "ab")
-    TEST_NUM_WRAP_HEX(14, "0b")
+    TEST_NUM_WRAP_HEX(15, "0b")
 
     #undef TEST_NUM_WRAP_HEX
 
@@ -1731,12 +1769,9 @@ static void test_num_ssm_fft_fwd(bool show)
     TEST_FN_CLOSE
 }
 
-[[maybe_unused]]
 static void test_num_ssm_depad_wrap(bool show)
 {
     TEST_FN_OPEN
-
-    show = true;
 
     #define TEST_NUM_SSM_DEPAD_WRAP(TAG, NUM_FFT, N, NUM_RES)                   \
     {                                                                           \
@@ -1771,7 +1806,7 @@ static void test_num_ssm_depad_wrap(bool show)
         (9, 0, 0, 0, 0, 0, 0, 0, 0, 1)
     )
     TEST_NUM_SSM_DEPAD_WRAP(2,
-        (264,
+        (72,
             0, 0, 0, 0, 0, 0, 0, 0, 1,
             0, 0, 0, 0, 0, 0, 0, 0, 1,
             0, 0, 0, 0, 0, 0, 0, 0, 1,
@@ -1784,6 +1819,14 @@ static void test_num_ssm_depad_wrap(bool show)
         9,
         (9, 0, 1, 1, 1, 1, 1, 1, 1, 1)
     )
+    // Cases 3 and 4 are disabled: their fixtures are 8 groups of 33 limbs, but
+    // ssm_get_params_wrap(9) yields _n = 9, so num_ssm_depad_wrap reads 8 groups
+    // of 9 and the remaining 192 limbs are never looked at. Case 3 produces
+    // 0 ffff.. ffff.. ffff.. ffff.. ffff.. fffc fffe 0002 instead of
+    // 0 8 7 6 5 4 3 2 1. Either the data needs relaying out for _n = 9 (as in
+    // cases 1 and 2), or the N argument needs to match whatever parameter set
+    // produced these 33-limb groups. Re-enable once that is resolved.
+#if 0
     TEST_NUM_SSM_DEPAD_WRAP(3,
         (264,
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8,
@@ -1812,9 +1855,9 @@ static void test_num_ssm_depad_wrap(bool show)
         9,
         (9, 1, 0, 0, 0, 0, 0, 0, 0, 0)
     )
+#endif
 
-    TEST_CASE_OPEN(6)
-    TEST_CASE_CLOSE
+    #undef TEST_NUM_SSM_DEPAD_WRAP
 
     TEST_FN_CLOSE
 }
@@ -2773,7 +2816,7 @@ static void test_num_base_to(bool show)
     )
     TEST_NUM_BASE_TO(9,
         (2, 5, 0x6bc75e2d63100000),
-        (21, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+        (21, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
     )
     TEST_NUM_BASE_TO(10,
         (2, 1, 0),
@@ -2836,6 +2879,7 @@ static void test_fuzz_num_ssm_shift_round_trip(bool show)
     {                                                               \
         TEST_FUZZ_CASE_OPEN(TAG, RUNS)                              \
         {                                                           \
+            fuzz_seed(_tag);                                        \
             num_p num = num_create_rand(N);                         \
             num->chunk[(N) - 1] = 0;                                \
             num_p num_res = num_copy(num);                          \
@@ -2874,6 +2918,7 @@ static void test_fuzz_num_ssm_pad_no_wrap_round_trip(bool show)
     {                                                                   \
         TEST_FUZZ_CASE_OPEN(TAG, RUNS)                                  \
         {                                                               \
+            fuzz_seed(_tag);                                            \
             num_p num_in = num_create_rand(COUNT);                      \
             ssm_params_t p = ssm_get_params(COUNT);                     \
             num_p num_middle = num_ssm_pad_no_wrap(num_in, &p);         \
@@ -2912,6 +2957,7 @@ static void test_fuzz_num_ssm_pad_wrap_round_trip(bool show)
     {                                                           \
         TEST_FUZZ_CASE_OPEN(TAG, RUNS)                          \
         {                                                       \
+            fuzz_seed(_tag);                                    \
             num_p num_in = num_create_rand(N);                  \
             num_in->chunk[(N) - 1] = 0;                         \
             TEST_FUZZ_NUM_SSM_PAD_WRAP(N)                       \
@@ -2934,6 +2980,7 @@ static void test_fuzz_num_ssm_fft(bool show)
     {                                                                   \
         TEST_FUZZ_CASE_OPEN(TAG, RUNS)                                  \
         {                                                               \
+            fuzz_seed(_tag);                                            \
             num_p num = num_create_rand(((Nv)-1) * (Kv));               \
             uint64_t Q = 64 * ((Nv)-1) / (Kv);                          \
             ssm_params_t p = (ssm_params_t)                             \
@@ -2996,6 +3043,7 @@ static void test_fuzz_num_ssm_mul(bool show)
     {                                                   \
         TEST_FUZZ_CASE_OPEN(TAG, RUNS)                  \
         {                                               \
+            fuzz_seed(_tag);                            \
             TEST_FUZZ_NUM_SSM_MUL_COUNT(COUNT, COUNT)   \
         }                                               \
         TEST_FUZZ_CASE_CLOSE                            \
@@ -3012,6 +3060,7 @@ static void test_fuzz_num_ssm_mul(bool show)
     {                                                               \
         TEST_FUZZ_CASE_OPEN(TAG, RUNS)                              \
         {                                                           \
+            fuzz_seed(_tag);                                        \
             uint64_t count_1 = rand_64_range(COUNT_MIN, COUNT_MAX); \
             uint64_t count_2 = rand_64_range(COUNT_MIN, COUNT_MAX); \
             TEST_FUZZ_NUM_SSM_MUL_COUNT(count_1, count_2)           \
@@ -3044,6 +3093,7 @@ static void test_fuzz_num_ssm_sqr(bool show)
     {                                               \
         TEST_FUZZ_CASE_OPEN(TAG, RUNS)              \
         {                                           \
+            fuzz_seed(_tag);                        \
             TEST_FUZZ_NUM_SSM_SQR_COUNT(COUNT)      \
         }                                           \
         TEST_FUZZ_CASE_CLOSE                        \
@@ -3053,7 +3103,8 @@ static void test_fuzz_num_ssm_sqr(bool show)
     TEST_FUZZ_NUM_SSM_SQR(2, 1000,  10)
     TEST_FUZZ_NUM_SSM_SQR(3, 5000,   2)
 
-    #undef TEST_FUZZ_NUM_SSM_MUL
+    #undef TEST_FUZZ_NUM_SSM_SQR
+    #undef TEST_FUZZ_NUM_SSM_SQR_COUNT
 
     TEST_FN_CLOSE
 }
@@ -3062,12 +3113,11 @@ static void test_fuzz_num_bz_div(bool show)
 {
     TEST_FN_OPEN
 
-    clu_log_level_set(CLU_LOG_DYNAMIC);
-
     #define TEST_FUZZ_NUM_BZ_DIV(TAG, COUNT_1, COUNT_2, RUNS)               \
     {                                                                       \
         TEST_FUZZ_CASE_OPEN(TAG, RUNS)                                      \
         {                                                                   \
+            fuzz_seed(_tag);                                                \
             num_p num_1 = num_create_rand(COUNT_1);                         \
             num_p num_2 = num_create_rand(COUNT_2);                         \
             num_p num_q, num_r;                                             \
@@ -3081,14 +3131,10 @@ static void test_fuzz_num_bz_div(bool show)
                 num_display_full("num_r", num_r);                           \
                 assert(false);                                              \
             }                                                               \
-            tprintf("a");   \
             num_p num_aux = num_mul(num_copy(num_q), num_copy(num_2));      \
-            tprintf("b");   \
             num_aux = num_add(num_aux, num_copy(num_r));                    \
-            tprintf("c");   \
             if(!num_eq_dbg(num_copy(num_aux), num_copy(num_1)))             \
             {                                                               \
-                tprintf("d");   \
                 printf("\nentries");                                        \
                 num_display_full("num_1", num_1);                           \
                 num_display_full("num_2", num_2);                           \
@@ -3096,7 +3142,6 @@ static void test_fuzz_num_bz_div(bool show)
                 num_display_full("num_aux", num_aux);                       \
                 assert(false);                                              \
             }                                                               \
-            tprintf("e");   \
             num_free(num_1);                                                \
             num_free(num_2);                                                \
             num_free(num_aux);                                              \
@@ -3107,16 +3152,16 @@ static void test_fuzz_num_bz_div(bool show)
     }
 
     TEST_FUZZ_NUM_BZ_DIV( 1,  3,  1, 100)
-    TEST_FUZZ_NUM_BZ_DIV( 1,  3,  2, 100)
-    TEST_FUZZ_NUM_BZ_DIV( 2,  4,  2, 100)
-    TEST_FUZZ_NUM_BZ_DIV( 3,  5,  2, 100)
-    TEST_FUZZ_NUM_BZ_DIV( 4,  8,  5, 100)
-    TEST_FUZZ_NUM_BZ_DIV( 5, 10,  7, 100)
-    TEST_FUZZ_NUM_BZ_DIV( 6, 32, 19, 100)
-    TEST_FUZZ_NUM_BZ_DIV( 7, 20, 20,   5)
-    TEST_FUZZ_NUM_BZ_DIV( 8, 30, 20,   5)
-    TEST_FUZZ_NUM_BZ_DIV( 9, 40, 20,   5)
-    TEST_FUZZ_NUM_BZ_DIV(10, 50, 20,   5)
+    TEST_FUZZ_NUM_BZ_DIV( 2,  3,  2, 100)
+    TEST_FUZZ_NUM_BZ_DIV( 3,  4,  2, 100)
+    TEST_FUZZ_NUM_BZ_DIV( 4,  5,  2, 100)
+    TEST_FUZZ_NUM_BZ_DIV( 5,  8,  5, 100)
+    TEST_FUZZ_NUM_BZ_DIV( 6, 10,  7, 100)
+    TEST_FUZZ_NUM_BZ_DIV( 7, 32, 19, 100)
+    TEST_FUZZ_NUM_BZ_DIV( 8, 20, 20,   5)
+    TEST_FUZZ_NUM_BZ_DIV( 9, 30, 20,   5)
+    TEST_FUZZ_NUM_BZ_DIV(10, 40, 20,   5)
+    TEST_FUZZ_NUM_BZ_DIV(11, 50, 20,   5)
 
     #undef TEST_FUZZ_NUM_BZ_DIV
 
@@ -3161,7 +3206,7 @@ static void test_all(bool show)
     test_num_ssm_shl_mod(show);
     test_num_ssm_shr_mod(show);
     test_num_ssm_fft_fwd(show);
-    // test_num_ssm_depad_wrap(show);
+    test_num_ssm_depad_wrap(show);
     test_num_ssm_mul_wrap(show);
 
     test_num_div_normalize(show);

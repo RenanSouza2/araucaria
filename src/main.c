@@ -704,7 +704,7 @@ static void time_assembly_mul()
 #ifdef DEBUG
     uint64_t base = 22;
 #else
-    uint64_t base = 28;
+    uint64_t base = 29;
 #endif
 
     tprintf("base: " U64P() "", base);
@@ -868,10 +868,16 @@ int main()
     // flt_num_pi_2(1000);
     // flt_num_pi_3(1000);
     // mem_1(21);
-    // time_assembly_mul();
+    time_assembly_mul();
     // time_assembly_sqr();
-    time_assembly_div();
+    // time_assembly_div();
 
     printf("\n");
     return 0;
 }
+
+// time_assembly_mul       | time mul: 16.420 | original apple
+// time_assembly_mul       | time mul: 15.498 | claude v1
+// time_assembly_mul       | time mul: 12.574 | claude v2
+// time_assembly_mul       | time mul: 9.441 | claude v3
+// time_assembly_mul       | time mul: 9.121 | claude v4

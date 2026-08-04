@@ -2085,6 +2085,33 @@ static void num_ssm_sub_mod_immed(
             "memory"
     );
 
+#elif !defined(NO_ASSEMBLY) && defined(__APPLE__)
+
+    uint64_t count = n;
+    uint64_t tmp1, tmp2;
+
+    __asm__ volatile (
+        "cbz %[count], 2f\n\t"               // If count == 0, jump to label 2
+
+        "cmp xzr, xzr\n\t"                   // SET the carry flag (C=1 means NO borrow)
+
+        "1:\n\t"
+        "ldr %[tmp1], [%[dest]]\n\t"          // tmp1 = *dest (NO post-increment yet)
+        "ldr %[tmp2], [%[src_2]], #8\n\t"     // tmp2 = *src_2, then src_2 += 8
+
+        "sbcs %[tmp1], %[tmp1], %[tmp2]\n\t" // tmp1 = tmp1 - tmp2 - (1 - C), update C
+
+        "str %[tmp1], [%[dest]], #8\n\t"     // *dest = tmp1, then dest += 8
+
+        "sub %[count], %[count], #1\n\t"     // count-- (leaves flags untouched)
+        "cbnz %[count], 1b\n\t"              // Loop if count != 0
+        "2:\n"
+        : [dest] "+r" (dest), [src_2] "+r" (src_2),
+          [count] "+r" (count), [tmp1] "=&r" (tmp1), [tmp2] "=&r" (tmp2)
+        :
+        : "cc", "memory"
+    );
+
 #else
 
     uint128_t borrow = 0;
@@ -2160,6 +2187,38 @@ void num_ssm_opposite(num_p num_fft, uint64_t chunk_pos, uint64_t n)
         // clobber
         :   "cc",
             "memory"
+    );
+
+#elif !defined(NO_ASSEMBLY) && defined(__APPLE__)
+
+    uint64_t count = n;
+    uint64_t tmp1, tmp2;
+
+    __asm__ volatile (
+        "cbz %[count], 2f\n\t"               // If count == 0, jump to label 2
+
+        "mov %[tmp1], #1\n\t"                // first limb is 1 - dest[0]
+        "cmp xzr, xzr\n\t"                   // SET the carry flag (C=1 means NO borrow)
+
+        "ldr %[tmp2], [%[dest]]\n\t"         // tmp2 = *dest
+        "sbcs %[tmp2], %[tmp1], %[tmp2]\n\t" // tmp2 = 1 - tmp2 - (1 - C), update C
+        "str %[tmp2], [%[dest]], #8\n\t"     // *dest = tmp2, then dest += 8
+
+        "sub %[count], %[count], #1\n\t"     // count-- (leaves flags untouched)
+        "cbz %[count], 2f\n\t"
+
+        "1:\n\t"
+        "ldr %[tmp2], [%[dest]]\n\t"         // tmp2 = *dest
+        "sbcs %[tmp2], xzr, %[tmp2]\n\t"     // tmp2 = 0 - tmp2 - (1 - C), update C
+        "str %[tmp2], [%[dest]], #8\n\t"     // *dest = tmp2, then dest += 8
+
+        "sub %[count], %[count], #1\n\t"     // count-- (leaves flags untouched)
+        "cbnz %[count], 1b\n\t"              // Loop if count != 0
+        "2:\n"
+        : [dest] "+r" (dest), [count] "+r" (count),
+          [tmp1] "=&r" (tmp1), [tmp2] "=&r" (tmp2)
+        :
+        : "cc", "memory"
     );
 
 #else
@@ -2437,7 +2496,7 @@ static bool ssm_is_recursive(uint64_t n)
 ssm_params_t ssm_get_params(uint64_t count)
 {
     uint64_t M = B(stdc_bit_width(count) / 2);
-    uint64_t K = 4 * stdc_bit_ceil((count + M - 1) / M);
+    uint64_t K = 2 * stdc_bit_ceil((count + M - 1) / M);
     M = (count / K) + 1;
 
     uint64_t Q;
@@ -2648,9 +2707,13 @@ static void num_ssm_mul_mod_span(
 
 #else
 
+    // ssm_get_params forces (n - 1) % 8 == 0, so the unrolled body needs no remainder
+    constexpr uint64_t unroll_mask = 7;
+    __builtin_assume((count & unroll_mask) == 0);
+
     uint128_t carry = 0;
     uint64_t v1 = src_1[0];
-    #pragma GCC unroll 32
+    #pragma GCC unroll 8
     for(uint64_t j = 0; j < count; j++)
     {
         carry += MUL(v1, src_2[j]);
@@ -2659,11 +2722,61 @@ static void num_ssm_mul_mod_span(
     }
     dest[count] = LOW(carry);
 
-    for(uint64_t i = 1; i < count; i++)
+    // Two rows of src_1 per pass: one dest load/store per two multiplies instead of
+    // two. The two products plus dest plus carry exceed 128 bits, so the carry is kept
+    // as two words (c0 full width, c1 a single bit) rather than a uint128_t.
+    uint64_t i = 1;
+    for(; i + 2 < count; i += 3)
+    {
+        uint64_t a = src_1[i];
+        uint64_t b = src_1[i + 1];
+        uint64_t c = src_1[i + 2];
+
+        uint64_t c0 = 0;
+        uint64_t c1 = 0;
+        uint64_t prev_1 = 0; // src_2[j - 1], zero at j == 0
+        uint64_t prev_2 = 0; // src_2[j - 2], zero at j <= 1
+
+        #pragma GCC unroll 8
+        for(uint64_t j = 0; j < count; j++)
+        {
+            uint64_t cur = src_2[j];
+            uint128_t p1 = MUL(a, cur);
+            uint128_t p2 = MUL(b, prev_1);
+            uint128_t p3 = MUL(c, prev_2);
+            prev_2 = prev_1;
+            prev_1 = cur;
+
+            uint128_t sum = U128(dest[i + j]) + LOW(p1) + LOW(p2) + LOW(p3) + c0;
+            dest[i + j] = LOW(sum);
+
+            uint128_t acc = U128(HIGH(sum)) + HIGH(p1) + HIGH(p2) + HIGH(p3) + c1;
+            c0 = LOW(acc);
+            c1 = HIGH(acc);
+        }
+
+        // the three words past the row block are written for the first time here, so
+        // they are assigned; prev_1 is src_2[count - 1] and prev_2 is src_2[count - 2]
+        uint128_t p2 = MUL(b, prev_1);
+        uint128_t p3 = MUL(c, prev_2);
+        uint128_t sum = U128(LOW(p2)) + LOW(p3) + c0;
+        dest[i + count] = LOW(sum);
+
+        uint128_t acc = U128(HIGH(sum)) + HIGH(p2) + HIGH(p3) + c1;
+        c0 = LOW(acc);
+        c1 = HIGH(acc);
+
+        uint128_t p4 = MUL(c, prev_1);
+        sum = U128(LOW(p4)) + c0;
+        dest[i + count + 1] = LOW(sum);
+        dest[i + count + 2] = LOW(U128(HIGH(sum)) + HIGH(p4) + c1);
+    }
+
+    for(; i < count; i++)
     {
         v1 = src_1[i];
         carry = 0;
-        #pragma GCC unroll 32
+        #pragma GCC unroll 8
         for(uint64_t j = 0; j < count; j++)
         {
             carry += dest[i + j] + MUL(v1, src_2[j]);
@@ -2711,6 +2824,86 @@ void num_ssm_pad_wrap(num_p num_fft, num_p num, uint64_t pos, ssm_params_p p)
     dest[(p->n * (p->K - 1)) + p->M] = src[p->count - 1];
 }
 
+// num_res[pos .. pos + n - 1] += num_src[src_pos .. src_pos + len - 1] << (64 * off)
+// modulo 2^(64 * (n - 1)) + 1. Requires off + len <= n - 1, so nothing crosses the
+// negacyclic boundary. Same arithmetic as num_ssm_add_mod_immed against a zero-padded
+// n word operand, but only touches the span plus however far the carry actually travels.
+static void num_ssm_add_span_mod(
+    num_p num_res, uint64_t pos,
+    num_p num_src, uint64_t src_pos,
+    uint64_t off,
+    uint64_t len,
+    uint64_t n
+)
+{
+    CLU_HANDLER_IS_SAFE(num_res)
+    CLU_HANDLER_IS_SAFE(num_src)
+    assert(num_res && num_src)
+    assert(off + len <= n - 1)
+
+    uint64_t * restrict dest = &num_res->chunk[pos];
+    const uint64_t * restrict src = &num_src->chunk[src_pos];
+
+    uint128_t carry = 0;
+    #pragma GCC unroll 8
+    for(uint64_t i = 0; i < len; i++)
+    {
+        carry += U128(dest[off + i]) + src[i];
+        dest[off + i] = LOW(carry);
+        carry = HIGH(carry);
+    }
+
+    for(uint64_t i = off + len; carry && i < n; i++)
+    {
+        carry += dest[i];
+        dest[i] = LOW(carry);
+        carry = HIGH(carry);
+    }
+    assert(!carry)
+
+    num_ssm_normalize(num_res, pos, n);
+}
+
+// num_res[pos .. pos + n - 1] -= num_src[src_pos .. src_pos + len - 1] << (64 * off)
+// modulo 2^(64 * (n - 1)) + 1. Counterpart of num_ssm_add_span_mod.
+static void num_ssm_sub_span_mod(
+    num_p num_res, uint64_t pos,
+    num_p num_src, uint64_t src_pos,
+    uint64_t off,
+    uint64_t len,
+    uint64_t n
+)
+{
+    CLU_HANDLER_IS_SAFE(num_res)
+    CLU_HANDLER_IS_SAFE(num_src)
+    assert(num_res && num_src)
+    assert(off + len <= n - 1)
+
+    num_ssm_denormalize(num_res, pos, n);
+
+    uint64_t * restrict dest = &num_res->chunk[pos];
+    const uint64_t * restrict src = &num_src->chunk[src_pos];
+
+    uint128_t borrow = 0;
+    #pragma GCC unroll 8
+    for(uint64_t i = 0; i < len; i++)
+    {
+        uint128_t diff = U128(dest[off + i]) - src[i] - borrow;
+        dest[off + i] = LOW(diff);
+        borrow = HIGH(diff) & 1;
+    }
+
+    for(uint64_t i = off + len; borrow && i < n; i++)
+    {
+        uint128_t diff = U128(dest[i]) - borrow;
+        dest[i] = LOW(diff);
+        borrow = HIGH(diff) & 1;
+    }
+    assert(!borrow)
+
+    num_ssm_normalize(num_res, pos, n);
+}
+
 // num_aux_1->size >= n
 // num_aux_2->size >= 2 * n
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
@@ -2747,6 +2940,22 @@ void num_ssm_depad_wrap(
         if(!is_add)
         {
             num_ssm_opposite(num_fft, src_pos, src_len);
+        }
+
+        // Common case: the whole coefficient sits below the negacyclic boundary, so it
+        // goes straight into the accumulator at its word offset. Only the last few
+        // coefficients (p->n > 2 * p->M, so at least the last one) need the wrap path.
+        if(dest_pos + src_len <= wrap_boundary)
+        {
+            if(is_add)
+            {
+                num_ssm_add_span_mod(num_res, pos, num_fft, src_pos, dest_pos, src_len, n);
+            }
+            else
+            {
+                num_ssm_sub_span_mod(num_res, pos, num_fft, src_pos, dest_pos, src_len, n);
+            }
+            continue;
         }
 
         uint64_t non_wrap_len = (wrap_boundary > dest_pos) ? (wrap_boundary - dest_pos) : 0;

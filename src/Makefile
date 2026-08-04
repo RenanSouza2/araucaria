@@ -27,6 +27,8 @@ debug.o: main.c
 	echo "building $(PRJ_NAME) object src debug"
 	gcc -c -o $@ $< $(FLAGS) $(FLAGS_DBG) $(FLAGS_CMP) $(FLAGS_EXTRA)
 
+-include main.d debug.d
+
 
 
 $(LIB_FILE): FORCE
@@ -43,5 +45,5 @@ FORCE:
 
 clean:
 	echo "cleaning $(PRJ_NAME) $(DIR)"
-	rm -rf *.out *.o
+	rm -rf *.out *.o *.d
 	$(MAKE) clean --directory=$(LIB_DIR)
