@@ -244,6 +244,7 @@ static araucaria_disk_config_t s_araucaria_disk_config = {
 void araucaria_disk_config_set(araucaria_disk_config_p config)
 {
     s_araucaria_disk_config = *config;
+    s_araucaria_disk_config.is_set = true;
 }
 
 bool araucaria_disk_config_is_set()
@@ -353,7 +354,8 @@ void num_display_full(const char tag[], num_p num)
 
 static num_p num_create_disk(CLU_PARAMS(uint64_t size, uint64_t count))
 {
-    tprintf("begin");
+    assert(s_araucaria_disk_config.is_set);
+
     constexpr uint64_t path_max = 1024;
     char template_path[path_max];
     snprintf(template_path, sizeof(template_path), "%s/bignum_XXXXXX", s_araucaria_disk_config.disk_path);
