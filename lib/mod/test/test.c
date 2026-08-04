@@ -148,12 +148,12 @@ static void test_mod_num_mul(bool show)
     TEST_MOD_NUM_MUL(2, 0, 1, (0));
     TEST_MOD_NUM_MUL(3, 1, 0, (0));
     TEST_MOD_NUM_MUL(4, 2, 3, (1, 6));
-    TEST_MOD_NUM_MUL(4, 3, 4, (1, 5));
-    TEST_MOD_NUM_MUL(5, 5, 6, (1, 2));
+    TEST_MOD_NUM_MUL(5, 3, 4, (1, 5));
+    TEST_MOD_NUM_MUL(6, 5, 6, (1, 2));
 
     #undef TEST_MOD_NUM_MUL
 
-    TEST_CASE_OPEN(6)
+    TEST_CASE_OPEN(7)
     {
         num_p p_6 = num_wrap(6);
 

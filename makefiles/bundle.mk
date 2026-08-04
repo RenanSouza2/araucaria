@@ -41,7 +41,7 @@ clean c:
 
 _clean:: $(addsuffix _clean,$(DIRS))
 	echo "cleaning $(PRJ_NAME) $(DIR)"
-	rm -f *.o
+	rm -f *.o *.d
 
 .PHONY: $(addsuffix _clean,$(DIRS))
 $(addsuffix _clean,$(DIRS)):

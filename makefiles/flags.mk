@@ -3,7 +3,7 @@ FLAGS = -std=c23 -Wall -Wextra -Wpedantic -Werror -Wfatal-errors -Wshadow -Wpoin
 FLAGS_PRD = -O3 -march=native -ffunction-sections -fdata-sections -flto=auto -g
 FLAGS_DBG = -D DEBUG -O0 -g3 -ggdb -fno-omit-frame-pointer -fsanitize=address,undefined -fno-optimize-sibling-calls
 
-FLAGS_CMP = -c
+FLAGS_CMP = -c -MMD -MP
 FLAGS_LNK = -r -nostdlib
 FLAGS_EXE =
 

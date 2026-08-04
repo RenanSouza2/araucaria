@@ -12,3 +12,6 @@ clean c:
 
 test t:
 	$(MAKE) test --directory=$(LIB) -s -j
+
+lint l:
+	python3 makefiles/lint_tests.py
