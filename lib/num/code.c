@@ -2085,6 +2085,33 @@ static void num_ssm_sub_mod_immed(
             "memory"
     );
 
+#elif !defined(NO_ASSEMBLY) && defined(__APPLE__)
+
+    uint64_t count = n;
+    uint64_t tmp1, tmp2;
+
+    __asm__ volatile (
+        "cbz %[count], 2f\n\t"               // If count == 0, jump to label 2
+
+        "cmp xzr, xzr\n\t"                   // SET the carry flag (C=1 means NO borrow)
+
+        "1:\n\t"
+        "ldr %[tmp1], [%[dest]]\n\t"          // tmp1 = *dest (NO post-increment yet)
+        "ldr %[tmp2], [%[src_2]], #8\n\t"     // tmp2 = *src_2, then src_2 += 8
+
+        "sbcs %[tmp1], %[tmp1], %[tmp2]\n\t" // tmp1 = tmp1 - tmp2 - (1 - C), update C
+
+        "str %[tmp1], [%[dest]], #8\n\t"     // *dest = tmp1, then dest += 8
+
+        "sub %[count], %[count], #1\n\t"     // count-- (leaves flags untouched)
+        "cbnz %[count], 1b\n\t"              // Loop if count != 0
+        "2:\n"
+        : [dest] "+r" (dest), [src_2] "+r" (src_2),
+          [count] "+r" (count), [tmp1] "=&r" (tmp1), [tmp2] "=&r" (tmp2)
+        :
+        : "cc", "memory"
+    );
+
 #else
 
     uint128_t borrow = 0;
@@ -2437,7 +2464,7 @@ static bool ssm_is_recursive(uint64_t n)
 ssm_params_t ssm_get_params(uint64_t count)
 {
     uint64_t M = B(stdc_bit_width(count) / 2);
-    uint64_t K = 4 * stdc_bit_ceil((count + M - 1) / M);
+    uint64_t K = 2 * stdc_bit_ceil((count + M - 1) / M);
     M = (count / K) + 1;
 
     uint64_t Q;
@@ -2648,9 +2675,13 @@ static void num_ssm_mul_mod_span(
 
 #else
 
+    // ssm_get_params forces (n - 1) % 8 == 0, so the unrolled body needs no remainder
+    constexpr uint64_t unroll_mask = 7;
+    __builtin_assume((count & unroll_mask) == 0);
+
     uint128_t carry = 0;
     uint64_t v1 = src_1[0];
-    #pragma GCC unroll 32
+    #pragma GCC unroll 8
     for(uint64_t j = 0; j < count; j++)
     {
         carry += MUL(v1, src_2[j]);
@@ -2663,7 +2694,7 @@ static void num_ssm_mul_mod_span(
     {
         v1 = src_1[i];
         carry = 0;
-        #pragma GCC unroll 32
+        #pragma GCC unroll 8
         for(uint64_t j = 0; j < count; j++)
         {
             carry += dest[i + j] + MUL(v1, src_2[j]);
