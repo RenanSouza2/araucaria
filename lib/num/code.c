@@ -236,13 +236,20 @@ static uint64_t uint_read(FILE *fp, uint64_t size, uint64_t base)
 
 
 
-static num_config_t s_num_config = {
-    .disk_threshold = UINT64_MAX
+static araucaria_disk_config_t s_araucaria_disk_config = {
+    .disk_threshold = UINT64_MAX,
+    .is_set = false
 };
 
-void num_config_set(num_config_p config)
+void araucaria_disk_config_set(araucaria_disk_config_p config)
 {
-    s_num_config = *config;
+    s_araucaria_disk_config = *config;
+    s_araucaria_disk_config.is_set = true;
+}
+
+bool araucaria_disk_config_is_set()
+{
+    return s_araucaria_disk_config.is_set;
 }
 
 
@@ -347,9 +354,11 @@ void num_display_full(const char tag[], num_p num)
 
 static num_p num_create_disk(CLU_PARAMS(uint64_t size, uint64_t count))
 {
+    assert(s_araucaria_disk_config.is_set);
+
     constexpr uint64_t path_max = 1024;
     char template_path[path_max];
-    snprintf(template_path, sizeof(template_path), "%s/bignum_XXXXXX", s_num_config.disk_path);
+    snprintf(template_path, sizeof(template_path), "%s/bignum_XXXXXX", s_araucaria_disk_config.disk_path);
     int fd = mkstemp(template_path);
     assert(fd != -1);
     unlink(template_path);
@@ -378,7 +387,7 @@ num_p num_create(CLU_PARAMS(uint64_t size, uint64_t count))
     size = size ? size : 1;
     uint64_t total_size = sizeof(num_t) + (size * sizeof(uint64_t));
 
-    if(size > s_num_config.disk_threshold)
+    if(size > s_araucaria_disk_config.disk_threshold)
     {
         return num_create_disk(CLU_ARGS_RELAY(size, count));
     }
@@ -401,7 +410,7 @@ num_p num_create_dirty(CLU_PARAMS(uint64_t size, uint64_t count))
     size = size ? size : 1;
     uint64_t total_size = sizeof(num_t) + (size * sizeof(uint64_t));
 
-    if(size > s_num_config.disk_threshold)
+    if(size > s_araucaria_disk_config.disk_threshold)
     {
         return num_create_disk(CLU_ARGS_RELAY(size, count));
     }

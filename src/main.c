@@ -704,7 +704,7 @@ static void time_assembly_mul()
 #ifdef DEBUG
     uint64_t base = 22;
 #else
-    uint64_t base = 29;
+    uint64_t base = 30;
 #endif
 
     tprintf("base: " U64P() "", base);
