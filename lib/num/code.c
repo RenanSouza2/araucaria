@@ -1021,7 +1021,26 @@ static void num_mul_uint_buffer(num_p num_res, num_p num, uint64_t value) // TOD
     num_normalize(num_res);
 }
 
-#if !defined(NO_ASSEMBLY) && defined(__linux__)
+// The kernels below are picked by what the toolchain can actually build, not by
+// operating system. Keying them off __linux__ / __APPLE__ handed the x86-64 blocks to a
+// Linux aarch64 build and the AArch64 blocks to a macOS x86-64 build, and neither of
+// those assembles at all; both are ordinary hosts today. What each block really needs:
+//
+//   x86-64  BMI2 (mulx) and ADX (adcx / adox), which -march=native only defines on
+//           Broadwell and later, plus gcc: the templates are .intel_syntax noprefix but
+//           operands expand to gcc's AT&T register spelling, which GNU as tolerates and
+//           clang's integrated assembler rejects outright.
+//   AArch64 nothing past the base ISA, and either compiler.
+//
+// So every host now lands on a path it can build, and each block is shared by both
+// operating systems instead of one each.
+#if !defined(NO_ASSEMBLY) && defined(__x86_64__) && defined(__BMI2__) && defined(__ADX__) && defined(__GNUC__) && !defined(__clang__)
+    #define NUM_ASM_X86_64
+#elif !defined(NO_ASSEMBLY) && defined(__aarch64__)
+    #define NUM_ASM_AARCH64
+#endif
+
+#ifdef NUM_ASM_X86_64
 
 #define ADD_CLASSIC_STEP(OFF, REG)                                                                    \
     "mov %[" #REG "], [%[src_2] + %[pos] + " #OFF "]    \n\t" /* REG  = *(src_2 + pos + OFF)        */\
@@ -1067,7 +1086,7 @@ num_p num_mul_classic(num_p num_1, num_p num_2)
     const uint64_t * restrict src_1 = num_1->chunk;
     const uint64_t * restrict src_2 = num_2->chunk;
 
-#if !defined(NO_ASSEMBLY) && defined(__linux__)
+#ifdef NUM_ASM_X86_64
 
     uint64_t high, low;
     uint64_t carry, pos;
@@ -1394,7 +1413,7 @@ static void num_sqr_classic_buffer(num_p num_res, num_p num)
         return;
     }
 
-#if !defined(NO_ASSEMBLY) && defined(__linux__)
+#ifdef NUM_ASM_X86_64
 
     uint64_t high, low, carry, pos, j;
     uint64_t zero = 0;
@@ -1834,6 +1853,50 @@ static void num_ssm_denormalize(num_p num_fft, uint64_t pos, uint64_t n)
     num_fft->chunk[pos + n - 1] += 1;
 }
 
+#ifdef NUM_ASM_AARCH64
+
+// One limb per iteration costs a load, a load, an adcs, a store and the loop overhead,
+// so the carry chain sits idle behind five other instructions. These mirror the x86-64
+// blocks below: eight limbs per pass, paired loads and stores, so the same work takes
+// roughly a third of the instructions. ldp / stp / add / sub leave the carry flag alone,
+// which is what lets the adcs chain span the whole unrolled body.
+
+#define ADD_MOD_STEP_4(OFF_0, OFF_1)                                                                      \
+    "ldp %[a_0], %[a_1], [%[dest], #" #OFF_0 "]     \n\t" /* (a_0, a_1)  = *(dest + OFF_0)             */  \
+    "ldp %[a_2], %[a_3], [%[dest], #" #OFF_1 "]     \n\t" /* (a_2, a_3)  = *(dest + OFF_1)             */  \
+    "ldp %[b_0], %[b_1], [%[src_2], #" #OFF_0 "]    \n\t" /* (b_0, b_1)  = *(src_2 + OFF_0)            */  \
+    "ldp %[b_2], %[b_3], [%[src_2], #" #OFF_1 "]    \n\t" /* (b_2, b_3)  = *(src_2 + OFF_1)            */  \
+    "adcs %[a_0], %[a_0], %[b_0]                    \n\t" /* a_0 += b_0 + CF                           */  \
+    "adcs %[a_1], %[a_1], %[b_1]                    \n\t" /* a_1 += b_1 + CF                           */  \
+    "adcs %[a_2], %[a_2], %[b_2]                    \n\t" /* a_2 += b_2 + CF                           */  \
+    "adcs %[a_3], %[a_3], %[b_3]                    \n\t" /* a_3 += b_3 + CF                           */  \
+    "stp %[a_0], %[a_1], [%[dest], #" #OFF_0 "]     \n\t" /* *(dest + OFF_0) = (a_0, a_1)              */  \
+    "stp %[a_2], %[a_3], [%[dest], #" #OFF_1 "]     \n\t" /* *(dest + OFF_1) = (a_2, a_3)              */
+
+#define SUB_MOD_STEP_4(SRC_1, OFF_0, OFF_1)                                                                    \
+    "ldp %[a_0], %[a_1], [%[" #SRC_1 "], #" #OFF_0 "]   \n\t" /* (a_0, a_1)  = *(SRC_1 + OFF_0)            */  \
+    "ldp %[a_2], %[a_3], [%[" #SRC_1 "], #" #OFF_1 "]   \n\t" /* (a_2, a_3)  = *(SRC_1 + OFF_1)            */  \
+    "ldp %[b_0], %[b_1], [%[src_2], #" #OFF_0 "]        \n\t" /* (b_0, b_1)  = *(src_2 + OFF_0)            */  \
+    "ldp %[b_2], %[b_3], [%[src_2], #" #OFF_1 "]        \n\t" /* (b_2, b_3)  = *(src_2 + OFF_1)            */  \
+    "sbcs %[a_0], %[a_0], %[b_0]                        \n\t" /* a_0 -= b_0 + (1 - CF)                     */  \
+    "sbcs %[a_1], %[a_1], %[b_1]                        \n\t" /* a_1 -= b_1 + (1 - CF)                     */  \
+    "sbcs %[a_2], %[a_2], %[b_2]                        \n\t" /* a_2 -= b_2 + (1 - CF)                     */  \
+    "sbcs %[a_3], %[a_3], %[b_3]                        \n\t" /* a_3 -= b_3 + (1 - CF)                     */  \
+    "stp %[a_0], %[a_1], [%[dest], #" #OFF_0 "]         \n\t" /* *(dest + OFF_0) = (a_0, a_1)              */  \
+    "stp %[a_2], %[a_3], [%[dest], #" #OFF_1 "]         \n\t" /* *(dest + OFF_1) = (a_2, a_3)              */
+
+#define OPPOSITE_STEP_4(OFF_0, OFF_1)                                                                     \
+    "ldp %[a_0], %[a_1], [%[dest], #" #OFF_0 "]     \n\t" /* (a_0, a_1)  = *(dest + OFF_0)             */  \
+    "ldp %[a_2], %[a_3], [%[dest], #" #OFF_1 "]     \n\t" /* (a_2, a_3)  = *(dest + OFF_1)             */  \
+    "sbcs %[a_0], xzr, %[a_0]                       \n\t" /* a_0 = 0 - a_0 - (1 - CF)                  */  \
+    "sbcs %[a_1], xzr, %[a_1]                       \n\t" /* a_1 = 0 - a_1 - (1 - CF)                  */  \
+    "sbcs %[a_2], xzr, %[a_2]                       \n\t" /* a_2 = 0 - a_2 - (1 - CF)                  */  \
+    "sbcs %[a_3], xzr, %[a_3]                       \n\t" /* a_3 = 0 - a_3 - (1 - CF)                  */  \
+    "stp %[a_0], %[a_1], [%[dest], #" #OFF_0 "]     \n\t" /* *(dest + OFF_0) = (a_0, a_1)              */  \
+    "stp %[a_2], %[a_3], [%[dest], #" #OFF_1 "]     \n\t" /* *(dest + OFF_1) = (a_2, a_3)              */
+
+#endif
+
 void num_ssm_add_mod_immed(
     num_p num_fft_1, uint64_t pos_1,
     num_p num_fft_2, uint64_t pos_2,
@@ -1847,7 +1910,7 @@ void num_ssm_add_mod_immed(
     uint64_t * restrict dest = &num_fft_1->chunk[pos_1];
     const uint64_t * restrict src_2 = &num_fft_2->chunk[pos_2];
 
-#if !defined(NO_ASSEMBLY) && defined(__linux__)
+#ifdef NUM_ASM_X86_64
 
     uint64_t reg_1, reg_2;
     uint64_t j = n;
@@ -1858,6 +1921,15 @@ void num_ssm_add_mod_immed(
 
         "shr %[j], 3                                    \n\t" // j /= 8
         "xor %[pos], %[pos]                             \n\t" // pos = 0 (and inherently clears CF)
+        "test %[j], %[j]                                \n\t" // (test also leaves CF clear)
+        "jz loop_add_tail%=                             \n\t"
+
+        // The AArch64 blocks guard their loops with cbz; the unrolled bodies here are
+        // do-while, so without the test above an n under 8 wrapped j to UINT64_MAX and
+        // ran 2^64 passes over the array. Every ssm caller passes n = 8k + 1 with k >= 1,
+        // so the branch is never taken in practice, but it costs one fused compare and
+        // makes the kernels total on their own. Jumping to the trailing step is also the
+        // right answer for n == 1: that single step is then the whole operation.
 
         "loop_add_begin%=:                              \n\t" // LOOP_ADD_BEGIN
 
@@ -1873,6 +1945,8 @@ void num_ssm_add_mod_immed(
         "lea %[pos], [%[pos] + 64]                      \n\t" // pos += 64 (lea does not modify CF)
         "dec %[j]                                       \n\t" // j-- (dec does not modify CF)
         "jnz loop_add_begin%=                           \n\t"
+
+        "loop_add_tail%=:                               \n\t"
 
         ADD_CLASSIC_STEP(0, reg_1)
 
@@ -1890,29 +1964,61 @@ void num_ssm_add_mod_immed(
             "memory"
     );
 
-#elif !defined(NO_ASSEMBLY) && defined(__APPLE__)
+#elif defined(NUM_ASM_AARCH64)
 
-    uint64_t count = n;
-    uint64_t tmp1, tmp2; // Need two temporaries now
+    uint64_t a_0, a_1, a_2, a_3;
+    uint64_t b_0, b_1, b_2, b_3;
+    constexpr uint64_t unroll_log_2 = 3;
+    constexpr uint64_t unroll_mask = 7;
 
-    __asm__ volatile (
-        "cbz %[count], 2f\n\t"               // If count == 0, jump to label 2
-        "adds xzr, xzr, xzr\n\t"             // Clear carry flag (C=0)
-        "1:\n\t"
-        "ldr %[tmp1], [%[src_2]], #8\n\t"     // tmp1 = *src_2, then src_2 += 8
-        "ldr %[tmp2], [%[dest]]\n\t"         // tmp2 = *dest (NO post-increment yet)
+    uint64_t j = n >> unroll_log_2;
+    uint64_t tail = n & unroll_mask;
 
-        "adcs %[tmp2], %[tmp2], %[tmp1]\n\t" // tmp2 = tmp2 + tmp1 + CF, update CF
+    __asm__ __volatile__ (
+        "adds xzr, xzr, xzr                             \n\t" // CF = 0
+        "cbz %[j], 2f                                   \n\t"
 
-        "str %[tmp2], [%[dest]], #8\n\t"     // *dest = tmp2, then dest += 8
+        "1:                                             \n\t" // LOOP_ADD_BEGIN
 
-        "sub %[count], %[count], #1\n\t"     // count-- (leaves CF untouched)
-        "cbnz %[count], 1b\n\t"              // Loop if count != 0
-        "2:\n"
-        : [dest] "+r" (dest), [src_2] "+r" (src_2), [count] "+r" (count),
-          [tmp1] "=&r" (tmp1), [tmp2] "=&r" (tmp2)
+        ADD_MOD_STEP_4( 0, 16)
+        ADD_MOD_STEP_4(32, 48)
+
+        "add %[dest], %[dest], #64                      \n\t" // dest += 64 (add does not modify CF)
+        "add %[src_2], %[src_2], #64                    \n\t" // src_2 += 64
+        "sub %[j], %[j], #1                             \n\t" // j-- (sub does not modify CF)
+        "cbnz %[j], 1b                                  \n\t"
+
+        "2:                                             \n\t"
+        "cbz %[tail], 4f                                \n\t"
+
+        "3:                                             \n\t" // LOOP_ADD_TAIL_BEGIN
+
+        "ldr %[a_0], [%[dest]]                          \n\t" // a_0 = *dest
+        "ldr %[b_0], [%[src_2]], #8                     \n\t" // b_0 = *src_2, then src_2 += 8
+        "adcs %[a_0], %[a_0], %[b_0]                    \n\t" // a_0 += b_0 + CF
+        "str %[a_0], [%[dest]], #8                      \n\t" // *dest = a_0, then dest += 8
+        "sub %[tail], %[tail], #1                       \n\t" // tail--
+        "cbnz %[tail], 3b                               \n\t"
+
+        "4:                                             \n\t"
+        // out
+        :   [dest] "+r" (dest),
+            [src_2] "+r" (src_2),
+            [j] "+&r" (j),
+            [tail] "+&r" (tail),
+            [a_0] "=&r" (a_0),
+            [a_1] "=&r" (a_1),
+            [a_2] "=&r" (a_2),
+            [a_3] "=&r" (a_3),
+            [b_0] "=&r" (b_0),
+            [b_1] "=&r" (b_1),
+            [b_2] "=&r" (b_2),
+            [b_3] "=&r" (b_3)
+        // in
         :
-        : "cc", "memory"
+        // clobber
+        :   "cc",
+            "memory"
     );
 
 #else
@@ -1949,7 +2055,7 @@ void num_ssm_sub_mod(
     const uint64_t * restrict src_1 = &num_fft_1->chunk[pos_1];
     const uint64_t * restrict src_2 = &num_fft_2->chunk[pos_2];
 
-#if !defined(NO_ASSEMBLY) && defined(__linux__)
+#ifdef NUM_ASM_X86_64
 
     uint64_t reg_1, reg_2;
     uint64_t j = n;
@@ -1960,6 +2066,8 @@ void num_ssm_sub_mod(
 
         "shr %[j], 3                                    \n\t" // j /= 8
         "xor %[pos], %[pos]                             \n\t" // pos = 0 (and inherently clears CF)
+        "test %[j], %[j]                                \n\t" // guard the do-while, see num_ssm_add_mod_immed
+        "jz loop_sub_tail%=                             \n\t"
 
         "loop_sub_begin%=:                              \n\t" // LOOP_SUB_BEGIN
 
@@ -1975,6 +2083,8 @@ void num_ssm_sub_mod(
         "lea %[pos], [%[pos] + 64]                      \n\t" // pos += 64 (lea does not modify CF)
         "dec %[j]                                       \n\t" // j-- (dec does not modify CF)
         "jnz loop_sub_begin%=                           \n\t"
+
+        "loop_sub_tail%=:                               \n\t"
 
         SUB_CLASSIC_STEP(0, src_1, reg_1)
 
@@ -1993,31 +2103,63 @@ void num_ssm_sub_mod(
             "memory"
     );
 
-#elif !defined(NO_ASSEMBLY) && defined(__APPLE__)
+#elif defined(NUM_ASM_AARCH64)
 
-    uint64_t count = n;
-    uint64_t tmp1, tmp2;
+    uint64_t a_0, a_1, a_2, a_3;
+    uint64_t b_0, b_1, b_2, b_3;
+    constexpr uint64_t unroll_log_2 = 3;
+    constexpr uint64_t unroll_mask = 7;
 
-    __asm__ volatile (
-        "cbz %[count], 2f\n\t"               // If count == 0, jump to label 2
+    uint64_t j = n >> unroll_log_2;
+    uint64_t tail = n & unroll_mask;
 
-        "cmp xzr, xzr\n\t"                   // SET the carry flag (C=1 means NO borrow)
+    __asm__ __volatile__ (
+        "cmp xzr, xzr                                   \n\t" // CF = 1 (means NO borrow)
+        "cbz %[j], 2f                                   \n\t"
 
-        "1:\n\t"
-        "ldr %[tmp1], [%[src_1]], #8\n\t"     // tmp1 = *src_1, then src_1 += 8
-        "ldr %[tmp2], [%[src_2]], #8\n\t"     // tmp2 = *src_2, then src_2 += 8
+        "1:                                             \n\t" // LOOP_SUB_BEGIN
 
-        "sbcs %[tmp1], %[tmp1], %[tmp2]\n\t" // tmp1 = tmp1 - tmp2 - (1 - C), update C
+        SUB_MOD_STEP_4(src_1,  0, 16)
+        SUB_MOD_STEP_4(src_1, 32, 48)
 
-        "str %[tmp1], [%[dest]], #8\n\t"     // *dest = tmp1, then dest += 8
+        "add %[dest], %[dest], #64                      \n\t" // dest += 64 (add does not modify CF)
+        "add %[src_1], %[src_1], #64                    \n\t" // src_1 += 64
+        "add %[src_2], %[src_2], #64                    \n\t" // src_2 += 64
+        "sub %[j], %[j], #1                             \n\t" // j-- (sub does not modify CF)
+        "cbnz %[j], 1b                                  \n\t"
 
-        "sub %[count], %[count], #1\n\t"     // count-- (leaves flags untouched)
-        "cbnz %[count], 1b\n\t"              // Loop if count != 0
-        "2:\n"
-        : [dest] "+r" (dest), [src_1] "+r" (src_1), [src_2] "+r" (src_2),
-          [count] "+r" (count), [tmp1] "=&r" (tmp1), [tmp2] "=&r" (tmp2)
+        "2:                                             \n\t"
+        "cbz %[tail], 4f                                \n\t"
+
+        "3:                                             \n\t" // LOOP_SUB_TAIL_BEGIN
+
+        "ldr %[a_0], [%[src_1]], #8                     \n\t" // a_0 = *src_1, then src_1 += 8
+        "ldr %[b_0], [%[src_2]], #8                     \n\t" // b_0 = *src_2, then src_2 += 8
+        "sbcs %[a_0], %[a_0], %[b_0]                    \n\t" // a_0 -= b_0 + (1 - CF)
+        "str %[a_0], [%[dest]], #8                      \n\t" // *dest = a_0, then dest += 8
+        "sub %[tail], %[tail], #1                       \n\t" // tail--
+        "cbnz %[tail], 3b                               \n\t"
+
+        "4:                                             \n\t"
+        // out
+        :   [dest] "+r" (dest),
+            [src_1] "+r" (src_1),
+            [src_2] "+r" (src_2),
+            [j] "+&r" (j),
+            [tail] "+&r" (tail),
+            [a_0] "=&r" (a_0),
+            [a_1] "=&r" (a_1),
+            [a_2] "=&r" (a_2),
+            [a_3] "=&r" (a_3),
+            [b_0] "=&r" (b_0),
+            [b_1] "=&r" (b_1),
+            [b_2] "=&r" (b_2),
+            [b_3] "=&r" (b_3)
+        // in
         :
-        : "cc", "memory"
+        // clobber
+        :   "cc",
+            "memory"
     );
 
 #else
@@ -2051,7 +2193,7 @@ static void num_ssm_sub_mod_immed(
     uint64_t * restrict dest = &num_fft_1->chunk[pos_1];
     const uint64_t * restrict src_2 = &num_fft_2->chunk[pos_2];
 
-#if !defined(NO_ASSEMBLY) && defined(__linux__)
+#ifdef NUM_ASM_X86_64
 
     uint64_t reg_1, reg_2;
     uint64_t j = n;
@@ -2062,6 +2204,8 @@ static void num_ssm_sub_mod_immed(
 
         "shr %[j], 3                                    \n\t" // j /= 8
         "xor %[pos], %[pos]                             \n\t" // pos = 0 (and inherently clears CF)
+        "test %[j], %[j]                                \n\t" // guard the do-while, see num_ssm_add_mod_immed
+        "jz loop_sub_tail%=                             \n\t"
 
         "loop_sub_begin%=:                              \n\t" // LOOP_SUB_BEGIN
 
@@ -2077,6 +2221,8 @@ static void num_ssm_sub_mod_immed(
         "lea %[pos], [%[pos] + 64]                      \n\t" // pos += 64 (lea does not modify CF)
         "dec %[j]                                       \n\t" // j-- (dec does not modify CF)
         "jnz loop_sub_begin%=                           \n\t"
+
+        "loop_sub_tail%=:                               \n\t"
 
         SUB_CLASSIC_STEP(0, dest, reg_1)
 
@@ -2094,31 +2240,61 @@ static void num_ssm_sub_mod_immed(
             "memory"
     );
 
-#elif !defined(NO_ASSEMBLY) && defined(__APPLE__)
+#elif defined(NUM_ASM_AARCH64)
 
-    uint64_t count = n;
-    uint64_t tmp1, tmp2;
+    uint64_t a_0, a_1, a_2, a_3;
+    uint64_t b_0, b_1, b_2, b_3;
+    constexpr uint64_t unroll_log_2 = 3;
+    constexpr uint64_t unroll_mask = 7;
 
-    __asm__ volatile (
-        "cbz %[count], 2f\n\t"               // If count == 0, jump to label 2
+    uint64_t j = n >> unroll_log_2;
+    uint64_t tail = n & unroll_mask;
 
-        "cmp xzr, xzr\n\t"                   // SET the carry flag (C=1 means NO borrow)
+    __asm__ __volatile__ (
+        "cmp xzr, xzr                                   \n\t" // CF = 1 (means NO borrow)
+        "cbz %[j], 2f                                   \n\t"
 
-        "1:\n\t"
-        "ldr %[tmp1], [%[dest]]\n\t"          // tmp1 = *dest (NO post-increment yet)
-        "ldr %[tmp2], [%[src_2]], #8\n\t"     // tmp2 = *src_2, then src_2 += 8
+        "1:                                             \n\t" // LOOP_SUB_BEGIN
 
-        "sbcs %[tmp1], %[tmp1], %[tmp2]\n\t" // tmp1 = tmp1 - tmp2 - (1 - C), update C
+        SUB_MOD_STEP_4(dest,  0, 16)
+        SUB_MOD_STEP_4(dest, 32, 48)
 
-        "str %[tmp1], [%[dest]], #8\n\t"     // *dest = tmp1, then dest += 8
+        "add %[dest], %[dest], #64                      \n\t" // dest += 64 (add does not modify CF)
+        "add %[src_2], %[src_2], #64                    \n\t" // src_2 += 64
+        "sub %[j], %[j], #1                             \n\t" // j-- (sub does not modify CF)
+        "cbnz %[j], 1b                                  \n\t"
 
-        "sub %[count], %[count], #1\n\t"     // count-- (leaves flags untouched)
-        "cbnz %[count], 1b\n\t"              // Loop if count != 0
-        "2:\n"
-        : [dest] "+r" (dest), [src_2] "+r" (src_2),
-          [count] "+r" (count), [tmp1] "=&r" (tmp1), [tmp2] "=&r" (tmp2)
+        "2:                                             \n\t"
+        "cbz %[tail], 4f                                \n\t"
+
+        "3:                                             \n\t" // LOOP_SUB_TAIL_BEGIN
+
+        "ldr %[a_0], [%[dest]]                          \n\t" // a_0 = *dest
+        "ldr %[b_0], [%[src_2]], #8                     \n\t" // b_0 = *src_2, then src_2 += 8
+        "sbcs %[a_0], %[a_0], %[b_0]                    \n\t" // a_0 -= b_0 + (1 - CF)
+        "str %[a_0], [%[dest]], #8                      \n\t" // *dest = a_0, then dest += 8
+        "sub %[tail], %[tail], #1                       \n\t" // tail--
+        "cbnz %[tail], 3b                               \n\t"
+
+        "4:                                             \n\t"
+        // out
+        :   [dest] "+r" (dest),
+            [src_2] "+r" (src_2),
+            [j] "+&r" (j),
+            [tail] "+&r" (tail),
+            [a_0] "=&r" (a_0),
+            [a_1] "=&r" (a_1),
+            [a_2] "=&r" (a_2),
+            [a_3] "=&r" (a_3),
+            [b_0] "=&r" (b_0),
+            [b_1] "=&r" (b_1),
+            [b_2] "=&r" (b_2),
+            [b_3] "=&r" (b_3)
+        // in
         :
-        : "cc", "memory"
+        // clobber
+        :   "cc",
+            "memory"
     );
 
 #else
@@ -2137,7 +2313,7 @@ static void num_ssm_sub_mod_immed(
     num_ssm_normalize(num_fft_1, pos_1, n);
 }
 
-#if !defined(NO_ASSEMBLY) && defined(__linux__)
+#ifdef NUM_ASM_X86_64
 
 #define OPPOSITE_STEP(OFF, REG)                                                                     \
     "sbb %[" #REG "], [%[dest] + %[pos] + " #OFF "]     \n\t" /* REG -= *(dest + pos + OFF) + CF */ \
@@ -2153,7 +2329,7 @@ void num_ssm_opposite(num_p num_fft, uint64_t chunk_pos, uint64_t n)
 
     uint64_t * restrict dest = &num_fft->chunk[chunk_pos];
 
-#if !defined(NO_ASSEMBLY) && defined(__linux__)
+#ifdef NUM_ASM_X86_64
 
     uint64_t reg_1, reg_2;
     uint64_t j = n;
@@ -2167,6 +2343,8 @@ void num_ssm_opposite(num_p num_fft, uint64_t chunk_pos, uint64_t n)
 
         "shr %[j], 3                                    \n\t" // j /= 8
         "xor %[pos], %[pos]                             \n\t" // pos = 0 (and inherently clears CF)
+        "test %[j], %[j]                                \n\t" // guard the do-while, see num_ssm_add_mod_immed
+        "jz loop_opp_tail%=                             \n\t"
 
         "loop_opp_begin%=:                              \n\t" // LOOP_OPP_BEGIN
 
@@ -2183,6 +2361,8 @@ void num_ssm_opposite(num_p num_fft, uint64_t chunk_pos, uint64_t n)
         "dec %[j]                                       \n\t" // j-- (dec does not modify CF)
         "jnz loop_opp_begin%=                           \n\t"
 
+        "loop_opp_tail%=:                               \n\t"
+
         OPPOSITE_STEP(0, reg_1)
 
         ".att_syntax prefix                             \n\t"
@@ -2198,36 +2378,63 @@ void num_ssm_opposite(num_p num_fft, uint64_t chunk_pos, uint64_t n)
             "memory"
     );
 
-#elif !defined(NO_ASSEMBLY) && defined(__APPLE__)
+#elif defined(NUM_ASM_AARCH64)
 
     uint64_t count = n;
-    uint64_t tmp1, tmp2;
+    uint64_t a_0, a_1, a_2, a_3;
+    uint64_t j, tail;
 
-    __asm__ volatile (
-        "cbz %[count], 2f\n\t"               // If count == 0, jump to label 2
+    __asm__ __volatile__ (
+        "cbz %[count], 4f                               \n\t"
 
-        "mov %[tmp1], #1\n\t"                // first limb is 1 - dest[0]
-        "cmp xzr, xzr\n\t"                   // SET the carry flag (C=1 means NO borrow)
+        "mov %[a_0], #1                                 \n\t" // first limb is 1 - dest[0]
+        "cmp xzr, xzr                                   \n\t" // CF = 1 (means NO borrow)
+        "ldr %[a_1], [%[dest]]                          \n\t" // a_1 = *dest
+        "sbcs %[a_0], %[a_0], %[a_1]                    \n\t" // a_0 = 1 - a_1 - (1 - CF)
+        "str %[a_0], [%[dest]], #8                      \n\t" // *dest = a_0, then dest += 8
 
-        "ldr %[tmp2], [%[dest]]\n\t"         // tmp2 = *dest
-        "sbcs %[tmp2], %[tmp1], %[tmp2]\n\t" // tmp2 = 1 - tmp2 - (1 - C), update C
-        "str %[tmp2], [%[dest]], #8\n\t"     // *dest = tmp2, then dest += 8
+        // the remaining limbs are 0 - dest[i]; n is 8k + 1 in every ssm caller, so this
+        // split leaves the unrolled body an exact fit and the tail loop unused
+        "sub %[count], %[count], #1                     \n\t" // count-- (sub does not modify CF)
+        "lsr %[j], %[count], #3                         \n\t" // j = count / 8 (lsr does not modify CF)
+        "and %[tail], %[count], #7                      \n\t" // tail = count % 8 (and does not modify CF)
+        "cbz %[j], 2f                                   \n\t"
 
-        "sub %[count], %[count], #1\n\t"     // count-- (leaves flags untouched)
-        "cbz %[count], 2f\n\t"
+        "1:                                             \n\t" // LOOP_OPP_BEGIN
 
-        "1:\n\t"
-        "ldr %[tmp2], [%[dest]]\n\t"         // tmp2 = *dest
-        "sbcs %[tmp2], xzr, %[tmp2]\n\t"     // tmp2 = 0 - tmp2 - (1 - C), update C
-        "str %[tmp2], [%[dest]], #8\n\t"     // *dest = tmp2, then dest += 8
+        OPPOSITE_STEP_4( 0, 16)
+        OPPOSITE_STEP_4(32, 48)
 
-        "sub %[count], %[count], #1\n\t"     // count-- (leaves flags untouched)
-        "cbnz %[count], 1b\n\t"              // Loop if count != 0
-        "2:\n"
-        : [dest] "+r" (dest), [count] "+r" (count),
-          [tmp1] "=&r" (tmp1), [tmp2] "=&r" (tmp2)
+        "add %[dest], %[dest], #64                      \n\t" // dest += 64 (add does not modify CF)
+        "sub %[j], %[j], #1                             \n\t" // j--
+        "cbnz %[j], 1b                                  \n\t"
+
+        "2:                                             \n\t"
+        "cbz %[tail], 4f                                \n\t"
+
+        "3:                                             \n\t" // LOOP_OPP_TAIL_BEGIN
+
+        "ldr %[a_0], [%[dest]]                          \n\t" // a_0 = *dest
+        "sbcs %[a_0], xzr, %[a_0]                       \n\t" // a_0 = 0 - a_0 - (1 - CF)
+        "str %[a_0], [%[dest]], #8                      \n\t" // *dest = a_0, then dest += 8
+        "sub %[tail], %[tail], #1                       \n\t" // tail--
+        "cbnz %[tail], 3b                               \n\t"
+
+        "4:                                             \n\t"
+        // out
+        :   [dest] "+r" (dest),
+            [count] "+&r" (count),
+            [j] "=&r" (j),
+            [tail] "=&r" (tail),
+            [a_0] "=&r" (a_0),
+            [a_1] "=&r" (a_1),
+            [a_2] "=&r" (a_2),
+            [a_3] "=&r" (a_3)
+        // in
         :
-        : "cc", "memory"
+        // clobber
+        :   "cc",
+            "memory"
     );
 
 #else
@@ -2605,7 +2812,17 @@ static void num_ssm_mul_mod_span(
     uint64_t * restrict src_1 = &num_1->chunk[pos];
     const uint64_t * restrict src_2 = &num_2->chunk[pos];
 
+    // Both bodies below are 8-wide do-while loops over count words with no remainder
+    // pass and no zero guard, so they are only correct for a count that is a non-zero
+    // multiple of 8. Every ssm_get_params / ssm_get_params_wrap result satisfies that,
+    // and num_mul_classic pays for the general case with a tail path and two skip
+    // branches; state the narrower contract here instead of silently relying on it.
+    constexpr uint64_t unroll_mask = 7;
+    constexpr uint64_t unroll = 8;
+
     uint64_t count = n - 1;
+    assert(count >= unroll && (count & unroll_mask) == 0)
+
     if(src_1[count] == 1)
     {
         memcpy(src_1, src_2, n * sizeof(uint64_t));
@@ -2619,7 +2836,7 @@ static void num_ssm_mul_mod_span(
         return;
     }
 
-#if !defined(NO_ASSEMBLY) && defined(__linux__)
+#ifdef NUM_ASM_X86_64
 
     uint64_t high, low;
     uint64_t carry, _pos;
@@ -2635,7 +2852,6 @@ static void num_ssm_mul_mod_span(
         "mov rdx, [%[src_1]]                            \n\t" // D = *src_1
         "mov %[carry], 0                                \n\t" // carry = 0
         "xor %[_pos], %[_pos]                           \n\t" // _pos = 0
-        "test %[j], %[j]                                \n\t"
 
         "loop_0_begin%=:                                \n\t" // LOOP_0_BEGIN
 
@@ -2716,8 +2932,6 @@ static void num_ssm_mul_mod_span(
 
 #else
 
-    // ssm_get_params forces (n - 1) % 8 == 0, so the unrolled body needs no remainder
-    constexpr uint64_t unroll_mask = 7;
     __builtin_assume((count & unroll_mask) == 0);
 
     uint128_t carry = 0;
