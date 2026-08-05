@@ -2919,8 +2919,6 @@ static void num_ssm_mul_mod_span(
 
 #else
 
-    __builtin_assume((count & unroll_mask) == 0);
-
     uint128_t carry = 0;
     uint64_t v1 = src_1[0];
     #pragma GCC unroll 8
