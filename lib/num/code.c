@@ -1021,19 +1021,6 @@ static void num_mul_uint_buffer(num_p num_res, num_p num, uint64_t value) // TOD
     num_normalize(num_res);
 }
 
-// The kernels below are picked by what the toolchain can actually build, not by
-// operating system. Keying them off __linux__ / __APPLE__ handed the x86-64 blocks to a
-// Linux aarch64 build and the AArch64 blocks to a macOS x86-64 build, and neither of
-// those assembles at all; both are ordinary hosts today. What each block really needs:
-//
-//   x86-64  BMI2 (mulx) and ADX (adcx / adox), which -march=native only defines on
-//           Broadwell and later, plus gcc: the templates are .intel_syntax noprefix but
-//           operands expand to gcc's AT&T register spelling, which GNU as tolerates and
-//           clang's integrated assembler rejects outright.
-//   AArch64 nothing past the base ISA, and either compiler.
-//
-// So every host now lands on a path it can build, and each block is shared by both
-// operating systems instead of one each.
 #if !defined(NO_ASSEMBLY) && defined(__x86_64__) && defined(__BMI2__) && defined(__ADX__) && defined(__GNUC__) && !defined(__clang__)
     #define NUM_ASM_X86_64
 #elif !defined(NO_ASSEMBLY) && defined(__aarch64__)
