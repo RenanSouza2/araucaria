@@ -3046,10 +3046,55 @@ void num_ssm_fft_inv(num_p num_aux, num_p num_fft, ssm_params_p p)
     }
 }
 
+constexpr uint64_t ssm_recursive_threshold = 129;
+
 static bool ssm_is_recursive(uint64_t n)
 {
-    constexpr uint64_t threshold = 129;
-    return (bool)((n > threshold) && (((n - 1) & (1 - n)) > 4));
+    return (bool)((n > ssm_recursive_threshold) && (((n - 1) & (1 - n)) > 4));
+}
+
+// Padding n so that n - 1 is a multiple of 8 does two separate jobs.
+//
+// The x86-64 kernels need it unconditionally: they are 8 wide with a single word remainder
+// step, so a count that is not a multiple of 8 is simply wrong for them.
+//
+// A coefficient that will itself be multiplied by a nested transform also needs it, for a
+// different reason: ssm_get_params_wrap picks K from the largest power of two dividing
+// n - 1, so an n - 1 with a small power of two factor leaves ssm_is_recursive nothing to
+// work with and collapses the recursion into a schoolbook multiply of the whole span.
+//
+// A leaf coefficient needs neither. Every non x86 kernel has a real tail loop, and a leaf
+// is multiplied by num_ssm_mul_mod_span, which is happy with any count. Padding one is
+// pure loss: at the wrap level it turns n = 20 into n = 25, which widens every add,
+// subtract and rotate by a quarter and takes the pointwise multiply from 361 word products
+// to 576.
+static bool ssm_pad_is_needed(uint64_t n, uint64_t moduli)
+{
+#ifdef NUM_ASM_X86_64
+    (void)n;
+    (void)moduli;
+    return true;
+#else
+    if(n > ssm_recursive_threshold)
+    {
+        return true;
+    }
+
+    // Below one full block there is no 8 wide body to trim, only tail, so unpadding saves
+    // a word or two of width while the padded form still runs a single clean block.
+    constexpr uint64_t unroll = 8;
+    if(n - 1 < unroll)
+    {
+        return true;
+    }
+
+    // For a leaf it is a straight trade: padding buys 8 - moduli words of extra width in
+    // every add, subtract, rotate and in the (n - 1)^2 pointwise multiply, and saves the
+    // moduli scalar steps that each kernel's tail loop would otherwise run. Below the
+    // midpoint the width is worth more than the tail, above it the tail wins.
+    constexpr uint64_t tail_break_even = 4;
+    return moduli > tail_break_even;
+#endif
 }
 
 // NOLINTBEGIN(readability-magic-numbers)
@@ -3076,7 +3121,7 @@ ssm_params_t ssm_get_params(uint64_t count)
     assert(n > 2 * M);
 
     uint64_t moduli = (n - 1) & 7;
-    if(moduli)
+    if(moduli && ssm_pad_is_needed(n, moduli))
     {
         n += 8 - moduli;
         Q = 64 * (n - 1) / K;
@@ -3118,7 +3163,7 @@ ssm_params_t ssm_get_params_wrap(uint64_t n)
     assert(64 * (_n - 1) % K == 0);
 
     uint64_t moduli = (_n - 1) & 7;
-    if(moduli)
+    if(moduli && ssm_pad_is_needed(_n, moduli))
     {
         _n += 8 - moduli;
         Q = 64 * (_n - 1) / K;
@@ -3161,11 +3206,14 @@ static void num_ssm_mul_mod_span(
     // multiple of 8. Every ssm_get_params / ssm_get_params_wrap result satisfies that,
     // and num_mul_classic pays for the general case with a tail path and two skip
     // branches; state the narrower contract here instead of silently relying on it.
+    uint64_t count = n - 1;
+#ifdef NUM_ASM_X86_64
     constexpr uint64_t unroll_mask = 7;
     constexpr uint64_t unroll = 8;
-
-    uint64_t count = n - 1;
     assert(count >= unroll && (count & unroll_mask) == 0)
+#else
+    assert(count >= 1)
+#endif
 
     if(src_1[count] == 1)
     {
