@@ -3002,13 +3002,6 @@ static void num_ssm_mul_mod_span(
     num_ssm_sub_mod(num_1, pos, num_aux, 0, num_aux, n, n);
 }
 
-// time_assembly_benchmark | time mul: 18.136 | original c
-// time_assembly_benchmark | time mul: 13.173 | unrolled c
-// time_assembly_benchmark | time mul: 12.394 | unrolled assembly 32 | only mul
-// time_assembly_benchmark | time mul: 11.376 | unrolled assembly 8  | only mul
-// time_assembly_benchmark | time mul: 10.837 | ssm add
-// time_assembly_benchmark | time mul: 9.975 | better shift
-// time_assembly_benchmark | time mul: 9.900 | sub immed
 
 
 void num_ssm_pad_wrap(num_p num_fft, num_p num, uint64_t pos, ssm_params_p p)
