@@ -5,10 +5,6 @@ RUN_TARGETS = $(TEST_SRCS:%.c=run_%)
 
 .PHONY: test clean
 
-# Without this make treats the runners as intermediate files of the
-# runner_% -> run_% pattern chain and deletes them after every run, which
-# relinks all three every time and makes SEED=<n> ./runner_test_N replay
-# impossible.
 .SECONDARY: $(RUNNERS)
 
 test: $(RUN_TARGETS)
