@@ -1784,22 +1784,6 @@ static void num_ssm_add_uint(num_p num_fft, uint64_t pos, uint64_t n, uint64_t v
     assert(!carry);
 }
 
-static void num_ssm_sub_uint(num_p num_fft, uint64_t pos, uint64_t n, uint64_t value)
-{
-    CLU_HANDLER_IS_SAFE(num_fft)
-    assert(num_fft)
-
-    uint64_t * restrict dest = num_fft->chunk;
-
-    uint128_t borrow = value;
-    for(uint64_t i = 0; i < n && borrow; i++)
-    {
-        uint128_t diff = U128(dest[pos + i]) - borrow;
-        dest[pos + i] = LOW(diff);
-        borrow = HIGH(diff) & 1;
-    }
-}
-
 // normalizes coeficient if it is less than 2 modulus
 static void num_ssm_normalize(num_p num_fft, uint64_t pos, uint64_t n)
 {
@@ -1807,15 +1791,31 @@ static void num_ssm_normalize(num_p num_fft, uint64_t pos, uint64_t n)
     assert(num_fft)
     assert(num_fft->chunk[pos + n - 1] <= 2)
 
-    uint64_t value = num_fft->chunk[pos + n - 1];
-    if(value == 0)
+    uint64_t * chunk = &num_fft->chunk[pos];
+
+    // The top word is the carry out of a 64 * (n - 1) bit add, so it is 0 or 1 about half
+    // the time each and testing it first costs a mispredict. Reducing it unconditionally
+    // is a load, a subtract and two stores, and the borrow out of word 0 needs word 0 to
+    // have been below the top word, which for a full width coefficient never happens.
+    uint64_t value = chunk[n - 1];
+    uint64_t word = chunk[0];
+    chunk[n - 1] = 0;
+    chunk[0] = word - value;
+    if(word >= value)
     {
         return;
     }
 
-    num_fft->chunk[pos + n - 1] = 0;
-    num_ssm_sub_uint(num_fft, pos, n, value);
-    if(num_fft->chunk[pos + n - 1] != UINT64_MAX)
+    for(uint64_t i = 1; i < n; i++)
+    {
+        uint64_t borrowed = chunk[i]--;
+        if(borrowed)
+        {
+            break;
+        }
+    }
+
+    if(chunk[n - 1] != UINT64_MAX)
     {
         return;
     }
@@ -1882,27 +1882,46 @@ static void num_ssm_denormalize(num_p num_fft, uint64_t pos, uint64_t n)
     "stp %[a_0], %[a_1], [%[dest], #" #OFF_0 "]     \n\t" /* *(dest + OFF_0) = (a_0, a_1)              */  \
     "stp %[a_2], %[a_3], [%[dest], #" #OFF_1 "]     \n\t" /* *(dest + OFF_1) = (a_2, a_3)              */
 
-#define BUTTERFLY_STEP_4                                                                                    \
+// Eight words per pass. The four flag shuffling instructions are per pass, not per word,
+// so doubling the block halves them; stp leaves NZCV alone, which is what lets the sum
+// stores sit inside the adcs chain and keeps the sum registers down to four.
+#define BUTTERFLY_STEP_8                                                                                    \
     "ldp %[a_0], %[a_1], [%[dest_1]]                \n\t" /* (a_0, a_1)  = *dest_1                       */  \
     "ldp %[a_2], %[a_3], [%[dest_1], #16]           \n\t" /* (a_2, a_3)  = *(dest_1 + 16)                */  \
+    "ldp %[a_4], %[a_5], [%[dest_1], #32]           \n\t" /* (a_4, a_5)  = *(dest_1 + 32)                */  \
+    "ldp %[a_6], %[a_7], [%[dest_1], #48]           \n\t" /* (a_6, a_7)  = *(dest_1 + 48)                */  \
     "ldp %[b_0], %[b_1], [%[dest_2]]                \n\t" /* (b_0, b_1)  = *dest_2                       */  \
     "ldp %[b_2], %[b_3], [%[dest_2], #16]           \n\t" /* (b_2, b_3)  = *(dest_2 + 16)                */  \
-    "subs xzr, %[carry], #1                         \n\t" /* CF = carry                                  */  \
-    "adcs %[s_0], %[a_0], %[b_0]                    \n\t" /* s_0 = a_0 + b_0 + CF                        */  \
-    "adcs %[s_1], %[a_1], %[b_1]                    \n\t" /* s_1 = a_1 + b_1 + CF                        */  \
-    "adcs %[s_2], %[a_2], %[b_2]                    \n\t" /* s_2 = a_2 + b_2 + CF                        */  \
-    "adcs %[s_3], %[a_3], %[b_3]                    \n\t" /* s_3 = a_3 + b_3 + CF                        */  \
-    "cset %[carry], cs                              \n\t" /* carry = CF                                  */  \
-    "cmp xzr, %[borrow]                             \n\t" /* CF = 1 - borrow                             */  \
-    "sbcs %[a_0], %[a_0], %[b_0]                    \n\t" /* a_0 -= b_0 + (1 - CF)                       */  \
-    "sbcs %[a_1], %[a_1], %[b_1]                    \n\t" /* a_1 -= b_1 + (1 - CF)                       */  \
-    "sbcs %[a_2], %[a_2], %[b_2]                    \n\t" /* a_2 -= b_2 + (1 - CF)                       */  \
-    "sbcs %[a_3], %[a_3], %[b_3]                    \n\t" /* a_3 -= b_3 + (1 - CF)                       */  \
-    "cset %[borrow], cc                             \n\t" /* borrow = 1 - CF                             */  \
-    "stp %[s_0], %[s_1], [%[dest_1]]                \n\t" /* *dest_1       = (s_0, s_1)                  */  \
-    "stp %[s_2], %[s_3], [%[dest_1], #16]           \n\t" /* *(dest_1 + 16) = (s_2, s_3)                 */  \
-    "stp %[a_0], %[a_1], [%[dest_2]]                \n\t" /* *dest_2       = (a_0, a_1)                  */  \
-    "stp %[a_2], %[a_3], [%[dest_2], #16]           \n\t" /* *(dest_2 + 16) = (a_2, a_3)                 */
+    "ldp %[b_4], %[b_5], [%[dest_2], #32]           \n\t" /* (b_4, b_5)  = *(dest_2 + 32)                */  \
+    "ldp %[b_6], %[b_7], [%[dest_2], #48]           \n\t" /* (b_6, b_7)  = *(dest_2 + 48)                */  \
+    "subs xzr, %[carry], #1                         \n\t" /* CF = carry                                 */  \
+    "adcs %[s_0], %[a_0], %[b_0]                    \n\t" /* s_0 = a_0 + b_0 + CF                       */  \
+    "adcs %[s_1], %[a_1], %[b_1]                    \n\t" /* s_1 = a_1 + b_1 + CF                       */  \
+    "adcs %[s_2], %[a_2], %[b_2]                    \n\t" /* s_2 = a_2 + b_2 + CF                       */  \
+    "adcs %[s_3], %[a_3], %[b_3]                    \n\t" /* s_3 = a_3 + b_3 + CF                       */  \
+    "stp %[s_0], %[s_1], [%[dest_1]]                \n\t" /* *dest_1        = (s_0, s_1)                */  \
+    "stp %[s_2], %[s_3], [%[dest_1], #16]           \n\t" /* *(dest_1 + 16) = (s_2, s_3)                */  \
+    "adcs %[s_0], %[a_4], %[b_4]                    \n\t" /* s_0 = a_4 + b_4 + CF                       */  \
+    "adcs %[s_1], %[a_5], %[b_5]                    \n\t" /* s_1 = a_5 + b_5 + CF                       */  \
+    "adcs %[s_2], %[a_6], %[b_6]                    \n\t" /* s_2 = a_6 + b_6 + CF                       */  \
+    "adcs %[s_3], %[a_7], %[b_7]                    \n\t" /* s_3 = a_7 + b_7 + CF                       */  \
+    "cset %[carry], cs                              \n\t" /* carry = CF                                 */  \
+    "stp %[s_0], %[s_1], [%[dest_1], #32]           \n\t" /* *(dest_1 + 32) = (s_0, s_1)                */  \
+    "stp %[s_2], %[s_3], [%[dest_1], #48]           \n\t" /* *(dest_1 + 48) = (s_2, s_3)                */  \
+    "cmp xzr, %[borrow]                             \n\t" /* CF = 1 - borrow                            */  \
+    "sbcs %[a_0], %[a_0], %[b_0]                    \n\t" /* a_0 -= b_0 + (1 - CF)                      */  \
+    "sbcs %[a_1], %[a_1], %[b_1]                    \n\t" /* a_1 -= b_1 + (1 - CF)                      */  \
+    "sbcs %[a_2], %[a_2], %[b_2]                    \n\t" /* a_2 -= b_2 + (1 - CF)                      */  \
+    "sbcs %[a_3], %[a_3], %[b_3]                    \n\t" /* a_3 -= b_3 + (1 - CF)                      */  \
+    "stp %[a_0], %[a_1], [%[dest_2]]                \n\t" /* *dest_2        = (a_0, a_1)                */  \
+    "stp %[a_2], %[a_3], [%[dest_2], #16]           \n\t" /* *(dest_2 + 16) = (a_2, a_3)                */  \
+    "sbcs %[a_4], %[a_4], %[b_4]                    \n\t" /* a_4 -= b_4 + (1 - CF)                      */  \
+    "sbcs %[a_5], %[a_5], %[b_5]                    \n\t" /* a_5 -= b_5 + (1 - CF)                      */  \
+    "sbcs %[a_6], %[a_6], %[b_6]                    \n\t" /* a_6 -= b_6 + (1 - CF)                      */  \
+    "sbcs %[a_7], %[a_7], %[b_7]                    \n\t" /* a_7 -= b_7 + (1 - CF)                      */  \
+    "cset %[borrow], cc                             \n\t" /* borrow = 1 - CF                            */  \
+    "stp %[a_4], %[a_5], [%[dest_2], #32]           \n\t" /* *(dest_2 + 32) = (a_4, a_5)                */  \
+    "stp %[a_6], %[a_7], [%[dest_2], #48]           \n\t" /* *(dest_2 + 48) = (a_6, a_7)                */
 
 #endif
 
@@ -2814,11 +2833,11 @@ static void num_ssm_butterfly(
     uint64_t * restrict dest_1 = &num_fft->chunk[pos_1];
     uint64_t * restrict dest_2 = &num_fft->chunk[pos_2];
 
-    uint64_t a_0, a_1, a_2, a_3;
-    uint64_t b_0, b_1, b_2, b_3;
+    uint64_t a_0, a_1, a_2, a_3, a_4, a_5, a_6, a_7;
+    uint64_t b_0, b_1, b_2, b_3, b_4, b_5, b_6, b_7;
     uint64_t s_0, s_1, s_2, s_3;
-    constexpr uint64_t unroll_log_2 = 2;
-    constexpr uint64_t unroll_mask = 3;
+    constexpr uint64_t unroll_log_2 = 3;
+    constexpr uint64_t unroll_mask = 7;
 
     uint64_t j = n >> unroll_log_2;
     uint64_t tail = n & unroll_mask;
@@ -2830,10 +2849,10 @@ static void num_ssm_butterfly(
 
         "1:                                             \n\t" // LOOP_BUTTERFLY_BEGIN
 
-        BUTTERFLY_STEP_4
+        BUTTERFLY_STEP_8
 
-        "add %[dest_1], %[dest_1], #32                  \n\t" // dest_1 += 32
-        "add %[dest_2], %[dest_2], #32                  \n\t" // dest_2 += 32
+        "add %[dest_1], %[dest_1], #64                  \n\t" // dest_1 += 64
+        "add %[dest_2], %[dest_2], #64                  \n\t" // dest_2 += 64
         "sub %[j], %[j], #1                             \n\t" // j--
         "cbnz %[j], 1b                                  \n\t"
 
@@ -2867,10 +2886,18 @@ static void num_ssm_butterfly(
             [a_1] "=&r" (a_1),
             [a_2] "=&r" (a_2),
             [a_3] "=&r" (a_3),
+            [a_4] "=&r" (a_4),
+            [a_5] "=&r" (a_5),
+            [a_6] "=&r" (a_6),
+            [a_7] "=&r" (a_7),
             [b_0] "=&r" (b_0),
             [b_1] "=&r" (b_1),
             [b_2] "=&r" (b_2),
             [b_3] "=&r" (b_3),
+            [b_4] "=&r" (b_4),
+            [b_5] "=&r" (b_5),
+            [b_6] "=&r" (b_6),
+            [b_7] "=&r" (b_7),
             [s_0] "=&r" (s_0),
             [s_1] "=&r" (s_1),
             [s_2] "=&r" (s_2),
@@ -2882,18 +2909,20 @@ static void num_ssm_butterfly(
             "memory"
     );
 
-    if(borrow)
+    // A - B is negative about half the time, so testing the borrow costs a coin flip the
+    // branch predictor cannot win. Adding it unconditionally is two loads and two stores,
+    // and leaves only the ripple out of word 0 behind a branch, which needs word 0 to have
+    // been all ones and so is never taken in practice.
+    uint64_t * chunk = &num_fft->chunk[pos_2];
+    uint64_t low = chunk[0] + borrow;
+    bool ripple = low < borrow;
+    chunk[0] = low;
+    chunk[n - 1] += borrow;
+
+    for(uint64_t i = 1; ripple; i++)
     {
-        uint64_t * chunk = &num_fft->chunk[pos_2];
-        for(uint64_t i = 0; i < n; i++)
-        {
-            chunk[i]++;
-            if(chunk[i])
-            {
-                break;
-            }
-        }
-        chunk[n - 1]++;
+        chunk[i]++;
+        ripple = chunk[i] == 0;
     }
 
     num_ssm_normalize(num_fft, pos_1, n);
