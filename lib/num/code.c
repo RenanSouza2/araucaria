@@ -1882,6 +1882,28 @@ static void num_ssm_denormalize(num_p num_fft, uint64_t pos, uint64_t n)
     "stp %[a_0], %[a_1], [%[dest], #" #OFF_0 "]     \n\t" /* *(dest + OFF_0) = (a_0, a_1)              */  \
     "stp %[a_2], %[a_3], [%[dest], #" #OFF_1 "]     \n\t" /* *(dest + OFF_1) = (a_2, a_3)              */
 
+#define BUTTERFLY_STEP_4                                                                                    \
+    "ldp %[a_0], %[a_1], [%[dest_1]]                \n\t" /* (a_0, a_1)  = *dest_1                       */  \
+    "ldp %[a_2], %[a_3], [%[dest_1], #16]           \n\t" /* (a_2, a_3)  = *(dest_1 + 16)                */  \
+    "ldp %[b_0], %[b_1], [%[dest_2]]                \n\t" /* (b_0, b_1)  = *dest_2                       */  \
+    "ldp %[b_2], %[b_3], [%[dest_2], #16]           \n\t" /* (b_2, b_3)  = *(dest_2 + 16)                */  \
+    "subs xzr, %[carry], #1                         \n\t" /* CF = carry                                  */  \
+    "adcs %[s_0], %[a_0], %[b_0]                    \n\t" /* s_0 = a_0 + b_0 + CF                        */  \
+    "adcs %[s_1], %[a_1], %[b_1]                    \n\t" /* s_1 = a_1 + b_1 + CF                        */  \
+    "adcs %[s_2], %[a_2], %[b_2]                    \n\t" /* s_2 = a_2 + b_2 + CF                        */  \
+    "adcs %[s_3], %[a_3], %[b_3]                    \n\t" /* s_3 = a_3 + b_3 + CF                        */  \
+    "cset %[carry], cs                              \n\t" /* carry = CF                                  */  \
+    "cmp xzr, %[borrow]                             \n\t" /* CF = 1 - borrow                             */  \
+    "sbcs %[a_0], %[a_0], %[b_0]                    \n\t" /* a_0 -= b_0 + (1 - CF)                       */  \
+    "sbcs %[a_1], %[a_1], %[b_1]                    \n\t" /* a_1 -= b_1 + (1 - CF)                       */  \
+    "sbcs %[a_2], %[a_2], %[b_2]                    \n\t" /* a_2 -= b_2 + (1 - CF)                       */  \
+    "sbcs %[a_3], %[a_3], %[b_3]                    \n\t" /* a_3 -= b_3 + (1 - CF)                       */  \
+    "cset %[borrow], cc                             \n\t" /* borrow = 1 - CF                             */  \
+    "stp %[s_0], %[s_1], [%[dest_1]]                \n\t" /* *dest_1       = (s_0, s_1)                  */  \
+    "stp %[s_2], %[s_3], [%[dest_1], #16]           \n\t" /* *(dest_1 + 16) = (s_2, s_3)                 */  \
+    "stp %[a_0], %[a_1], [%[dest_2]]                \n\t" /* *dest_2       = (a_0, a_1)                  */  \
+    "stp %[a_2], %[a_3], [%[dest_2], #16]           \n\t" /* *(dest_2 + 16) = (a_2, a_3)                 */
+
 #endif
 
 void num_ssm_add_mod_immed(
@@ -2524,6 +2546,171 @@ void num_ssm_shr(
     memset(&dest[n - count], 0, count * sizeof(uint64_t));
 }
 
+static void num_ssm_sub_span_mod(
+    num_p num_res, uint64_t pos,
+    num_p num_src, uint64_t src_pos,
+    uint64_t off,
+    uint64_t len,
+    uint64_t n
+);
+
+// The negacyclic rotate below only needs the few words of the shifted operand that cross
+// the 2^(64 * (n - 1)) boundary, and it can shift the coefficient where it already lives
+// instead of building both halves in num_aux. These four helpers are what num_ssm_shl and
+// num_ssm_shr become once the destination is the source and the span is bounded: no
+// memset over the words that are known zero, and no second array to read back.
+
+// num_res[pos_res .. pos_res + len) = (num_fft[pos .. pos + n) >> bits), low words only.
+// Requires (bits / 64) + len == n - 1, which is what the callers below always pass.
+static void num_ssm_shr_low(
+    num_p num_res, uint64_t pos_res,
+    num_p num_fft, uint64_t pos,
+    uint64_t n,
+    uint64_t bits,
+    uint64_t len
+)
+{
+    CLU_HANDLER_IS_SAFE(num_res)
+    CLU_HANDLER_IS_SAFE(num_fft)
+    assert(num_res && num_fft)
+
+    constexpr uint64_t mask = 0x3f;
+
+    uint64_t count = bits >> chunk_bits_log_2;
+    bits &= mask;
+    assert(count + len == n - 1)
+
+    uint64_t * restrict dest = &num_res->chunk[pos_res];
+    const uint64_t * restrict src = &num_fft->chunk[pos];
+
+    if(bits == 0)
+    {
+        memcpy(dest, &src[count], len * sizeof(uint64_t));
+        return;
+    }
+
+    uint64_t inv_bits = chunk_bits - bits;
+    #pragma GCC unroll 8
+    for(uint64_t i = 0; i < len; i++)
+    {
+        dest[i] = (src[count + i] >> bits) | (src[count + i + 1] << inv_bits);
+    }
+}
+
+// num_res[pos_res + off .. pos_res + off + len) = words [off, off + len) of
+// (num_fft[pos .. pos + n) << bits), where off == bits / 64.
+static void num_ssm_shl_high(
+    num_p num_res, uint64_t pos_res,
+    num_p num_fft, uint64_t pos,
+    uint64_t bits,
+    uint64_t len
+)
+{
+    CLU_HANDLER_IS_SAFE(num_res)
+    CLU_HANDLER_IS_SAFE(num_fft)
+    assert(num_res && num_fft)
+
+    constexpr uint64_t mask = 0x3f;
+
+    uint64_t count = bits >> chunk_bits_log_2;
+    bits &= mask;
+
+    uint64_t * restrict dest = &num_res->chunk[pos_res + count];
+    const uint64_t * restrict src = &num_fft->chunk[pos];
+
+    if(bits == 0)
+    {
+        memcpy(dest, src, len * sizeof(uint64_t));
+        return;
+    }
+
+    uint64_t inv_bits = chunk_bits - bits;
+    #pragma GCC unroll 8
+    for(uint64_t i = len - 1; i != 0; i--)
+    {
+        dest[i] = (src[i] << bits) | (src[i - 1] >> inv_bits);
+    }
+
+    dest[0] = src[0] << bits;
+}
+
+// num_fft[pos .. pos + n) <<= bits, in place. Descending so the words a step reads are
+// always below the word it writes.
+static void num_ssm_shl_self(num_p num_fft, uint64_t pos, uint64_t n, uint64_t bits)
+{
+    CLU_HANDLER_IS_SAFE(num_fft)
+    assert(num_fft)
+
+    constexpr uint64_t mask = 0x3f;
+
+    uint64_t count = bits >> chunk_bits_log_2;
+    assert(count < n)
+    bits &= mask;
+
+    uint64_t * chunk = &num_fft->chunk[pos];
+
+    if(bits == 0)
+    {
+        memmove(&chunk[count], chunk, (n - count) * sizeof(uint64_t));
+        memset(chunk, 0, count * sizeof(uint64_t));
+        return;
+    }
+
+    uint64_t inv_bits = chunk_bits - bits;
+    #pragma GCC unroll 8
+    for(uint64_t i = n - 1; i > count; i--)
+    {
+        chunk[i] = (chunk[i - count] << bits) | (chunk[i - count - 1] >> inv_bits);
+    }
+
+    chunk[count] = chunk[0] << bits;
+    memset(chunk, 0, count * sizeof(uint64_t));
+}
+
+// num_fft[pos .. pos + n) >>= bits, in place. Ascending, for the mirror reason.
+static void num_ssm_shr_self(num_p num_fft, uint64_t pos, uint64_t n, uint64_t bits)
+{
+    CLU_HANDLER_IS_SAFE(num_fft)
+    assert(num_fft)
+
+    constexpr uint64_t mask = 0x3f;
+
+    uint64_t count = bits >> chunk_bits_log_2;
+    assert(count < n)
+    bits &= mask;
+
+    uint64_t * chunk = &num_fft->chunk[pos];
+
+    if(bits == 0)
+    {
+        memmove(chunk, &chunk[count], (n - count) * sizeof(uint64_t));
+        memset(&chunk[n - count], 0, count * sizeof(uint64_t));
+        return;
+    }
+
+    uint64_t inv_bits = chunk_bits - bits;
+    uint64_t stop = n - count - 1;
+    #pragma GCC unroll 8
+    for(uint64_t i = 0; i < stop; i++)
+    {
+        chunk[i] = (chunk[count + i] >> bits) | (chunk[count + i + 1] << inv_bits);
+    }
+
+    chunk[stop] = chunk[n - 1] >> bits;
+    memset(&chunk[n - count], 0, count * sizeof(uint64_t));
+}
+
+// Words of the shifted coefficient that land at or above 2^(64 * (n - 1)). A normalized
+// coefficient is below 2^(64 * (n - 1)) unless it is exactly that power, which is the one
+// case where the top word is set and the wrap spans the whole span; the rotates fall back
+// to the two-buffer path for it rather than special-casing the count.
+static uint64_t ssm_wrap_len(uint64_t bits)
+{
+    constexpr uint64_t mask = 0x3f;
+    uint64_t count = bits >> chunk_bits_log_2;
+    return (bits & mask) ? count + 1 : count;
+}
+
 // num_aux->size >= 2 * n
 void num_ssm_shl_mod(
     num_p num_aux,
@@ -2544,10 +2731,20 @@ void num_ssm_shl_mod(
         return;
     }
 
-    num_ssm_shr(num_aux, 0, num_fft, pos, n, (chunk_bits * n) - chunk_bits - bits);
-    num_ssm_shl(num_aux, n, num_fft, pos, n, bits);
-    num_aux->chunk[(2 * n) - 1] = 0;
-    num_ssm_sub_mod(num_fft, pos, num_aux, n, num_aux, 0, n);
+    uint64_t len = ssm_wrap_len(bits);
+    if(num_fft->chunk[pos + n - 1] || len == 0 || len > n - 1)
+    {
+        num_ssm_shr(num_aux, 0, num_fft, pos, n, (chunk_bits * n) - chunk_bits - bits);
+        num_ssm_shl(num_aux, n, num_fft, pos, n, bits);
+        num_aux->chunk[(2 * n) - 1] = 0;
+        num_ssm_sub_mod(num_fft, pos, num_aux, n, num_aux, 0, n);
+        return;
+    }
+
+    num_ssm_shr_low(num_aux, 0, num_fft, pos, n, (chunk_bits * n) - chunk_bits - bits, len);
+    num_ssm_shl_self(num_fft, pos, n, bits);
+    num_fft->chunk[pos + n - 1] = 0;
+    num_ssm_sub_span_mod(num_fft, pos, num_aux, 0, 0, len, n);
 }
 
 // num_aux->size >= 2 * p->n
@@ -2570,10 +2767,145 @@ void num_ssm_shr_mod(
         return;
     }
 
-    num_ssm_shl(num_aux, 0, num_fft, pos, n, (chunk_bits * n) - chunk_bits - bits);
-    num_ssm_shr(num_aux, n, num_fft, pos, n, bits);
-    num_aux->chunk[n - 1] = 0;
-    num_ssm_sub_mod(num_fft, pos, num_aux, n, num_aux, 0, n);
+    uint64_t len = ssm_wrap_len(bits);
+    if(num_fft->chunk[pos + n - 1] || len == 0 || len > n - 1)
+    {
+        num_ssm_shl(num_aux, 0, num_fft, pos, n, (chunk_bits * n) - chunk_bits - bits);
+        num_ssm_shr(num_aux, n, num_fft, pos, n, bits);
+        num_aux->chunk[n - 1] = 0;
+        num_ssm_sub_mod(num_fft, pos, num_aux, n, num_aux, 0, n);
+        return;
+    }
+
+    uint64_t off = n - 1 - len;
+    num_ssm_shl_high(num_aux, 0, num_fft, pos, (chunk_bits * n) - chunk_bits - bits, len);
+    num_ssm_shr_self(num_fft, pos, n, bits);
+    num_ssm_sub_span_mod(num_fft, pos, num_aux, off, off, len, n);
+}
+
+// fft[pos_1] = A + B and fft[pos_2] = A - B, reading each coefficient once. Splitting it
+// into num_ssm_sub_mod into num_aux, num_ssm_add_mod_immed and a copy back reads both
+// coefficients twice and writes n words of num_aux that exist only to be copied.
+//
+// The two chains cannot share the flags, so each block reseeds its own: subs against the
+// saved carry for adcs, cmp against the saved borrow for sbcs. Both are two instructions
+// per four words, which is what buys the second pass.
+//
+// A borrowing difference leaves A - B + 2^(64 * n) in the span where A - B + 2^(64 * (n
+// - 1)) + 1 is wanted, so the modulus is added back afterwards. That is what
+// num_ssm_denormalize does, except the carry out of the top word here is the 2^(64 * n)
+// being discarded rather than an overflow to assert on.
+static void num_ssm_butterfly(
+    num_p num_aux,
+    num_p num_fft,
+    uint64_t pos_1,
+    uint64_t pos_2,
+    uint64_t n
+)
+{
+    CLU_HANDLER_IS_SAFE(num_aux)
+    CLU_HANDLER_IS_SAFE(num_fft)
+    assert(num_aux && num_fft)
+
+#ifdef NUM_ASM_AARCH64
+
+    (void)num_aux;
+
+    uint64_t * restrict dest_1 = &num_fft->chunk[pos_1];
+    uint64_t * restrict dest_2 = &num_fft->chunk[pos_2];
+
+    uint64_t a_0, a_1, a_2, a_3;
+    uint64_t b_0, b_1, b_2, b_3;
+    uint64_t s_0, s_1, s_2, s_3;
+    constexpr uint64_t unroll_log_2 = 2;
+    constexpr uint64_t unroll_mask = 3;
+
+    uint64_t j = n >> unroll_log_2;
+    uint64_t tail = n & unroll_mask;
+    uint64_t carry = 0;
+    uint64_t borrow = 0;
+
+    __asm__ __volatile__ (
+        "cbz %[j], 2f                                   \n\t"
+
+        "1:                                             \n\t" // LOOP_BUTTERFLY_BEGIN
+
+        BUTTERFLY_STEP_4
+
+        "add %[dest_1], %[dest_1], #32                  \n\t" // dest_1 += 32
+        "add %[dest_2], %[dest_2], #32                  \n\t" // dest_2 += 32
+        "sub %[j], %[j], #1                             \n\t" // j--
+        "cbnz %[j], 1b                                  \n\t"
+
+        "2:                                             \n\t"
+        "cbz %[tail], 4f                                \n\t"
+
+        "3:                                             \n\t" // LOOP_BUTTERFLY_TAIL_BEGIN
+
+        "ldr %[a_0], [%[dest_1]]                        \n\t" // a_0 = *dest_1
+        "ldr %[b_0], [%[dest_2]]                        \n\t" // b_0 = *dest_2
+        "subs xzr, %[carry], #1                         \n\t" // CF = carry
+        "adcs %[s_0], %[a_0], %[b_0]                    \n\t" // s_0 = a_0 + b_0 + CF
+        "cset %[carry], cs                              \n\t" // carry = CF
+        "cmp xzr, %[borrow]                             \n\t" // CF = 1 - borrow
+        "sbcs %[a_0], %[a_0], %[b_0]                    \n\t" // a_0 -= b_0 + (1 - CF)
+        "cset %[borrow], cc                             \n\t" // borrow = 1 - CF
+        "str %[s_0], [%[dest_1]], #8                    \n\t" // *dest_1 = s_0, then dest_1 += 8
+        "str %[a_0], [%[dest_2]], #8                    \n\t" // *dest_2 = a_0, then dest_2 += 8
+        "sub %[tail], %[tail], #1                       \n\t" // tail--
+        "cbnz %[tail], 3b                               \n\t"
+
+        "4:                                             \n\t"
+        // out
+        :   [dest_1] "+r" (dest_1),
+            [dest_2] "+r" (dest_2),
+            [j] "+&r" (j),
+            [tail] "+&r" (tail),
+            [carry] "+&r" (carry),
+            [borrow] "+&r" (borrow),
+            [a_0] "=&r" (a_0),
+            [a_1] "=&r" (a_1),
+            [a_2] "=&r" (a_2),
+            [a_3] "=&r" (a_3),
+            [b_0] "=&r" (b_0),
+            [b_1] "=&r" (b_1),
+            [b_2] "=&r" (b_2),
+            [b_3] "=&r" (b_3),
+            [s_0] "=&r" (s_0),
+            [s_1] "=&r" (s_1),
+            [s_2] "=&r" (s_2),
+            [s_3] "=&r" (s_3)
+        // in
+        :
+        // clobber
+        :   "cc",
+            "memory"
+    );
+
+    if(borrow)
+    {
+        uint64_t * chunk = &num_fft->chunk[pos_2];
+        for(uint64_t i = 0; i < n; i++)
+        {
+            chunk[i]++;
+            if(chunk[i])
+            {
+                break;
+            }
+        }
+        chunk[n - 1]++;
+    }
+
+    num_ssm_normalize(num_fft, pos_1, n);
+    num_ssm_normalize(num_fft, pos_2, n);
+
+#else
+
+    num_ssm_sub_mod(num_aux, 0, num_fft, pos_1, num_fft, pos_2, n);
+    num_ssm_add_mod_immed(num_fft, pos_1, num_fft, pos_2, n);
+    memcpy(&num_fft->chunk[pos_2], num_aux->chunk, n * sizeof(uint64_t));
+
+#endif
 }
 
 // num_aux->size >= 2 * n
@@ -2606,9 +2938,7 @@ static void num_ssm_fft_fwd_rec(
         uint64_t shift = ssm_bit_inv(i, K / 2) * bits;
         num_ssm_shl_mod(num_aux, num_fft, pos_2, n, shift);
 
-        num_ssm_sub_mod(num_aux, 0, num_fft, pos_1, num_fft, pos_2, n);
-        num_ssm_add_mod_immed(num_fft, pos_1, num_fft, pos_2, n);
-        memcpy(&num_fft->chunk[pos_2], num_aux->chunk, n * sizeof(uint64_t));
+        num_ssm_butterfly(num_aux, num_fft, pos_1, pos_2, n);
     }
 }
 
@@ -2659,9 +2989,7 @@ static void num_ssm_fft_inv_rec(
 
         num_ssm_shr_mod(num_aux, num, pos_2, n, i * bits);
 
-        num_ssm_sub_mod(num_aux, 0, num, pos_1, num, pos_2, n);
-        num_ssm_add_mod_immed(num, pos_1, num, pos_2, n);
-        memcpy(&num->chunk[pos_2], num_aux->chunk, n * sizeof(uint64_t));
+        num_ssm_butterfly(num_aux, num, pos_1, pos_2, n);
     }
 }
 
@@ -3082,17 +3410,94 @@ static void num_ssm_sub_span_mod(
 
     num_ssm_denormalize(num_res, pos, n);
 
-    uint64_t * restrict dest = &num_res->chunk[pos];
+    uint64_t * restrict dest = &num_res->chunk[pos + off];
     const uint64_t * restrict src = &num_src->chunk[src_pos];
 
     uint128_t borrow = 0;
+
+#ifdef NUM_ASM_AARCH64
+
+    // Same 8 wide sbcs chain as num_ssm_sub_mod_immed, but over an arbitrary len rather
+    // than the 8k + 1 the full width kernels are guaranteed, so the tail loop earns its
+    // keep here. The borrow leaves in a register instead of being consumed by a
+    // normalize, because the caller still has to walk it up to the top word.
+    {
+        uint64_t a_0, a_1, a_2, a_3;
+        uint64_t b_0, b_1, b_2, b_3;
+        constexpr uint64_t unroll_log_2 = 3;
+        constexpr uint64_t unroll_mask = 7;
+
+        uint64_t j = len >> unroll_log_2;
+        uint64_t tail = len & unroll_mask;
+        uint64_t out;
+        uint64_t * dest_it = dest;
+        const uint64_t * src_it = src;
+
+        __asm__ __volatile__ (
+            "cmp xzr, xzr                                   \n\t" // CF = 1 (means NO borrow)
+            "cbz %[j], 2f                                   \n\t"
+
+            "1:                                             \n\t" // LOOP_SUB_BEGIN
+
+            SUB_MOD_STEP_4(dest,  0, 16)
+            SUB_MOD_STEP_4(dest, 32, 48)
+
+            "add %[dest], %[dest], #64                      \n\t" // dest += 64 (add does not modify CF)
+            "add %[src_2], %[src_2], #64                    \n\t" // src_2 += 64
+            "sub %[j], %[j], #1                             \n\t" // j-- (sub does not modify CF)
+            "cbnz %[j], 1b                                  \n\t"
+
+            "2:                                             \n\t"
+            "cbz %[tail], 4f                                \n\t"
+
+            "3:                                             \n\t" // LOOP_SUB_TAIL_BEGIN
+
+            "ldr %[a_0], [%[dest]]                          \n\t" // a_0 = *dest
+            "ldr %[b_0], [%[src_2]], #8                     \n\t" // b_0 = *src_2, then src_2 += 8
+            "sbcs %[a_0], %[a_0], %[b_0]                    \n\t" // a_0 -= b_0 + (1 - CF)
+            "str %[a_0], [%[dest]], #8                      \n\t" // *dest = a_0, then dest += 8
+            "sub %[tail], %[tail], #1                       \n\t" // tail--
+            "cbnz %[tail], 3b                               \n\t"
+
+            "4:                                             \n\t"
+            "cset %[out], cc                                \n\t" // out = borrow (CF clear)
+            // out
+            :   [dest] "+r" (dest_it),
+                [src_2] "+r" (src_it),
+                [j] "+&r" (j),
+                [tail] "+&r" (tail),
+                [out] "=&r" (out),
+                [a_0] "=&r" (a_0),
+                [a_1] "=&r" (a_1),
+                [a_2] "=&r" (a_2),
+                [a_3] "=&r" (a_3),
+                [b_0] "=&r" (b_0),
+                [b_1] "=&r" (b_1),
+                [b_2] "=&r" (b_2),
+                [b_3] "=&r" (b_3)
+            // in
+            :
+            // clobber
+            :   "cc",
+                "memory"
+        );
+
+        borrow = out;
+    }
+
+#else
+
     #pragma GCC unroll 8
     for(uint64_t i = 0; i < len; i++)
     {
-        uint128_t diff = U128(dest[off + i]) - src[i] - borrow;
-        dest[off + i] = LOW(diff);
+        uint128_t diff = U128(dest[i]) - src[i] - borrow;
+        dest[i] = LOW(diff);
         borrow = HIGH(diff) & 1;
     }
+
+#endif
+
+    dest = &num_res->chunk[pos];
 
     for(uint64_t i = off + len; borrow && i < n; i++)
     {
