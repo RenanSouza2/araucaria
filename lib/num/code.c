@@ -2974,13 +2974,13 @@ static bool ssm_pad_is_needed(uint64_t n, uint64_t moduli)
     return moduli > tail_break_even;
 }
 
+// Shared by ssm_get_params and ssm_get_params_wrap, which differ only in how they derive
+// K and M; everything from here on (the Q/n formula, the pad-to-a-multiple-of-8 step, and
+// assembling the returned params) is identical between them, so it lives in one place
+// rather than two copies that could silently drift apart.
 // NOLINTBEGIN(readability-magic-numbers)
-ssm_params_t ssm_get_params(uint64_t count)
+static ssm_params_t ssm_finish_params(uint64_t count, uint64_t K, uint64_t M)
 {
-    uint64_t M = B(stdc_bit_width(count) / 2);
-    uint64_t K = 2 * stdc_bit_ceil((count + M - 1) / M);
-    M = (count / K) + 1;
-
     uint64_t Q;
     uint64_t n;
     if(K < 64)
@@ -2995,7 +2995,6 @@ ssm_params_t ssm_get_params(uint64_t count)
         n = (K * Q / 64) + 1;
     }
     assert(64 * (n - 1) % K == 0);
-    assert(n > 2 * M);
 
     uint64_t moduli = (n - 1) & 7;
     if(moduli && ssm_pad_is_needed(n, moduli))
@@ -3017,6 +3016,19 @@ ssm_params_t ssm_get_params(uint64_t count)
 // NOLINTEND(readability-magic-numbers)
 
 // NOLINTBEGIN(readability-magic-numbers)
+ssm_params_t ssm_get_params(uint64_t count)
+{
+    uint64_t M = B(stdc_bit_width(count) / 2);
+    uint64_t K = 2 * stdc_bit_ceil((count + M - 1) / M);
+    M = (count / K) + 1;
+
+    ssm_params_t p = ssm_finish_params(count, K, M);
+    assert(p.n > 2 * M);
+    return p;
+}
+// NOLINTEND(readability-magic-numbers)
+
+// NOLINTBEGIN(readability-magic-numbers)
 ssm_params_t ssm_get_params_wrap(uint64_t n)
 {
     uint64_t K1 = 2 * B(stdc_bit_width(n-1) / 2);
@@ -3024,38 +3036,8 @@ ssm_params_t ssm_get_params_wrap(uint64_t n)
     uint64_t K = K1 < K2 ? K1 : K2;
     uint64_t M = (n - 1) / K;
 
-    uint64_t Q;
-    uint64_t _n;
-    if(K < 64)
-    {
-        uint64_t P = (2 * M) + 1;
-        Q = 64 * P / K;
-        _n = P + 1;
-    }
-    else
-    {
-        Q = (128 * M / K) + 1;
-        _n = (K * Q / 64) + 1;
-    }
-    assert(64 * (_n - 1) % K == 0);
-
-    uint64_t moduli = (_n - 1) & 7;
-    if(moduli && ssm_pad_is_needed(_n, moduli))
-    {
-        _n += 8 - moduli;
-        Q = 64 * (_n - 1) / K;
-    }
-    assert(64 * (_n - 1) % K == 0);
     assert(n == (M * K) + 1);
-
-    return (ssm_params_t)
-    {
-        .count = n,
-        .M = M,
-        .K = K,
-        .Q = Q,
-        .n = _n
-    };
+    return ssm_finish_params(n, K, M);
 }
 // NOLINTEND(readability-magic-numbers)
 
