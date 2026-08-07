@@ -1050,6 +1050,23 @@ static void num_mul_uint_buffer(num_p num_res, num_p num, uint64_t value) // TOD
     "adox %[low], %[" #CARRY "]                                         \n\t" /* low += carry + OF                          */\
     "mov [%[dest] + %[" #POS "] + " #OFF "], %[low]                     \n\t" /* *(dest + POS + OFF) = low                  */\
 
+// The add chain rides OF (via adox); the subtract is reframed as a + ~b + carry_in (two's
+// complement) so it can ride CF via adcx instead of sbb. A plain sbb sets OF too (like any
+// ordinary ALU op, it is not carry-chain-only the way adcx/adox are), which would stomp the
+// adox chain on every single word. not doesn't touch flags at all, so it is free to sit
+// between them. dec/sub/cmp/test also clobber OF, which is why the loop below drives its
+// counter through rcx with lea/jrcxz/jmp instead: those touch neither CF nor OF.
+#define BUTTERFLY_STEP(OFF)                                                          \
+    "mov %[a], [%[dest_1] + " #OFF "]                   \n\t" /* a = *(dest_1 + OFF) */\
+    "mov %[b], [%[dest_2] + " #OFF "]                   \n\t" /* b = *(dest_2 + OFF) */\
+    "mov %[nb], %[b]                                    \n\t" /* nb = b              */\
+    "not %[nb]                                          \n\t" /* nb = ~b             */\
+    "mov %[s], %[a]                                     \n\t" /* s = a               */\
+    "adox %[s], %[b]                                    \n\t" /* s = a + b + OF      */\
+    "adcx %[a], %[nb]                                   \n\t" /* a = a + ~b + CF     */\
+    "mov [%[dest_1] + " #OFF "], %[s]                   \n\t" /* *(dest_1 + OFF) = s */\
+    "mov [%[dest_2] + " #OFF "], %[a]                   \n\t" /* *(dest_2 + OFF) = a */\
+
 #endif
 
 // KEEPS NUM_1 NUM_2
@@ -1943,21 +1960,15 @@ void num_ssm_add_mod_immed(
     uint64_t reg_1, reg_2;
     uint64_t j = n;
     uint64_t pos = 0;
+    uint64_t rem = n & 7;
 
     __asm__ __volatile__ (
         ".intel_syntax noprefix                         \n\t"
 
         "shr %[j], 3                                    \n\t" // j /= 8
         "xor %[pos], %[pos]                             \n\t" // pos = 0 (and inherently clears CF)
-        "test %[j], %[j]                                \n\t" // (test also leaves CF clear)
-        "jz loop_add_tail%=                             \n\t"
-
-        // The AArch64 blocks guard their loops with cbz; the unrolled bodies here are
-        // do-while, so without the test above an n under 8 wrapped j to UINT64_MAX and
-        // ran 2^64 passes over the array. Every ssm caller passes n = 8k + 1 with k >= 1,
-        // so the branch is never taken in practice, but it costs one fused compare and
-        // makes the kernels total on their own. Jumping to the trailing step is also the
-        // right answer for n == 1: that single step is then the whole operation.
+        "test %[j], %[j]                                \n\t" // no borrow chain live yet: free to disturb CF here
+        "jz add_tail_setup%=                            \n\t"
 
         "loop_add_begin%=:                              \n\t" // LOOP_ADD_BEGIN
 
@@ -1974,9 +1985,23 @@ void num_ssm_add_mod_immed(
         "dec %[j]                                       \n\t" // j-- (dec does not modify CF)
         "jnz loop_add_begin%=                           \n\t"
 
-        "loop_add_tail%=:                               \n\t"
+        // n no longer has to be 8k + 1 (a leaf's coefficients may go unpadded), so the
+        // single trailing step above is now a genuine 0-7 word tail. Its entry check goes
+        // through rcx/jrcxz rather than test/jz: CF may already hold a real carry from the
+        // block above, and test would clear it.
+        "add_tail_setup%=:                              \n\t"
+        "mov rcx, %[rem]                                \n\t"
+        "jrcxz add_tail_skip%=                          \n\t"
+
+        "add_tail_begin%=:                               \n\t"
 
         ADD_CLASSIC_STEP(0, reg_1)
+
+        "lea %[pos], [%[pos] + 8]                       \n\t"
+        "dec rcx                                        \n\t" // dec leaves CF alone
+        "jnz add_tail_begin%=                            \n\t"
+
+        "add_tail_skip%=:                               \n\t"
 
         ".att_syntax prefix                             \n\t"
         // out
@@ -1986,9 +2011,11 @@ void num_ssm_add_mod_immed(
             [reg_2] "=&r" (reg_2)
         // in
         :   [dest] "r" (dest),
-            [src_2] "r" (src_2)
+            [src_2] "r" (src_2),
+            [rem] "r" (rem)
         // clobber
-        :   "cc",
+        :   "rcx",
+            "cc",
             "memory"
     );
 
@@ -2088,14 +2115,15 @@ void num_ssm_sub_mod(
     uint64_t reg_1, reg_2;
     uint64_t j = n;
     uint64_t pos = 0;
+    uint64_t rem = n & 7;
 
     __asm__ __volatile__ (
         ".intel_syntax noprefix                         \n\t"
 
         "shr %[j], 3                                    \n\t" // j /= 8
         "xor %[pos], %[pos]                             \n\t" // pos = 0 (and inherently clears CF)
-        "test %[j], %[j]                                \n\t" // guard the do-while, see num_ssm_add_mod_immed
-        "jz loop_sub_tail%=                             \n\t"
+        "test %[j], %[j]                                \n\t" // no borrow chain live yet: free to disturb CF here
+        "jz sub_tail_setup%=                            \n\t"
 
         "loop_sub_begin%=:                              \n\t" // LOOP_SUB_BEGIN
 
@@ -2112,9 +2140,22 @@ void num_ssm_sub_mod(
         "dec %[j]                                       \n\t" // j-- (dec does not modify CF)
         "jnz loop_sub_begin%=                           \n\t"
 
-        "loop_sub_tail%=:                               \n\t"
+        // n no longer has to be 8k + 1, so the single trailing step above is now a genuine
+        // 0-7 word tail; see num_ssm_add_mod_immed for why its entry check needs jrcxz
+        // instead of test/jz.
+        "sub_tail_setup%=:                              \n\t"
+        "mov rcx, %[rem]                                \n\t"
+        "jrcxz sub_tail_skip%=                          \n\t"
+
+        "sub_tail_begin%=:                               \n\t"
 
         SUB_CLASSIC_STEP(0, src_1, reg_1)
+
+        "lea %[pos], [%[pos] + 8]                       \n\t"
+        "dec rcx                                        \n\t" // dec leaves CF alone
+        "jnz sub_tail_begin%=                            \n\t"
+
+        "sub_tail_skip%=:                               \n\t"
 
         ".att_syntax prefix                             \n\t"
         // out
@@ -2125,9 +2166,11 @@ void num_ssm_sub_mod(
         // in
         :   [dest] "r" (dest),
             [src_1] "r" (src_1),
-            [src_2] "r" (src_2)
+            [src_2] "r" (src_2),
+            [rem] "r" (rem)
         // clobber
-        :   "cc",
+        :   "rcx",
+            "cc",
             "memory"
     );
 
@@ -2226,14 +2269,15 @@ static void num_ssm_sub_mod_immed(
     uint64_t reg_1, reg_2;
     uint64_t j = n;
     uint64_t pos = 0;
+    uint64_t rem = n & 7;
 
     __asm__ __volatile__ (
         ".intel_syntax noprefix                         \n\t"
 
         "shr %[j], 3                                    \n\t" // j /= 8
         "xor %[pos], %[pos]                             \n\t" // pos = 0 (and inherently clears CF)
-        "test %[j], %[j]                                \n\t" // guard the do-while, see num_ssm_add_mod_immed
-        "jz loop_sub_tail%=                             \n\t"
+        "test %[j], %[j]                                \n\t" // no borrow chain live yet: free to disturb CF here
+        "jz sub_tail_setup%=                            \n\t"
 
         "loop_sub_begin%=:                              \n\t" // LOOP_SUB_BEGIN
 
@@ -2250,9 +2294,22 @@ static void num_ssm_sub_mod_immed(
         "dec %[j]                                       \n\t" // j-- (dec does not modify CF)
         "jnz loop_sub_begin%=                           \n\t"
 
-        "loop_sub_tail%=:                               \n\t"
+        // n no longer has to be 8k + 1, so the single trailing step above is now a genuine
+        // 0-7 word tail; see num_ssm_add_mod_immed for why its entry check needs jrcxz
+        // instead of test/jz.
+        "sub_tail_setup%=:                              \n\t"
+        "mov rcx, %[rem]                                \n\t"
+        "jrcxz sub_tail_skip%=                          \n\t"
+
+        "sub_tail_begin%=:                               \n\t"
 
         SUB_CLASSIC_STEP(0, dest, reg_1)
+
+        "lea %[pos], [%[pos] + 8]                       \n\t"
+        "dec rcx                                        \n\t" // dec leaves CF alone
+        "jnz sub_tail_begin%=                            \n\t"
+
+        "sub_tail_skip%=:                               \n\t"
 
         ".att_syntax prefix                             \n\t"
         // out
@@ -2262,9 +2319,11 @@ static void num_ssm_sub_mod_immed(
             [reg_2] "=&r" (reg_2)
         // in
         :   [dest] "r" (dest),
-            [src_2] "r" (src_2)
+            [src_2] "r" (src_2),
+            [rem] "r" (rem)
         // clobber
-        :   "cc",
+        :   "rcx",
+            "cc",
             "memory"
     );
 
@@ -2362,6 +2421,7 @@ void num_ssm_opposite(num_p num_fft, uint64_t chunk_pos, uint64_t n)
     uint64_t reg_1, reg_2;
     uint64_t j = n;
     uint64_t pos = 0;
+    uint64_t rem = n & 7;
 
     __asm__ __volatile__ (
         ".intel_syntax noprefix                         \n\t"
@@ -2371,8 +2431,8 @@ void num_ssm_opposite(num_p num_fft, uint64_t chunk_pos, uint64_t n)
 
         "shr %[j], 3                                    \n\t" // j /= 8
         "xor %[pos], %[pos]                             \n\t" // pos = 0 (and inherently clears CF)
-        "test %[j], %[j]                                \n\t" // guard the do-while, see num_ssm_add_mod_immed
-        "jz loop_opp_tail%=                             \n\t"
+        "test %[j], %[j]                                \n\t" // no borrow chain live yet: free to disturb CF here
+        "jz opp_tail_setup%=                            \n\t"
 
         "loop_opp_begin%=:                              \n\t" // LOOP_OPP_BEGIN
 
@@ -2389,9 +2449,27 @@ void num_ssm_opposite(num_p num_fft, uint64_t chunk_pos, uint64_t n)
         "dec %[j]                                       \n\t" // j-- (dec does not modify CF)
         "jnz loop_opp_begin%=                           \n\t"
 
-        "loop_opp_tail%=:                               \n\t"
+        // n no longer has to be 8k + 1, so the single trailing step above is now a genuine
+        // 0-7 word tail; see num_ssm_add_mod_immed for why its entry check needs jrcxz
+        // instead of test/jz. reg_1 is reused unchanged: OPPOSITE_STEP always resets its
+        // own register to 0 right after using it, and reg_1 is used an equal number of
+        // times as reg_2 in every full 8 word block, so it is already back to 0 by the
+        // time a tail follows a block — exactly the "0 - dest[i]" every non-first word
+        // needs. When there was no block at all (j == 0), reg_1 is still its untouched
+        // initial 1, which is exactly what a tail starting at word 0 needs instead.
+        "opp_tail_setup%=:                              \n\t"
+        "mov rcx, %[rem]                                \n\t"
+        "jrcxz opp_tail_skip%=                          \n\t"
+
+        "opp_tail_begin%=:                               \n\t"
 
         OPPOSITE_STEP(0, reg_1)
+
+        "lea %[pos], [%[pos] + 8]                       \n\t"
+        "dec rcx                                        \n\t" // dec leaves CF alone
+        "jnz opp_tail_begin%=                            \n\t"
+
+        "opp_tail_skip%=:                               \n\t"
 
         ".att_syntax prefix                             \n\t"
         // out
@@ -2400,9 +2478,11 @@ void num_ssm_opposite(num_p num_fft, uint64_t chunk_pos, uint64_t n)
             [reg_1] "=&r" (reg_1),
             [reg_2] "=&r" (reg_2)
         // in
-        :   [dest] "r" (dest)
+        :   [dest] "r" (dest),
+            [rem] "r" (rem)
         // clobber
-        :   "cc",
+        :   "rcx",
+            "cc",
             "memory"
     );
 
@@ -2826,16 +2906,13 @@ static void num_ssm_butterfly(
     CLU_HANDLER_IS_SAFE(num_fft)
     assert(num_aux && num_fft)
 
-#ifdef NUM_ASM_AARCH64
+#if defined(NUM_ASM_X86_64) || defined(NUM_ASM_AARCH64)
 
     (void)num_aux;
 
     uint64_t * restrict dest_1 = &num_fft->chunk[pos_1];
     uint64_t * restrict dest_2 = &num_fft->chunk[pos_2];
 
-    uint64_t a_0, a_1, a_2, a_3, a_4, a_5, a_6, a_7;
-    uint64_t b_0, b_1, b_2, b_3, b_4, b_5, b_6, b_7;
-    uint64_t s_0, s_1, s_2, s_3;
     constexpr uint64_t unroll_log_2 = 3;
     constexpr uint64_t unroll_mask = 7;
 
@@ -2843,6 +2920,94 @@ static void num_ssm_butterfly(
     uint64_t tail = n & unroll_mask;
     uint64_t carry = 0;
     uint64_t borrow = 0;
+
+#endif
+
+#ifdef NUM_ASM_X86_64
+
+    uint64_t a, b, nb, s;
+
+    __asm__ __volatile__ (
+        ".intel_syntax noprefix                         \n\t"
+
+        "xor %k[carry], %k[carry]                       \n\t" // carry = 0, and CF = 0, OF = 0
+        "xor %k[borrow], %k[borrow]                     \n\t" // borrow = 0
+        "stc                                             \n\t" // CF = 1: the +1 of a - b == a + ~b + 1, fed in once as the LSB's carry-in (stc leaves OF alone)
+
+        // CF is live from here on (it carries the +1 above into the first real word), so the
+        // zero-check below cannot use test/jz the way the other x86 kernels in this file do:
+        // test would zero CF before a single word has been processed. jrcxz/loop are flag-safe
+        // but only encode an 8 bit displacement, too short to reach across an 8-wide unrolled
+        // block, so every one of them here is paired with a plain jmp (full 32 bit range,
+        // flag-safe) as a trampoline.
+        "mov rcx, %[j]                                  \n\t" // rcx = j
+        "jrcxz loop_pre_skip%=                          \n\t" // short jump to a nearby trampoline
+        "jmp loop_begin%=                               \n\t" // near jump, taken whenever j != 0
+
+        "loop_pre_skip%=:                                \n\t"
+        "jmp tail_setup%=                               \n\t" // long jump, only when j == 0
+
+        "loop_begin%=:                                  \n\t" // LOOP_BUTTERFLY_BEGIN
+
+        BUTTERFLY_STEP( 0)
+        BUTTERFLY_STEP( 8)
+        BUTTERFLY_STEP(16)
+        BUTTERFLY_STEP(24)
+        BUTTERFLY_STEP(32)
+        BUTTERFLY_STEP(40)
+        BUTTERFLY_STEP(48)
+        BUTTERFLY_STEP(56)
+
+        "lea %[dest_1], [%[dest_1] + 64]                \n\t" // dest_1 += 64 (lea leaves CF, OF alone)
+        "lea %[dest_2], [%[dest_2] + 64]                \n\t" // dest_2 += 64
+        "lea rcx, [rcx - 1]                             \n\t" // rcx-- (lea leaves CF, OF alone)
+        "jrcxz loop_exit%=                              \n\t" // short jump to a nearby trampoline
+        "jmp loop_begin%=                               \n\t" // long jump back, taken every iteration but the last
+        "loop_exit%=:                                   \n\t"
+        "jmp tail_setup%=                               \n\t"
+
+        "tail_setup%=:                                  \n\t"
+        "mov rcx, %[tail]                                \n\t" // rcx = tail
+        "jrcxz tail_skip%=                              \n\t"
+
+        "tail_begin%=:                                  \n\t" // LOOP_BUTTERFLY_TAIL_BEGIN
+
+        BUTTERFLY_STEP(0)
+
+        "lea %[dest_1], [%[dest_1] + 8]                 \n\t" // dest_1 += 8
+        "lea %[dest_2], [%[dest_2] + 8]                 \n\t" // dest_2 += 8
+        "lea rcx, [rcx - 1]                             \n\t" // rcx--
+        "jrcxz tail_skip%=                              \n\t"
+        "jmp tail_begin%=                               \n\t"
+
+        "tail_skip%=:                                   \n\t"
+        "seto %b[carry]                                 \n\t" // carry = OF
+        "setnc %b[borrow]                                \n\t" // borrow = !CF: a + ~b + 1 carries out (CF = 1) exactly when a >= b, i.e. no borrow
+
+        ".att_syntax prefix                             \n\t"
+        // out
+        :   [dest_1] "+r" (dest_1),
+            [dest_2] "+r" (dest_2),
+            [a] "=&r" (a),
+            [b] "=&r" (b),
+            [nb] "=&r" (nb),
+            [s] "=&r" (s),
+            [carry] "=&r" (carry),
+            [borrow] "=&r" (borrow)
+        // in
+        :   [j] "r" (j),
+            [tail] "r" (tail)
+        // clobber
+        :   "rcx",
+            "cc",
+            "memory"
+    );
+
+#elif defined(NUM_ASM_AARCH64)
+
+    uint64_t a_0, a_1, a_2, a_3, a_4, a_5, a_6, a_7;
+    uint64_t b_0, b_1, b_2, b_3, b_4, b_5, b_6, b_7;
+    uint64_t s_0, s_1, s_2, s_3;
 
     __asm__ __volatile__ (
         "cbz %[j], 2f                                   \n\t"
@@ -2908,6 +3073,10 @@ static void num_ssm_butterfly(
         :   "cc",
             "memory"
     );
+
+#endif
+
+#if defined(NUM_ASM_X86_64) || defined(NUM_ASM_AARCH64)
 
     // A - B is negative about half the time, so testing the borrow costs a coin flip the
     // branch predictor cannot win. Adding it unconditionally is two loads and two stores,
@@ -3053,28 +3222,20 @@ static bool ssm_is_recursive(uint64_t n)
     return (bool)((n > ssm_recursive_threshold) && (((n - 1) & (1 - n)) > 4));
 }
 
-// Padding n so that n - 1 is a multiple of 8 does two separate jobs.
+// Padding n so that n - 1 is a multiple of 8 does one job.
 //
-// The x86-64 kernels need it unconditionally: they are 8 wide with a single word remainder
-// step, so a count that is not a multiple of 8 is simply wrong for them.
+// A coefficient that will itself be multiplied by a nested transform needs it:
+// ssm_get_params_wrap picks K from the largest power of two dividing n - 1, so an n - 1
+// with a small power of two factor leaves ssm_is_recursive nothing to work with and
+// collapses the recursion into a schoolbook multiply of the whole span.
 //
-// A coefficient that will itself be multiplied by a nested transform also needs it, for a
-// different reason: ssm_get_params_wrap picks K from the largest power of two dividing
-// n - 1, so an n - 1 with a small power of two factor leaves ssm_is_recursive nothing to
-// work with and collapses the recursion into a schoolbook multiply of the whole span.
-//
-// A leaf coefficient needs neither. Every non x86 kernel has a real tail loop, and a leaf
-// is multiplied by num_ssm_mul_mod_span, which is happy with any count. Padding one is
-// pure loss: at the wrap level it turns n = 20 into n = 25, which widens every add,
-// subtract and rotate by a quarter and takes the pointwise multiply from 361 word products
-// to 576.
+// A leaf coefficient needs neither reason. Every kernel a leaf reaches — add, sub,
+// butterfly, rotate, and the pointwise multiply — carries a real 0-7 word tail on both
+// x86-64 and AArch64, so it is happy with any count. Padding one is pure loss: at the
+// wrap level it turns n = 20 into n = 25, which widens every add, subtract and rotate by
+// a quarter and takes the pointwise multiply from 361 word products to 576.
 static bool ssm_pad_is_needed(uint64_t n, uint64_t moduli)
 {
-#ifdef NUM_ASM_X86_64
-    (void)n;
-    (void)moduli;
-    return true;
-#else
     if(n > ssm_recursive_threshold)
     {
         return true;
@@ -3094,7 +3255,6 @@ static bool ssm_pad_is_needed(uint64_t n, uint64_t moduli)
     // midpoint the width is worth more than the tail, above it the tail wins.
     constexpr uint64_t tail_break_even = 4;
     return moduli > tail_break_even;
-#endif
 }
 
 // NOLINTBEGIN(readability-magic-numbers)
@@ -3201,19 +3361,8 @@ static void num_ssm_mul_mod_span(
     uint64_t * restrict src_1 = &num_1->chunk[pos];
     const uint64_t * restrict src_2 = &num_2->chunk[pos];
 
-    // Both bodies below are 8-wide do-while loops over count words with no remainder
-    // pass and no zero guard, so they are only correct for a count that is a non-zero
-    // multiple of 8. Every ssm_get_params / ssm_get_params_wrap result satisfies that,
-    // and num_mul_classic pays for the general case with a tail path and two skip
-    // branches; state the narrower contract here instead of silently relying on it.
     uint64_t count = n - 1;
-#ifdef NUM_ASM_X86_64
-    constexpr uint64_t unroll_mask = 7;
-    constexpr uint64_t unroll = 8;
-    assert(count >= unroll && (count & unroll_mask) == 0)
-#else
     assert(count >= 1)
-#endif
 
     if(src_1[count] == 1)
     {
@@ -3235,7 +3384,23 @@ static void num_ssm_mul_mod_span(
     uint64_t j;
     uint64_t i=count;
     uint64_t zero = 0;
+    uint64_t rem = count & 7;
 
+    // count no longer has to be a multiple of 8 (ssm_pad_is_needed may leave a leaf
+    // unpadded on x86 too), so each row's 8-wide block is followed by a 0-7 word tail
+    // that continues the exact same flag chains. Row 0 only carries a CF chain (adcx);
+    // rows 1.. carry both a CF chain (accumulation into pre-existing dest words) and an
+    // OF chain (this row's own mulx-high propagating into the next column). dec touches
+    // OF but not CF, which is why the per-column loop counters (j, and the tail's own
+    // rcx-based counter) are fine to decrement with plain dec — as long as, for the
+    // OF-carrying row, any pending OF is folded into a GPR first (the "adox ..., zero"
+    // line) so dec has nothing left to disturb.
+    //
+    // The tail-entry checks are different: by the time execution reaches them, CF may
+    // already hold a real running carry from the row's 8-wide block, so — unlike the j
+    // == 0 checks above, which run before a single word of the row exists — test/jz
+    // would clear it. jrcxz reads rcx without touching any flag, so that check (and only
+    // that one) goes through rcx instead.
     __asm__ __volatile__ (
         ".intel_syntax noprefix                         \n\t"
 
@@ -3244,6 +3409,8 @@ static void num_ssm_mul_mod_span(
         "mov rdx, [%[src_1]]                            \n\t" // D = *src_1
         "mov %[carry], 0                                \n\t" // carry = 0
         "xor %[_pos], %[_pos]                           \n\t" // _pos = 0
+        "test %[j], %[j]                                \n\t" // no flags carried yet: free to disturb CF/OF here
+        "jz row0_tail_setup%=                           \n\t"
 
         "loop_0_begin%=:                                \n\t" // LOOP_0_BEGIN
 
@@ -3256,16 +3423,32 @@ static void num_ssm_mul_mod_span(
         MUL_CLASSIC_STEP_ZERO(48, high, carry, _pos)
         MUL_CLASSIC_STEP_ZERO(56, carry, high, _pos)
 
-        "lea %[_pos], [%[_pos] + 64]                    \n\t" // _pos += 64
-        "dec %[j]                                       \n\t" // j--
+        "lea %[_pos], [%[_pos] + 64]                    \n\t" // _pos += 64 (lea leaves CF alone)
+        "dec %[j]                                       \n\t" // j-- (dec leaves CF alone; no OF chain in row 0)
         "jnz loop_0_begin%=                             \n\t"
 
+        "row0_tail_setup%=:                             \n\t"
+        "mov rcx, %[rem]                                \n\t" // rcx = rem
+        "jrcxz row0_tail_skip%=                         \n\t" // flag-safe: CF may be live here if the block above ran
+
+        "row0_tail_begin%=:                             \n\t" // LOOP_0_TAIL_BEGIN
+
+        "mulx %[high], %[low], [%[src_2] + %[_pos]]     \n\t" // (high, low) = MUL(D, *(src_2 + _pos))
+        "adcx %[low], %[carry]                          \n\t" // low += carry + CF
+        "mov [%[dest] + %[_pos]], %[low]                \n\t" // *(dest + _pos) = low
+        "mov %[carry], %[high]                          \n\t" // carry = high, ready for the next column
+        "lea %[_pos], [%[_pos] + 8]                     \n\t"
+        "dec rcx                                        \n\t" // dec leaves CF alone; nothing here reads OF
+        "jnz row0_tail_begin%=                          \n\t"
+
+        "row0_tail_skip%=:                              \n\t"
         "adcx %[carry], %[zero]                         \n\t" // carry += CF
         "mov [%[dest] + %[_pos]], %[carry]              \n\t" // *(dest + _pos) = carry
 
         "lea %[src_1], [%[src_1] + 8]                   \n\t" // src_1 += 8
         "lea %[dest], [%[dest] + 8]                     \n\t" // dest += 8
         "dec %[i]                                       \n\t" // i--
+        "jz done%=                                       \n\t" // count == 1: row 0 was the only row
 
         "loop_1_begin%=:                                \n\t"
 
@@ -3274,6 +3457,8 @@ static void num_ssm_mul_mod_span(
         "shr %[j], 3                                    \n\t" // j /= 8
         "mov %[carry], 0                                \n\t" // carry = 0
         "xor %[_pos], %[_pos]                           \n\t" // _pos = 0
+        "test %[j], %[j]                                \n\t" // no flags carried yet for this row: free to disturb CF/OF
+        "jz row_tail_setup%=                            \n\t"
 
         "loop_2_begin%=:                                \n\t"
 
@@ -3286,12 +3471,29 @@ static void num_ssm_mul_mod_span(
         MUL_CLASSIC_STEP(48, high, carry, src_2, _pos)
         MUL_CLASSIC_STEP(56, carry, high, src_2, _pos)
 
-        "adox %[carry], %[zero]                         \n\t" // carry += OF
+        "adox %[carry], %[zero]                         \n\t" // carry += OF (folded into a GPR before dec below can touch OF)
 
         "lea %[_pos], [%[_pos] + 64]                    \n\t" // _pos += 64
         "dec %[j]                                       \n\t" // j--
         "jnz loop_2_begin%=                             \n\t"
 
+        "row_tail_setup%=:                              \n\t"
+        "mov rcx, %[rem]                                \n\t" // rcx = rem (pending OF was already folded into carry above, or never raised if j == 0)
+        "jrcxz row_tail_skip%=                          \n\t" // flag-safe: CF may be live here if the block above ran
+
+        "row_tail_begin%=:                              \n\t" // LOOP_2_TAIL_BEGIN
+
+        "mulx %[high], %[low], [%[src_2] + %[_pos]]     \n\t" // (high, low) = MUL(D, *(src_2 + _pos))
+        "adcx %[low], [%[dest] + %[_pos]]               \n\t" // low += *(dest + _pos) + CF
+        "adox %[low], %[carry]                          \n\t" // low += carry + OF
+        "mov [%[dest] + %[_pos]], %[low]                \n\t" // *(dest + _pos) = low
+        "adox %[high], %[zero]                          \n\t" // high += 0 + OF: fold before dec touches OF
+        "mov %[carry], %[high]                          \n\t" // carry = high, ready for the next column
+        "lea %[_pos], [%[_pos] + 8]                     \n\t"
+        "dec rcx                                        \n\t" // dec leaves CF alone; OF was already folded above
+        "jnz row_tail_begin%=                           \n\t"
+
+        "row_tail_skip%=:                               \n\t"
         "adcx %[carry], %[zero]                         \n\t" // carry += CF
         "mov [%[dest] + %[_pos]], %[carry]              \n\t" // *(dest + _pos) = carry
 
@@ -3299,6 +3501,8 @@ static void num_ssm_mul_mod_span(
         "lea %[dest], [%[dest] + 8]                     \n\t" // dest += 8
         "dec %[i]                                       \n\t" // i--
         "jnz loop_1_begin%=                             \n\t"
+
+        "done%=:                                        \n\t"
 
         ".att_syntax prefix                             \n\t"
         // out
@@ -3313,11 +3517,13 @@ static void num_ssm_mul_mod_span(
             [dest] "+&r" (dest)
         // in
         :   [zero] "r" (zero),
-            [count] "r" (count)
+            [count] "r" (count),
+            [rem] "r" (rem)
         // clobber
         :   "cc",
             "memory",
-            "rdx"
+            "rdx",
+            "rcx"
     );
 
     dest = &num_aux->chunk[0];
@@ -3554,7 +3760,87 @@ static void num_ssm_sub_span_mod(
 
     uint128_t borrow = 0;
 
-#ifdef NUM_ASM_AARCH64
+#ifdef NUM_ASM_X86_64
+
+    // Same 8 wide sbb chain as num_ssm_sub_mod_immed's x86 kernel (SUB_CLASSIC_STEP, dest
+    // read as its own SRC_1), but over an arbitrary len rather than the 8k + 1 the full
+    // width kernels are guaranteed, so the tail loop earns its keep here. The borrow leaves
+    // in a register instead of being consumed by a normalize, because the caller still has
+    // to walk it up to the top word.
+    //
+    // Only one flag chain is live here (CF, via sbb) — unlike num_ssm_butterfly there is no
+    // adox to protect from sbb's OF side effect, so dec/jnz is safe for both loop counters.
+    // The one exception is the transition from the main block into the tail: if the main
+    // block ran, CF holds a real borrow that test/jz (used elsewhere in this file) would
+    // clear, so that specific check goes through jrcxz instead.
+    {
+        uint64_t reg_1, reg_2;
+        uint64_t j = len >> 3;
+        uint64_t tail = len & 7;
+        uint64_t run_off = 0;
+        uint64_t out;
+        uint64_t * dest_it = dest;
+        const uint64_t * src_it = src;
+
+        __asm__ __volatile__ (
+            ".intel_syntax noprefix                         \n\t"
+
+            "xor %k[pos], %k[pos]                           \n\t" // pos = 0, and CF = 0 (no incoming borrow for word 0)
+            "xor %k[out], %k[out]                           \n\t" // out = 0 (setc below only ever writes its low byte)
+            "test %[j], %[j]                                \n\t"
+            "jz tail_setup%=                                \n\t"
+
+            "loop_begin%=:                                  \n\t" // LOOP_SUB_BEGIN
+
+            SUB_CLASSIC_STEP( 0, dest, reg_1)
+            SUB_CLASSIC_STEP( 8, dest, reg_2)
+            SUB_CLASSIC_STEP(16, dest, reg_1)
+            SUB_CLASSIC_STEP(24, dest, reg_2)
+            SUB_CLASSIC_STEP(32, dest, reg_1)
+            SUB_CLASSIC_STEP(40, dest, reg_2)
+            SUB_CLASSIC_STEP(48, dest, reg_1)
+            SUB_CLASSIC_STEP(56, dest, reg_2)
+
+            "lea %[pos], [%[pos] + 64]                      \n\t" // pos += 64 (lea does not modify CF)
+            "dec %[j]                                       \n\t" // j-- (dec does not modify CF)
+            "jnz loop_begin%=                                \n\t"
+
+            "tail_setup%=:                                  \n\t"
+            "mov rcx, %[tail]                                \n\t" // rcx = tail
+            "jrcxz tail_skip%=                               \n\t"
+
+            "tail_begin%=:                                  \n\t" // LOOP_SUB_TAIL_BEGIN
+
+            SUB_CLASSIC_STEP(0, dest, reg_1)
+
+            "lea %[pos], [%[pos] + 8]                       \n\t"
+            "dec rcx                                         \n\t" // dec does not modify CF
+            "jnz tail_begin%=                                \n\t"
+
+            "tail_skip%=:                                    \n\t"
+            "setc %b[out]                                    \n\t" // out = CF (a genuine borrow occurred)
+
+            ".att_syntax prefix                             \n\t"
+            // out
+            :   [dest] "+r" (dest_it),
+                [src_2] "+r" (src_it),
+                [pos] "+&r" (run_off),
+                [j] "+&r" (j),
+                [out] "=&r" (out),
+                [reg_1] "=&r" (reg_1),
+                [reg_2] "=&r" (reg_2)
+            // in
+            :   [tail] "r" (tail)
+            // clobber
+            :   "rcx",
+                "cc",
+                "memory"
+        );
+
+        borrow = out;
+    }
+
+#elif defined(NUM_ASM_AARCH64)
 
     // Same 8 wide sbcs chain as num_ssm_sub_mod_immed, but over an arbitrary len rather
     // than the 8k + 1 the full width kernels are guaranteed, so the tail loop earns its
