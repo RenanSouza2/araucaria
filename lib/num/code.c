@@ -3339,6 +3339,68 @@ static void num_ssm_mul_mod_span(
     // two. The two products plus dest plus carry exceed 128 bits, so the carry is kept
     // as two words (c0 full width, c1 a single bit) rather than a uint128_t.
     uint64_t i = 1;
+    for(; i + 3 < count; i += 4)
+    {
+        uint64_t a = src_1[i];
+        uint64_t b = src_1[i + 1];
+        uint64_t c = src_1[i + 2];
+        uint64_t d = src_1[i + 3];
+
+        uint64_t c0 = 0;
+        uint64_t c1 = 0;
+        uint64_t prev_1 = 0; // src_2[j - 1], zero at j == 0
+        uint64_t prev_2 = 0; // src_2[j - 2], zero at j <= 1
+        uint64_t prev_3 = 0; // src_2[j - 3], zero at j <= 2
+
+        #pragma GCC unroll 8
+        for(uint64_t j = 0; j < count; j++)
+        {
+            uint64_t cur = src_2[j];
+            uint128_t p1 = MUL(a, cur);
+            uint128_t p2 = MUL(b, prev_1);
+            uint128_t p3 = MUL(c, prev_2);
+            uint128_t p4 = MUL(d, prev_3);
+            prev_3 = prev_2;
+            prev_2 = prev_1;
+            prev_1 = cur;
+
+            uint128_t sum = U128(dest[i + j]) + LOW(p1) + LOW(p2) + LOW(p3) + LOW(p4) + c0;
+            dest[i + j] = LOW(sum);
+
+            uint128_t acc = U128(HIGH(sum)) + HIGH(p1) + HIGH(p2) + HIGH(p3) + HIGH(p4) + c1;
+            c0 = LOW(acc);
+            c1 = HIGH(acc);
+        }
+
+        // the four words past the row block are written for the first time here; prev_1 is
+        // src_2[count - 1], prev_2 is src_2[count - 2] and prev_3 is src_2[count - 3]
+        uint128_t q1 = MUL(b, prev_1);
+        uint128_t q2 = MUL(c, prev_2);
+        uint128_t q3 = MUL(d, prev_3);
+        uint128_t sum = U128(LOW(q1)) + LOW(q2) + LOW(q3) + c0;
+        dest[i + count] = LOW(sum);
+
+        uint128_t acc = U128(HIGH(sum)) + HIGH(q1) + HIGH(q2) + HIGH(q3) + c1;
+        c0 = LOW(acc);
+        c1 = HIGH(acc);
+
+        uint128_t r1 = MUL(c, prev_1);
+        uint128_t r2 = MUL(d, prev_2);
+        sum = U128(LOW(r1)) + LOW(r2) + c0;
+        dest[i + count + 1] = LOW(sum);
+
+        acc = U128(HIGH(sum)) + HIGH(r1) + HIGH(r2) + c1;
+        c0 = LOW(acc);
+        c1 = HIGH(acc);
+
+        uint128_t s1 = MUL(d, prev_1);
+        sum = U128(LOW(s1)) + c0;
+        dest[i + count + 2] = LOW(sum);
+        dest[i + count + 3] = LOW(U128(HIGH(sum)) + HIGH(s1) + c1);
+    }
+
+    // the 4 row loop can leave up to 3 rows; a single 3 row pass takes them before
+    // the one row fallback, which costs a dest load and store per product
     for(; i + 2 < count; i += 3)
     {
         uint64_t a = src_1[i];
