@@ -1029,11 +1029,6 @@ static void num_mul_uint_buffer(num_p num_res, num_p num, uint64_t value) // TOD
 
 #ifdef NUM_ASM_X86_64
 
-#define ADD_CLASSIC_STEP(OFF, REG)                                                                    \
-    "mov %[" #REG "], [%[src_2] + %[pos] + " #OFF "]    \n\t" /* REG  = *(src_2 + pos + OFF)        */\
-    "adcx %[" #REG "], [%[dest] + %[pos] + " #OFF "]    \n\t" /* REG += *(dest + pos + OFF) + CF    */\
-    "mov [%[dest] + %[pos] + " #OFF "], %[" #REG "]     \n\t" /* *(dest + pos + OFF) = REG          */\
-
 #define SUB_CLASSIC_STEP(OFF, SRC_1, REG)                                                                 \
     "mov %[" #REG "], [%[" #SRC_1"] + %[pos] + " #OFF "]    \n\t" /* REG  = *(SRC_1 + pos + OFF)        */\
     "sbb %[" #REG "], [%[src_2] + %[pos] + " #OFF "]        \n\t" /* REG -= *(src_2 + pos + OFF) + CF   */\
@@ -1865,18 +1860,6 @@ static void num_ssm_denormalize(num_p num_fft, uint64_t pos, uint64_t n)
 // roughly a third of the instructions. ldp / stp / add / sub leave the carry flag alone,
 // which is what lets the adcs chain span the whole unrolled body.
 
-#define ADD_MOD_STEP_4(OFF_0, OFF_1)                                                                      \
-    "ldp %[a_0], %[a_1], [%[dest], #" #OFF_0 "]     \n\t" /* (a_0, a_1)  = *(dest + OFF_0)             */  \
-    "ldp %[a_2], %[a_3], [%[dest], #" #OFF_1 "]     \n\t" /* (a_2, a_3)  = *(dest + OFF_1)             */  \
-    "ldp %[b_0], %[b_1], [%[src_2], #" #OFF_0 "]    \n\t" /* (b_0, b_1)  = *(src_2 + OFF_0)            */  \
-    "ldp %[b_2], %[b_3], [%[src_2], #" #OFF_1 "]    \n\t" /* (b_2, b_3)  = *(src_2 + OFF_1)            */  \
-    "adcs %[a_0], %[a_0], %[b_0]                    \n\t" /* a_0 += b_0 + CF                           */  \
-    "adcs %[a_1], %[a_1], %[b_1]                    \n\t" /* a_1 += b_1 + CF                           */  \
-    "adcs %[a_2], %[a_2], %[b_2]                    \n\t" /* a_2 += b_2 + CF                           */  \
-    "adcs %[a_3], %[a_3], %[b_3]                    \n\t" /* a_3 += b_3 + CF                           */  \
-    "stp %[a_0], %[a_1], [%[dest], #" #OFF_0 "]     \n\t" /* *(dest + OFF_0) = (a_0, a_1)              */  \
-    "stp %[a_2], %[a_3], [%[dest], #" #OFF_1 "]     \n\t" /* *(dest + OFF_1) = (a_2, a_3)              */
-
 #define SUB_MOD_STEP_4(SRC_1, OFF_0, OFF_1)                                                                    \
     "ldp %[a_0], %[a_1], [%[" #SRC_1 "], #" #OFF_0 "]   \n\t" /* (a_0, a_1)  = *(SRC_1 + OFF_0)            */  \
     "ldp %[a_2], %[a_3], [%[" #SRC_1 "], #" #OFF_1 "]   \n\t" /* (a_2, a_3)  = *(SRC_1 + OFF_1)            */  \
@@ -1888,16 +1871,6 @@ static void num_ssm_denormalize(num_p num_fft, uint64_t pos, uint64_t n)
     "sbcs %[a_3], %[a_3], %[b_3]                        \n\t" /* a_3 -= b_3 + (1 - CF)                     */  \
     "stp %[a_0], %[a_1], [%[dest], #" #OFF_0 "]         \n\t" /* *(dest + OFF_0) = (a_0, a_1)              */  \
     "stp %[a_2], %[a_3], [%[dest], #" #OFF_1 "]         \n\t" /* *(dest + OFF_1) = (a_2, a_3)              */
-
-#define OPPOSITE_STEP_4(OFF_0, OFF_1)                                                                     \
-    "ldp %[a_0], %[a_1], [%[dest], #" #OFF_0 "]     \n\t" /* (a_0, a_1)  = *(dest + OFF_0)             */  \
-    "ldp %[a_2], %[a_3], [%[dest], #" #OFF_1 "]     \n\t" /* (a_2, a_3)  = *(dest + OFF_1)             */  \
-    "sbcs %[a_0], xzr, %[a_0]                       \n\t" /* a_0 = 0 - a_0 - (1 - CF)                  */  \
-    "sbcs %[a_1], xzr, %[a_1]                       \n\t" /* a_1 = 0 - a_1 - (1 - CF)                  */  \
-    "sbcs %[a_2], xzr, %[a_2]                       \n\t" /* a_2 = 0 - a_2 - (1 - CF)                  */  \
-    "sbcs %[a_3], xzr, %[a_3]                       \n\t" /* a_3 = 0 - a_3 - (1 - CF)                  */  \
-    "stp %[a_0], %[a_1], [%[dest], #" #OFF_0 "]     \n\t" /* *(dest + OFF_0) = (a_0, a_1)              */  \
-    "stp %[a_2], %[a_3], [%[dest], #" #OFF_1 "]     \n\t" /* *(dest + OFF_1) = (a_2, a_3)              */
 
 // Eight words per pass. The four flag shuffling instructions are per pass, not per word,
 // so doubling the block halves them; stp leaves NZCV alone, which is what lets the sum
@@ -1955,129 +1928,11 @@ void num_ssm_add_mod_immed(
     uint64_t * restrict dest = &num_fft_1->chunk[pos_1];
     const uint64_t * restrict src_2 = &num_fft_2->chunk[pos_2];
 
-#ifdef NUM_ASM_X86_64
-
-    uint64_t reg_1, reg_2;
-    uint64_t j = n;
-    uint64_t pos = 0;
-    uint64_t rem = n & 7;
-
-    __asm__ __volatile__ (
-        ".intel_syntax noprefix                         \n\t"
-
-        "shr %[j], 3                                    \n\t" // j /= 8
-        "xor %[pos], %[pos]                             \n\t" // pos = 0 (and inherently clears CF)
-        "test %[j], %[j]                                \n\t" // no borrow chain live yet: free to disturb CF here
-        "jz add_tail_setup%=                            \n\t"
-
-        "loop_add_begin%=:                              \n\t" // LOOP_ADD_BEGIN
-
-        ADD_CLASSIC_STEP( 0, reg_1)
-        ADD_CLASSIC_STEP( 8, reg_2)
-        ADD_CLASSIC_STEP(16, reg_1)
-        ADD_CLASSIC_STEP(24, reg_2)
-        ADD_CLASSIC_STEP(32, reg_1)
-        ADD_CLASSIC_STEP(40, reg_2)
-        ADD_CLASSIC_STEP(48, reg_1)
-        ADD_CLASSIC_STEP(56, reg_2)
-
-        "lea %[pos], [%[pos] + 64]                      \n\t" // pos += 64 (lea does not modify CF)
-        "dec %[j]                                       \n\t" // j-- (dec does not modify CF)
-        "jnz loop_add_begin%=                           \n\t"
-
-        // n no longer has to be 8k + 1 (a leaf's coefficients may go unpadded), so the
-        // single trailing step above is now a genuine 0-7 word tail. Its entry check goes
-        // through rcx/jrcxz rather than test/jz: CF may already hold a real carry from the
-        // block above, and test would clear it.
-        "add_tail_setup%=:                              \n\t"
-        "mov rcx, %[rem]                                \n\t"
-        "jrcxz add_tail_skip%=                          \n\t"
-
-        "add_tail_begin%=:                               \n\t"
-
-        ADD_CLASSIC_STEP(0, reg_1)
-
-        "lea %[pos], [%[pos] + 8]                       \n\t"
-        "dec rcx                                        \n\t" // dec leaves CF alone
-        "jnz add_tail_begin%=                            \n\t"
-
-        "add_tail_skip%=:                               \n\t"
-
-        ".att_syntax prefix                             \n\t"
-        // out
-        :   [pos] "+&r" (pos),
-            [j] "+&r" (j),
-            [reg_1] "=&r" (reg_1),
-            [reg_2] "=&r" (reg_2)
-        // in
-        :   [dest] "r" (dest),
-            [src_2] "r" (src_2),
-            [rem] "r" (rem)
-        // clobber
-        :   "rcx",
-            "cc",
-            "memory"
-    );
-
-#elif defined(NUM_ASM_AARCH64)
-
-    uint64_t a_0, a_1, a_2, a_3;
-    uint64_t b_0, b_1, b_2, b_3;
-    constexpr uint64_t unroll_log_2 = 3;
-    constexpr uint64_t unroll_mask = 7;
-
-    uint64_t j = n >> unroll_log_2;
-    uint64_t tail = n & unroll_mask;
-
-    __asm__ __volatile__ (
-        "adds xzr, xzr, xzr                             \n\t" // CF = 0
-        "cbz %[j], 2f                                   \n\t"
-
-        "1:                                             \n\t" // LOOP_ADD_BEGIN
-
-        ADD_MOD_STEP_4( 0, 16)
-        ADD_MOD_STEP_4(32, 48)
-
-        "add %[dest], %[dest], #64                      \n\t" // dest += 64 (add does not modify CF)
-        "add %[src_2], %[src_2], #64                    \n\t" // src_2 += 64
-        "sub %[j], %[j], #1                             \n\t" // j-- (sub does not modify CF)
-        "cbnz %[j], 1b                                  \n\t"
-
-        "2:                                             \n\t"
-        "cbz %[tail], 4f                                \n\t"
-
-        "3:                                             \n\t" // LOOP_ADD_TAIL_BEGIN
-
-        "ldr %[a_0], [%[dest]]                          \n\t" // a_0 = *dest
-        "ldr %[b_0], [%[src_2]], #8                     \n\t" // b_0 = *src_2, then src_2 += 8
-        "adcs %[a_0], %[a_0], %[b_0]                    \n\t" // a_0 += b_0 + CF
-        "str %[a_0], [%[dest]], #8                      \n\t" // *dest = a_0, then dest += 8
-        "sub %[tail], %[tail], #1                       \n\t" // tail--
-        "cbnz %[tail], 3b                               \n\t"
-
-        "4:                                             \n\t"
-        // out
-        :   [dest] "+r" (dest),
-            [src_2] "+r" (src_2),
-            [j] "+&r" (j),
-            [tail] "+&r" (tail),
-            [a_0] "=&r" (a_0),
-            [a_1] "=&r" (a_1),
-            [a_2] "=&r" (a_2),
-            [a_3] "=&r" (a_3),
-            [b_0] "=&r" (b_0),
-            [b_1] "=&r" (b_1),
-            [b_2] "=&r" (b_2),
-            [b_3] "=&r" (b_3)
-        // in
-        :
-        // clobber
-        :   "cc",
-            "memory"
-    );
-
-#else
-
+    // Measured to be immaterial to end-to-end multiply time (well under 1% on a 200000
+    // word SSM multiply with both this and num_ssm_opposite forced onto this same path)
+    // despite the isolated per-call kernel being 1.2-1.6x faster: this function's own
+    // hot-path role is now covered by num_ssm_butterfly's fused add/sub, so it is left
+    // as portable C rather than carrying hand-written x86-64 / AArch64 kernels.
     uint128_t carry = 0;
     #pragma GCC unroll 8
     for(uint64_t i = 0; i < n; i++)
@@ -2086,8 +1941,6 @@ void num_ssm_add_mod_immed(
         dest[i] = LOW(carry);
         carry = HIGH(carry);
     }
-
-#endif
 
     num_ssm_normalize(num_fft_1, pos_1, n);
 }
@@ -2400,15 +2253,6 @@ static void num_ssm_sub_mod_immed(
     num_ssm_normalize(num_fft_1, pos_1, n);
 }
 
-#ifdef NUM_ASM_X86_64
-
-#define OPPOSITE_STEP(OFF, REG)                                                                     \
-    "sbb %[" #REG "], [%[dest] + %[pos] + " #OFF "]     \n\t" /* REG -= *(dest + pos + OFF) + CF */ \
-    "mov [%[dest] + %[pos] + " #OFF "], %[" #REG "]     \n\t" /* *(dest + pos + OFF) = REG       */ \
-    "mov %[" #REG "], 0                                 \n\t" /* REG = 0 (preserves CF)          */
-
-#endif
-
 void num_ssm_opposite(num_p num_fft, uint64_t chunk_pos, uint64_t n)
 {
     CLU_HANDLER_IS_SAFE(num_fft)
@@ -2416,137 +2260,12 @@ void num_ssm_opposite(num_p num_fft, uint64_t chunk_pos, uint64_t n)
 
     uint64_t * restrict dest = &num_fft->chunk[chunk_pos];
 
-#ifdef NUM_ASM_X86_64
-
-    uint64_t reg_1, reg_2;
-    uint64_t j = n;
-    uint64_t pos = 0;
-    uint64_t rem = n & 7;
-
-    __asm__ __volatile__ (
-        ".intel_syntax noprefix                         \n\t"
-
-        "mov %[reg_1], 1                                \n\t" // Init for the 1st limb (1 - dest[0])
-        "mov %[reg_2], 0                                \n\t" // Init for the 2nd limb (0 - dest[1])
-
-        "shr %[j], 3                                    \n\t" // j /= 8
-        "xor %[pos], %[pos]                             \n\t" // pos = 0 (and inherently clears CF)
-        "test %[j], %[j]                                \n\t" // no borrow chain live yet: free to disturb CF here
-        "jz opp_tail_setup%=                            \n\t"
-
-        "loop_opp_begin%=:                              \n\t" // LOOP_OPP_BEGIN
-
-        OPPOSITE_STEP( 0, reg_1)
-        OPPOSITE_STEP( 8, reg_2)
-        OPPOSITE_STEP(16, reg_1)
-        OPPOSITE_STEP(24, reg_2)
-        OPPOSITE_STEP(32, reg_1)
-        OPPOSITE_STEP(40, reg_2)
-        OPPOSITE_STEP(48, reg_1)
-        OPPOSITE_STEP(56, reg_2)
-
-        "lea %[pos], [%[pos] + 64]                      \n\t" // pos += 64 (lea does not modify CF)
-        "dec %[j]                                       \n\t" // j-- (dec does not modify CF)
-        "jnz loop_opp_begin%=                           \n\t"
-
-        // n no longer has to be 8k + 1, so the single trailing step above is now a genuine
-        // 0-7 word tail; see num_ssm_add_mod_immed for why its entry check needs jrcxz
-        // instead of test/jz. reg_1 is reused unchanged: OPPOSITE_STEP always resets its
-        // own register to 0 right after using it, and reg_1 is used an equal number of
-        // times as reg_2 in every full 8 word block, so it is already back to 0 by the
-        // time a tail follows a block — exactly the "0 - dest[i]" every non-first word
-        // needs. When there was no block at all (j == 0), reg_1 is still its untouched
-        // initial 1, which is exactly what a tail starting at word 0 needs instead.
-        "opp_tail_setup%=:                              \n\t"
-        "mov rcx, %[rem]                                \n\t"
-        "jrcxz opp_tail_skip%=                          \n\t"
-
-        "opp_tail_begin%=:                               \n\t"
-
-        OPPOSITE_STEP(0, reg_1)
-
-        "lea %[pos], [%[pos] + 8]                       \n\t"
-        "dec rcx                                        \n\t" // dec leaves CF alone
-        "jnz opp_tail_begin%=                            \n\t"
-
-        "opp_tail_skip%=:                               \n\t"
-
-        ".att_syntax prefix                             \n\t"
-        // out
-        :   [pos] "+&r" (pos),
-            [j] "+&r" (j),
-            [reg_1] "=&r" (reg_1),
-            [reg_2] "=&r" (reg_2)
-        // in
-        :   [dest] "r" (dest),
-            [rem] "r" (rem)
-        // clobber
-        :   "rcx",
-            "cc",
-            "memory"
-    );
-
-#elif defined(NUM_ASM_AARCH64)
-
-    uint64_t count = n;
-    uint64_t a_0, a_1, a_2, a_3;
-    uint64_t j, tail;
-
-    __asm__ __volatile__ (
-        "cbz %[count], 4f                               \n\t"
-
-        "mov %[a_0], #1                                 \n\t" // first limb is 1 - dest[0]
-        "cmp xzr, xzr                                   \n\t" // CF = 1 (means NO borrow)
-        "ldr %[a_1], [%[dest]]                          \n\t" // a_1 = *dest
-        "sbcs %[a_0], %[a_0], %[a_1]                    \n\t" // a_0 = 1 - a_1 - (1 - CF)
-        "str %[a_0], [%[dest]], #8                      \n\t" // *dest = a_0, then dest += 8
-
-        // the remaining limbs are 0 - dest[i]; n is 8k + 1 in every ssm caller, so this
-        // split leaves the unrolled body an exact fit and the tail loop unused
-        "sub %[count], %[count], #1                     \n\t" // count-- (sub does not modify CF)
-        "lsr %[j], %[count], #3                         \n\t" // j = count / 8 (lsr does not modify CF)
-        "and %[tail], %[count], #7                      \n\t" // tail = count % 8 (and does not modify CF)
-        "cbz %[j], 2f                                   \n\t"
-
-        "1:                                             \n\t" // LOOP_OPP_BEGIN
-
-        OPPOSITE_STEP_4( 0, 16)
-        OPPOSITE_STEP_4(32, 48)
-
-        "add %[dest], %[dest], #64                      \n\t" // dest += 64 (add does not modify CF)
-        "sub %[j], %[j], #1                             \n\t" // j--
-        "cbnz %[j], 1b                                  \n\t"
-
-        "2:                                             \n\t"
-        "cbz %[tail], 4f                                \n\t"
-
-        "3:                                             \n\t" // LOOP_OPP_TAIL_BEGIN
-
-        "ldr %[a_0], [%[dest]]                          \n\t" // a_0 = *dest
-        "sbcs %[a_0], xzr, %[a_0]                       \n\t" // a_0 = 0 - a_0 - (1 - CF)
-        "str %[a_0], [%[dest]], #8                      \n\t" // *dest = a_0, then dest += 8
-        "sub %[tail], %[tail], #1                       \n\t" // tail--
-        "cbnz %[tail], 3b                               \n\t"
-
-        "4:                                             \n\t"
-        // out
-        :   [dest] "+r" (dest),
-            [count] "+&r" (count),
-            [j] "=&r" (j),
-            [tail] "=&r" (tail),
-            [a_0] "=&r" (a_0),
-            [a_1] "=&r" (a_1),
-            [a_2] "=&r" (a_2),
-            [a_3] "=&r" (a_3)
-        // in
-        :
-        // clobber
-        :   "cc",
-            "memory"
-    );
-
-#else
-
+    // Measured to be immaterial to end-to-end multiply time (well under 1% on a 200000
+    // word SSM multiply with both this and num_ssm_add_mod_immed forced onto this same
+    // path), despite the isolated per-call kernel being 2.3-4.9x faster: opposite only
+    // fires on the "coefficient is exactly -1" shortcut, which barely triggers on typical
+    // inputs, so it is left as portable C rather than carrying hand-written x86-64 /
+    // AArch64 kernels.
     uint128_t borrow = U128(1) - dest[0];
     dest[0] = LOW(borrow);
     borrow = HIGH(borrow) & 1;
@@ -2558,8 +2277,6 @@ void num_ssm_opposite(num_p num_fft, uint64_t chunk_pos, uint64_t n)
         dest[i] = LOW(diff);
         borrow = HIGH(diff) & 1;
     }
-
-#endif
 
     num_fft->chunk[chunk_pos + n - 1]++;
     num_ssm_normalize(num_fft, chunk_pos, n);
