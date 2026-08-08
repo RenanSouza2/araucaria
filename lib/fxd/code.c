@@ -11,6 +11,7 @@
 #include "../num/internal.h"
 #include "../num/struct.h"
 #include "../sig/header.h"
+#include "../sig/internal.h"
 
 #define CLU_FXD_IS_SAFE(FXD) CLU_HANDLER_IS_SAFE((FXD).sig.num)
 

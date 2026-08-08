@@ -13,10 +13,12 @@ void araucaria_disk_config_set(araucaria_disk_config_p config);
 bool araucaria_disk_config_is_set();
 
 void num_display_dec(num_p num);
-void num_display_opts(num_p num, const char tag[], bool length, bool full);
 void num_display(num_p num);
 void num_display_tag(const char tag[], num_p num);
 void num_display_full(const char tag[], num_p num);
+
+num_p num_realloc_disk(CLU_PARAMS(num_p num));
+void num_display_opts(num_p num, const char tag[], bool length, bool full);
 
 num_p num_wrap(uint64_t value);
 num_p num_wrap_uint128(uint128_t value);

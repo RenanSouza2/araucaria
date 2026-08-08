@@ -7,6 +7,7 @@
 
 #include "../file/header.h"
 #include "../sig/header.h"
+#include "../sig/internal.h"
 #include "../num/header.h"
 #include "../num/struct.h"
 #include "header.h"

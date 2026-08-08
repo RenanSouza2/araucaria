@@ -2,6 +2,7 @@
 #include <stdlib.h>
 
 #include "debug.h"
+#include "internal.h"
 #include "../../mods/clu/header.h"
 #include "../../mods/macros/assert.h" // IWYU pragma: keep
 
