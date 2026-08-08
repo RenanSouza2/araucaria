@@ -6,6 +6,7 @@
 #include <sys/mman.h>
 
 #include "debug.h"
+#include "internal.h"
 #include "../../mods/macros/assert.h" // IWYU pragma: keep
 #include "../../mods/macros/stdbit.h" // IWYU pragma: keep
 #include "../../mods/macros/uint.h"
@@ -1045,12 +1046,6 @@ static void num_mul_uint_buffer(num_p num_res, num_p num, uint64_t value) // TOD
     "adox %[low], %[" #CARRY "]                                         \n\t" /* low += carry + OF                          */\
     "mov [%[dest] + %[" #POS "] + " #OFF "], %[low]                     \n\t" /* *(dest + POS + OFF) = low                  */\
 
-// The add chain rides OF (via adox); the subtract is reframed as a + ~b + carry_in (two's
-// complement) so it can ride CF via adcx instead of sbb. A plain sbb sets OF too (like any
-// ordinary ALU op, it is not carry-chain-only the way adcx/adox are), which would stomp the
-// adox chain on every single word. not doesn't touch flags at all, so it is free to sit
-// between them. dec/sub/cmp/test also clobber OF, which is why the loop below drives its
-// counter through rcx with lea/jrcxz/jmp instead: those touch neither CF nor OF.
 #define BUTTERFLY_STEP(OFF)                                                          \
     "mov %[a], [%[dest_1] + " #OFF "]                   \n\t" /* a = *(dest_1 + OFF) */\
     "mov %[b], [%[dest_2] + " #OFF "]                   \n\t" /* b = *(dest_2 + OFF) */\
@@ -1928,11 +1923,6 @@ void num_ssm_add_mod_immed(
     uint64_t * restrict dest = &num_fft_1->chunk[pos_1];
     const uint64_t * restrict src_2 = &num_fft_2->chunk[pos_2];
 
-    // Measured to be immaterial to end-to-end multiply time (well under 1% on a 200000
-    // word SSM multiply with both this and num_ssm_opposite forced onto this same path)
-    // despite the isolated per-call kernel being 1.2-1.6x faster: this function's own
-    // hot-path role is now covered by num_ssm_butterfly's fused add/sub, so it is left
-    // as portable C rather than carrying hand-written x86-64 / AArch64 kernels.
     uint128_t carry = 0;
     #pragma GCC unroll 8
     for(uint64_t i = 0; i < n; i++)
@@ -1993,9 +1983,6 @@ void num_ssm_sub_mod(
         "dec %[j]                                       \n\t" // j-- (dec does not modify CF)
         "jnz loop_sub_begin%=                           \n\t"
 
-        // n no longer has to be 8k + 1, so the single trailing step above is now a genuine
-        // 0-7 word tail; see num_ssm_add_mod_immed for why its entry check needs jrcxz
-        // instead of test/jz.
         "sub_tail_setup%=:                              \n\t"
         "mov rcx, %[rem]                                \n\t"
         "jrcxz sub_tail_skip%=                          \n\t"
@@ -2147,9 +2134,6 @@ static void num_ssm_sub_mod_immed(
         "dec %[j]                                       \n\t" // j-- (dec does not modify CF)
         "jnz loop_sub_begin%=                           \n\t"
 
-        // n no longer has to be 8k + 1, so the single trailing step above is now a genuine
-        // 0-7 word tail; see num_ssm_add_mod_immed for why its entry check needs jrcxz
-        // instead of test/jz.
         "sub_tail_setup%=:                              \n\t"
         "mov rcx, %[rem]                                \n\t"
         "jrcxz sub_tail_skip%=                          \n\t"
@@ -2260,12 +2244,6 @@ void num_ssm_opposite(num_p num_fft, uint64_t chunk_pos, uint64_t n)
 
     uint64_t * restrict dest = &num_fft->chunk[chunk_pos];
 
-    // Measured to be immaterial to end-to-end multiply time (well under 1% on a 200000
-    // word SSM multiply with both this and num_ssm_add_mod_immed forced onto this same
-    // path), despite the isolated per-call kernel being 2.3-4.9x faster: opposite only
-    // fires on the "coefficient is exactly -1" shortcut, which barely triggers on typical
-    // inputs, so it is left as portable C rather than carrying hand-written x86-64 /
-    // AArch64 kernels.
     uint128_t borrow = U128(1) - dest[0];
     dest[0] = LOW(borrow);
     borrow = HIGH(borrow) & 1;
@@ -2651,12 +2629,6 @@ static void num_ssm_butterfly(
         "xor %k[borrow], %k[borrow]                     \n\t" // borrow = 0
         "stc                                             \n\t" // CF = 1: the +1 of a - b == a + ~b + 1, fed in once as the LSB's carry-in (stc leaves OF alone)
 
-        // CF is live from here on (it carries the +1 above into the first real word), so the
-        // zero-check below cannot use test/jz the way the other x86 kernels in this file do:
-        // test would zero CF before a single word has been processed. jrcxz/loop are flag-safe
-        // but only encode an 8 bit displacement, too short to reach across an 8-wide unrolled
-        // block, so every one of them here is paired with a plain jmp (full 32 bit range,
-        // flag-safe) as a trampoline.
         "mov rcx, %[j]                                  \n\t" // rcx = j
         "jrcxz loop_pre_skip%=                          \n\t" // short jump to a nearby trampoline
         "jmp loop_begin%=                               \n\t" // near jump, taken whenever j != 0
@@ -2939,18 +2911,6 @@ static bool ssm_is_recursive(uint64_t n)
     return (bool)((n > ssm_recursive_threshold) && (((n - 1) & (1 - n)) > 4));
 }
 
-// Padding n so that n - 1 is a multiple of 8 does one job.
-//
-// A coefficient that will itself be multiplied by a nested transform needs it:
-// ssm_get_params_wrap picks K from the largest power of two dividing n - 1, so an n - 1
-// with a small power of two factor leaves ssm_is_recursive nothing to work with and
-// collapses the recursion into a schoolbook multiply of the whole span.
-//
-// A leaf coefficient needs neither reason. Every kernel a leaf reaches — add, sub,
-// butterfly, rotate, and the pointwise multiply — carries a real 0-7 word tail on both
-// x86-64 and AArch64, so it is happy with any count. Padding one is pure loss: at the
-// wrap level it turns n = 20 into n = 25, which widens every add, subtract and rotate by
-// a quarter and takes the pointwise multiply from 361 word products to 576.
 static bool ssm_pad_is_needed(uint64_t n, uint64_t moduli)
 {
     if(n > ssm_recursive_threshold)
@@ -2974,10 +2934,6 @@ static bool ssm_pad_is_needed(uint64_t n, uint64_t moduli)
     return moduli > tail_break_even;
 }
 
-// Shared by ssm_get_params and ssm_get_params_wrap, which differ only in how they derive
-// K and M; everything from here on (the Q/n formula, the pad-to-a-multiple-of-8 step, and
-// assembling the returned params) is identical between them, so it lives in one place
-// rather than two copies that could silently drift apart.
 // NOLINTBEGIN(readability-magic-numbers)
 static ssm_params_t ssm_finish_params(uint64_t count, uint64_t K, uint64_t M)
 {
@@ -3004,6 +2960,8 @@ static ssm_params_t ssm_finish_params(uint64_t count, uint64_t K, uint64_t M)
     }
     assert(64 * (n - 1) % K == 0);
 
+    assert(64 * (n - 1) > (128 * M) + stdc_bit_width(K) - 1);
+
     return (ssm_params_t)
     {
         .count = count,
@@ -3022,9 +2980,7 @@ ssm_params_t ssm_get_params(uint64_t count)
     uint64_t K = 2 * stdc_bit_ceil((count + M - 1) / M);
     M = (count / K) + 1;
 
-    ssm_params_t p = ssm_finish_params(count, K, M);
-    assert(p.n > 2 * M);
-    return p;
+    return ssm_finish_params(count, K, M);
 }
 // NOLINTEND(readability-magic-numbers)
 
@@ -3085,21 +3041,6 @@ static void num_ssm_mul_mod_span(
     uint64_t zero = 0;
     uint64_t rem = count & 7;
 
-    // count no longer has to be a multiple of 8 (ssm_pad_is_needed may leave a leaf
-    // unpadded on x86 too), so each row's 8-wide block is followed by a 0-7 word tail
-    // that continues the exact same flag chains. Row 0 only carries a CF chain (adcx);
-    // rows 1.. carry both a CF chain (accumulation into pre-existing dest words) and an
-    // OF chain (this row's own mulx-high propagating into the next column). dec touches
-    // OF but not CF, which is why the per-column loop counters (j, and the tail's own
-    // rcx-based counter) are fine to decrement with plain dec — as long as, for the
-    // OF-carrying row, any pending OF is folded into a GPR first (the "adox ..., zero"
-    // line) so dec has nothing left to disturb.
-    //
-    // The tail-entry checks are different: by the time execution reaches them, CF may
-    // already hold a real running carry from the row's 8-wide block, so — unlike the j
-    // == 0 checks above, which run before a single word of the row exists — test/jz
-    // would clear it. jrcxz reads rcx without touching any flag, so that check (and only
-    // that one) goes through rcx instead.
     __asm__ __volatile__ (
         ".intel_syntax noprefix                         \n\t"
 
@@ -3461,17 +3402,6 @@ static void num_ssm_sub_span_mod(
 
 #ifdef NUM_ASM_X86_64
 
-    // Same 8 wide sbb chain as num_ssm_sub_mod_immed's x86 kernel (SUB_CLASSIC_STEP, dest
-    // read as its own SRC_1), but over an arbitrary len rather than the 8k + 1 the full
-    // width kernels are guaranteed, so the tail loop earns its keep here. The borrow leaves
-    // in a register instead of being consumed by a normalize, because the caller still has
-    // to walk it up to the top word.
-    //
-    // Only one flag chain is live here (CF, via sbb) — unlike num_ssm_butterfly there is no
-    // adox to protect from sbb's OF side effect, so dec/jnz is safe for both loop counters.
-    // The one exception is the transition from the main block into the tail: if the main
-    // block ran, CF holds a real borrow that test/jz (used elsewhere in this file) would
-    // clear, so that specific check goes through jrcxz instead.
     {
         uint64_t reg_1, reg_2;
         uint64_t j = len >> 3;

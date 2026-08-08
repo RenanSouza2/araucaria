@@ -7,8 +7,8 @@
 #include "../../mods/macros/uint.h" // IWYU pragma: keep
 
 typedef uint64_t * chunk_p;
-[[maybe_unused]]
-constexpr uint64_t chunk_bits_log_2 = 6;
+// [[maybe_unused]]
+inline constexpr uint64_t chunk_bits_log_2 = 6;
 [[maybe_unused]]
 constexpr uint64_t chunk_bits = 64;
 

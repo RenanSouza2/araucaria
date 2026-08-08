@@ -8,6 +8,7 @@
 
 #include "../file/header.h"
 #include "../num/header.h"
+#include "../num/internal.h"
 #include "../num/struct.h"
 #include "../sig/header.h"
 

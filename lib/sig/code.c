@@ -7,6 +7,7 @@
 
 #include "../file/header.h"
 #include "../num/header.h"
+#include "../num/internal.h"
 #include "../num/struct.h"
 
 #define CLU_SIG_IS_SAFE(SIG) CLU_HANDLER_IS_SAFE((SIG).num);

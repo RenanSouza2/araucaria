@@ -1,4 +1,5 @@
 #include "../debug.h"
+#include "../internal.h"
 #include "../../../testrc.h"
 #include "../../../mods/macros/test.h"
 
