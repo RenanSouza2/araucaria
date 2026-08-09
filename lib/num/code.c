@@ -253,6 +253,11 @@ bool araucaria_disk_config_is_set()
     return s_araucaria_disk_config.is_set;
 }
 
+uint64_t araucaria_disk_config_get_threshold()
+{
+    return s_araucaria_disk_config.disk_threshold;
+}
+
 
 
 void num_display_dec(num_p num)
@@ -3933,9 +3938,8 @@ num_p num_mul_core(num_p num_1, num_p num_2, bool free_inputs)
 
 
 
-// Bytes a buffer of `size` limbs would add to RAM: 0 if disk_threshold would
-// redirect it to disk (num_create/num_create_dirty do this whenever size exceeds
-// disk_threshold), matching the real allocators' per-buffer check exactly.
+// 0 if disk_threshold would redirect this size to disk, matching num_create's
+// per-buffer check.
 static double mem_estimate_ram_bytes(uint64_t size, uint64_t disk_threshold)
 {
     if(size > disk_threshold)
@@ -3946,8 +3950,7 @@ static double mem_estimate_ram_bytes(uint64_t size, uint64_t disk_threshold)
     return (double)(sizeof(num_t) + (size * sizeof(uint64_t)));
 }
 
-// log2 of a power-of-two K (ssm_get_params/ssm_get_params_wrap only ever produce
-// powers of two), used as a butterfly-count proxy for FFT cost.
+// Butterfly-count proxy for FFT cost; K is always a power of two here.
 static double mem_estimate_log2_pow2(uint64_t k)
 {
     if(k < 2)
@@ -3960,17 +3963,12 @@ static double mem_estimate_log2_pow2(uint64_t k)
 
 typedef struct
 {
-    double peak;      // bytes: high water mark
     double integral;  // bytes * time: for time-weighted averaging
     double duration;  // time: word-operation proxy, not wall clock
 } mem_profile_t;
 
-// Mirrors num_ssm_mul_pointwise's allocation sites and recursion (ssm_is_recursive)
-// for a pointwise-multiply step at level (n, K), given the bytes already live from
-// enclosing levels (aux1/aux2/fft1/fft2), which stay allocated for the whole call
-// and so form the baseline every recursion level's cost is weighted against.
-// "duration" has no unit of real time; it is a word-operation count used only to
-// weight the time-averaged memory figure between phases of differing cost.
+// Mirrors num_ssm_mul_pointwise's allocation sites and recursion, weighting each
+// phase's RAM by a word-operation duration proxy.
 static mem_profile_t ssm_pointwise_mem_estimate(
     uint64_t n,
     uint64_t K,
@@ -3983,7 +3981,6 @@ static mem_profile_t ssm_pointwise_mem_estimate(
         double dt = (double)K * (double)n * (double)n;
         return (mem_profile_t)
         {
-            .peak = live_baseline,
             .integral = live_baseline * dt,
             .duration = dt,
         };
@@ -4001,39 +3998,22 @@ static mem_profile_t ssm_pointwise_mem_estimate(
 
     return (mem_profile_t)
     {
-        .peak = inner.peak > live ? inner.peak : live,
         .integral = iter_integral * (double)K,
         .duration = iter_duration * (double)K,
     };
 }
 
-// Analytical estimate of the maximum and time-weighted average RAM (bytes) live
-// during num_mul(num_1, num_2) for operands of the given limb counts, following
-// the same allocation sites and recursive structure as num_mul_core /
-// num_mul_classic / num_mul_ssm / num_ssm_mul_pointwise. `disk_threshold` is the
-// limb-count cutoff num_create/num_create_dirty would use (see
-// araucaria_disk_config_set / araucaria_disk_config's disk_threshold field, pass
-// UINT64_MAX for "nothing goes to disk"); buffers above it are excluded from the
-// RAM figures, since that config exists specifically to bound RAM rather than
-// disk usage. "Average" is time-weighted using a word-operation cost proxy for
-// each phase's duration, not a flat mean of allocation sizes.
-void num_mul_estimate_memory(
+// Time-weighted average RAM (bytes) live during num_mul, mirroring num_mul_core's
+// allocation sites. disk_threshold excludes buffers num_create would put on disk.
+uint64_t num_mul_estimate_memory(
     uint64_t count_1,
     uint64_t count_2,
-    uint64_t disk_threshold,
-    uint64_t *out_max_bytes,
-    uint64_t *out_avg_bytes
+    uint64_t disk_threshold
 )
 {
-    assert(out_max_bytes);
-    assert(out_avg_bytes);
-
     if(count_1 == 0 || count_2 == 0)
     {
-        uint64_t bytes = sizeof(num_t) + sizeof(uint64_t);
-        *out_max_bytes = bytes;
-        *out_avg_bytes = bytes;
-        return;
+        return sizeof(num_t) + sizeof(uint64_t);
     }
 
     if(mul_is_classic(count_1, count_2))
@@ -4041,14 +4021,11 @@ void num_mul_estimate_memory(
         double bytes = mem_estimate_ram_bytes(count_1, disk_threshold)
             + mem_estimate_ram_bytes(count_2, disk_threshold)
             + mem_estimate_ram_bytes(count_1 + count_2, disk_threshold);
-        *out_max_bytes = (uint64_t)bytes;
-        *out_avg_bytes = (uint64_t)bytes;
-        return;
+        return (uint64_t)bytes;
     }
 
     double live = mem_estimate_ram_bytes(count_1, disk_threshold)
         + mem_estimate_ram_bytes(count_2, disk_threshold);
-    double peak = live;
     double integral = 0.0;
     double duration = 0.0;
 
@@ -4057,13 +4034,11 @@ void num_mul_estimate_memory(
     uint64_t K = p.K;
 
     live += mem_estimate_ram_bytes(n, disk_threshold) + mem_estimate_ram_bytes(2 * n, disk_threshold);
-    if(live > peak) { peak = live; }
 
     for(uint64_t side = 0; side < 2; side++)
     {
         uint64_t count = side == 0 ? count_1 : count_2;
         live += mem_estimate_ram_bytes(n * K, disk_threshold);
-        if(live > peak) { peak = live; }
         live -= mem_estimate_ram_bytes(count, disk_threshold);
 
         double dt = (double)n * (double)K * mem_estimate_log2_pow2(K);
@@ -4072,7 +4047,6 @@ void num_mul_estimate_memory(
     }
 
     mem_profile_t pw = ssm_pointwise_mem_estimate(n, K, live, disk_threshold);
-    if(pw.peak > peak) { peak = pw.peak; }
     integral += pw.integral;
     duration += pw.duration;
 
@@ -4088,14 +4062,12 @@ void num_mul_estimate_memory(
     uint64_t target_count = (p.M * (p.K - 1)) + p.n;
     live += mem_estimate_ram_bytes(target_count, disk_threshold);
     live -= mem_estimate_ram_bytes(n * K, disk_threshold);
-    if(live > peak) { peak = live; }
 
     double depad_dt = (double)target_count;
     integral += live * depad_dt;
     duration += depad_dt;
 
-    *out_max_bytes = (uint64_t)peak;
-    *out_avg_bytes = duration > 0.0 ? (uint64_t)(integral / duration) : (uint64_t)peak;
+    return duration > 0.0 ? (uint64_t)(integral / duration) : (uint64_t)live;
 }
 
 
