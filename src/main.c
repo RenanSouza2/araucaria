@@ -875,10 +875,3 @@ int main()
     printf("\n");
     return 0;
 }
-
-// time_assembly_mul       | time mul: 16.420 | original apple
-// time_assembly_mul       | time mul: 15.498 | claude v1
-// time_assembly_mul       | time mul: 12.574 | claude v2
-// time_assembly_mul       | time mul: 9.441 | claude v3
-// time_assembly_mul       | time mul: 9.121 | claude v4
-// time_assembly_mul       | time mul: 8.202 | claude v5 | aarch64 ssm add/sub/opposite unrolled 8 wide
