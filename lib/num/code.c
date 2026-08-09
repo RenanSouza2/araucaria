@@ -3933,6 +3933,173 @@ num_p num_mul_core(num_p num_1, num_p num_2, bool free_inputs)
 
 
 
+// Bytes a buffer of `size` limbs would add to RAM: 0 if disk_threshold would
+// redirect it to disk (num_create/num_create_dirty do this whenever size exceeds
+// disk_threshold), matching the real allocators' per-buffer check exactly.
+static double mem_estimate_ram_bytes(uint64_t size, uint64_t disk_threshold)
+{
+    if(size > disk_threshold)
+    {
+        return 0.0;
+    }
+
+    return (double)(sizeof(num_t) + (size * sizeof(uint64_t)));
+}
+
+// log2 of a power-of-two K (ssm_get_params/ssm_get_params_wrap only ever produce
+// powers of two), used as a butterfly-count proxy for FFT cost.
+static double mem_estimate_log2_pow2(uint64_t k)
+{
+    if(k < 2)
+    {
+        return 0.0;
+    }
+
+    return (double)(stdc_bit_width(k) - 1);
+}
+
+typedef struct
+{
+    double peak;      // bytes: high water mark
+    double integral;  // bytes * time: for time-weighted averaging
+    double duration;  // time: word-operation proxy, not wall clock
+} mem_profile_t;
+
+// Mirrors num_ssm_mul_pointwise's allocation sites and recursion (ssm_is_recursive)
+// for a pointwise-multiply step at level (n, K), given the bytes already live from
+// enclosing levels (aux1/aux2/fft1/fft2), which stay allocated for the whole call
+// and so form the baseline every recursion level's cost is weighted against.
+// "duration" has no unit of real time; it is a word-operation count used only to
+// weight the time-averaged memory figure between phases of differing cost.
+static mem_profile_t ssm_pointwise_mem_estimate(
+    uint64_t n,
+    uint64_t K,
+    double live_baseline,
+    uint64_t disk_threshold
+)
+{
+    if(!ssm_is_recursive(n))
+    {
+        double dt = (double)K * (double)n * (double)n;
+        return (mem_profile_t)
+        {
+            .peak = live_baseline,
+            .integral = live_baseline * dt,
+            .duration = dt,
+        };
+    }
+
+    ssm_params_t p_next = ssm_get_params_wrap(n);
+    double next_bytes = 2.0 * mem_estimate_ram_bytes(p_next.n * p_next.K, disk_threshold);
+    double live = live_baseline + next_bytes;
+
+    mem_profile_t inner = ssm_pointwise_mem_estimate(p_next.n, p_next.K, live, disk_threshold);
+
+    double fft_inv_dt = (double)p_next.n * (double)p_next.K * mem_estimate_log2_pow2(p_next.K);
+    double iter_integral = inner.integral + (live * fft_inv_dt);
+    double iter_duration = inner.duration + fft_inv_dt;
+
+    return (mem_profile_t)
+    {
+        .peak = inner.peak > live ? inner.peak : live,
+        .integral = iter_integral * (double)K,
+        .duration = iter_duration * (double)K,
+    };
+}
+
+// Analytical estimate of the maximum and time-weighted average RAM (bytes) live
+// during num_mul(num_1, num_2) for operands of the given limb counts, following
+// the same allocation sites and recursive structure as num_mul_core /
+// num_mul_classic / num_mul_ssm / num_ssm_mul_pointwise. `disk_threshold` is the
+// limb-count cutoff num_create/num_create_dirty would use (see
+// araucaria_disk_config_set / araucaria_disk_config's disk_threshold field, pass
+// UINT64_MAX for "nothing goes to disk"); buffers above it are excluded from the
+// RAM figures, since that config exists specifically to bound RAM rather than
+// disk usage. "Average" is time-weighted using a word-operation cost proxy for
+// each phase's duration, not a flat mean of allocation sizes.
+void num_mul_estimate_memory(
+    uint64_t count_1,
+    uint64_t count_2,
+    uint64_t disk_threshold,
+    uint64_t *out_max_bytes,
+    uint64_t *out_avg_bytes
+)
+{
+    assert(out_max_bytes);
+    assert(out_avg_bytes);
+
+    if(count_1 == 0 || count_2 == 0)
+    {
+        uint64_t bytes = sizeof(num_t) + sizeof(uint64_t);
+        *out_max_bytes = bytes;
+        *out_avg_bytes = bytes;
+        return;
+    }
+
+    if(mul_is_classic(count_1, count_2))
+    {
+        double bytes = mem_estimate_ram_bytes(count_1, disk_threshold)
+            + mem_estimate_ram_bytes(count_2, disk_threshold)
+            + mem_estimate_ram_bytes(count_1 + count_2, disk_threshold);
+        *out_max_bytes = (uint64_t)bytes;
+        *out_avg_bytes = (uint64_t)bytes;
+        return;
+    }
+
+    double live = mem_estimate_ram_bytes(count_1, disk_threshold)
+        + mem_estimate_ram_bytes(count_2, disk_threshold);
+    double peak = live;
+    double integral = 0.0;
+    double duration = 0.0;
+
+    ssm_params_t p = ssm_get_params(count_1 + count_2);
+    uint64_t n = p.n;
+    uint64_t K = p.K;
+
+    live += mem_estimate_ram_bytes(n, disk_threshold) + mem_estimate_ram_bytes(2 * n, disk_threshold);
+    if(live > peak) { peak = live; }
+
+    for(uint64_t side = 0; side < 2; side++)
+    {
+        uint64_t count = side == 0 ? count_1 : count_2;
+        live += mem_estimate_ram_bytes(n * K, disk_threshold);
+        if(live > peak) { peak = live; }
+        live -= mem_estimate_ram_bytes(count, disk_threshold);
+
+        double dt = (double)n * (double)K * mem_estimate_log2_pow2(K);
+        integral += live * dt;
+        duration += dt;
+    }
+
+    mem_profile_t pw = ssm_pointwise_mem_estimate(n, K, live, disk_threshold);
+    if(pw.peak > peak) { peak = pw.peak; }
+    integral += pw.integral;
+    duration += pw.duration;
+
+    live -= mem_estimate_ram_bytes(n, disk_threshold);
+    live -= mem_estimate_ram_bytes(n * K, disk_threshold);
+
+    double fft_inv_dt = (double)n * (double)K * mem_estimate_log2_pow2(K);
+    integral += live * fft_inv_dt;
+    duration += fft_inv_dt;
+
+    live -= mem_estimate_ram_bytes(2 * n, disk_threshold);
+
+    uint64_t target_count = (p.M * (p.K - 1)) + p.n;
+    live += mem_estimate_ram_bytes(target_count, disk_threshold);
+    live -= mem_estimate_ram_bytes(n * K, disk_threshold);
+    if(live > peak) { peak = live; }
+
+    double depad_dt = (double)target_count;
+    integral += live * depad_dt;
+    duration += depad_dt;
+
+    *out_max_bytes = (uint64_t)peak;
+    *out_avg_bytes = duration > 0.0 ? (uint64_t)(integral / duration) : (uint64_t)peak;
+}
+
+
+
 static void num_ssm_sqr_mod_span(num_p num_aux, num_p num, uint64_t pos, uint64_t n)
 {
     CLU_HANDLER_IS_SAFE(num_aux)
