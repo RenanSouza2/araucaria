@@ -2857,7 +2857,7 @@ static void test_fuzz_num_ssm_shift_round_trip(bool show)
                 num_display_span_full("num", num, N, 1);            \
                 printf("\nround trip results in");                  \
                 num_display_span_full("num_res", num_res, N, 1);    \
-                assert(false);                                      \
+                revert()                                            \
             }                                                       \
             num_free(num_res);                                      \
             num_free(num);                                          \
@@ -2968,7 +2968,7 @@ static void test_fuzz_num_ssm_fft(bool show)
                 num_display_span_full("num_fft", num_fft, (Nv), (Kv));  \
                 printf("\nroundrip results in");                        \
                 num_display_span_full("num_res", num_res, (Nv), (Kv));  \
-                assert(false);                                          \
+                revert()                                                \
             }                                                           \
             num_free(num_res);                                          \
             num_free(num_fft);                                          \
@@ -3092,7 +3092,7 @@ static void test_fuzz_num_bz_div(bool show)
                 num_display_full("num_2", num_2);                           \
                 printf("\nmod bigger than dividend give");                  \
                 num_display_full("num_r", num_r);                           \
-                assert(false);                                              \
+                revert()                                                    \
             }                                                               \
             num_p num_aux = num_mul(num_copy(num_q), num_copy(num_2));      \
             num_aux = num_add(num_aux, num_copy(num_r));                    \
@@ -3103,7 +3103,7 @@ static void test_fuzz_num_bz_div(bool show)
                 num_display_full("num_2", num_2);                           \
                 printf("\nreconstructed give");                             \
                 num_display_full("num_aux", num_aux);                       \
-                assert(false);                                              \
+                revert()                                                    \
             }                                                               \
             num_free(num_1);                                                \
             num_free(num_2);                                                \

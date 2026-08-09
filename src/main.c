@@ -692,7 +692,7 @@ static void mem_1(uint64_t index)
 static void mem_1(uint64_t)
 {
     printf("\n\tfunction should be run with ./run_debug");
-    assert(false);
+    revert()
 }
 #endif
 
