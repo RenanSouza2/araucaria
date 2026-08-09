@@ -9,20 +9,17 @@
 PLACEHOLDER(num_config)
 PLACEHOLDER(num)
 
-void num_config_set(num_config_p config);
+void araucaria_disk_config_set(araucaria_disk_config_p config);
+bool araucaria_disk_config_is_set();
+uint64_t araucaria_disk_config_get_threshold();
 
 void num_display_dec(num_p num);
-void num_display_opts(num_p num, const char tag[], bool length, bool full);
 void num_display(num_p num);
 void num_display_tag(const char tag[], num_p num);
 void num_display_full(const char tag[], num_p num);
 
-num_p num_head_grow(num_p num, uint64_t count);
-void num_head_trim(num_p num, uint64_t count);
-void num_break(num_p *out_num_hi, num_p *out_num_lo, num_p num, uint64_t count);
-
-num_p num_create(CLU_PARAMS(uint64_t size, uint64_t count));
-num_p num_create_dirty(CLU_PARAMS(uint64_t size, uint64_t count));
+num_p num_realloc_disk(CLU_PARAMS(num_p num));
+void num_display_opts(num_p num, const char tag[], bool length, bool full);
 
 num_p num_wrap(uint64_t value);
 num_p num_wrap_uint128(uint128_t value);
@@ -45,9 +42,19 @@ num_p num_div_mod_uint(num_p num, uint64_t value);
 num_p num_add(num_p num_1, num_p num_2);
 num_p num_sub(num_p num_1, num_p num_2);
 num_p num_mul(num_p num_1, num_p num_2);
+uint64_t num_mul_estimate_memory(
+    uint64_t count_1,
+    uint64_t count_2,
+    uint64_t disk_threshold
+);
 num_p num_pow(num_p num, uint64_t value);
 num_p num_sqr(num_p num);
-void num_div_mod(num_p *out_num_q, num_p *out_num_r, num_p num_1, num_p num_2);
+void num_div_mod(
+    num_p *out_num_q,
+    num_p *out_num_r,
+    num_p num_1,
+    num_p num_2
+);
 num_p num_div(num_p num_1, num_p num_2);
 num_p num_mod(num_p num_1, num_p num_2);
 num_p num_gcd(num_p num_1, num_p num_2);

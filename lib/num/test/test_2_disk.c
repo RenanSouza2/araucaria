@@ -9,11 +9,11 @@ static void test_num_disk()
 
     bool show = false;
 
-    num_config_t config = {
+    araucaria_disk_config_t config = {
         .disk_path = "./cache",
         .disk_threshold = 0
     };
-    num_config_set(&config);
+    araucaria_disk_config_set(&config);
 
     test_all(show);
 
@@ -25,7 +25,7 @@ static void test_num_disk()
 int main()
 {
     setvbuf(stdout, nullptr, _IONBF, 0);
-    srand((unsigned int)time(nullptr));
+    test_seed_init();
     test_num_disk();
     printf("\n\n\tTest successful\n\n");
     return 0;

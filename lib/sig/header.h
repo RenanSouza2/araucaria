@@ -21,8 +21,10 @@ sig_num_t sig_num_wrap_int128(int128_t value);
 sig_num_t sig_num_wrap_num(num_p num);
 sig_num_t sig_num_wrap_str(const char str[]);
 sig_num_t sig_num_copy(sig_num_t sig);
-sig_num_t sig_num_head_grow(sig_num_t sig, uint64_t count);
-sig_num_t sig_num_head_trim(sig_num_t sig, uint64_t count);
+sig_num_t sig_num_realloc_disk(sig_num_t sig);
+
+// sig_num_head_grow, sig_num_head_trim moved to internal.h - sibling
+// lib/* use only.
 
 bool sig_num_is_zero(sig_num_t sig);
 int64_t sig_num_cmp(sig_num_t sig_1, sig_num_t sig_2);

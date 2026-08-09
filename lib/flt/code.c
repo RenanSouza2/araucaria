@@ -7,8 +7,10 @@
 
 #include "../file/header.h"
 #include "../sig/header.h"
+#include "../sig/internal.h"
 #include "../num/header.h"
 #include "../num/struct.h"
+#include "header.h"
 
 #define CLU_FLT_IS_SAFE(FLT) CLU_HANDLER_IS_SAFE((FLT).sig.num)
 
@@ -379,6 +381,15 @@ flt_num_t flt_num_wrap_fxd(fxd_num_t fxd, uint64_t size) // TODO TEST
     };
 
     return flt_num_normalize(flt);
+}
+
+flt_num_t flt_num_realloc_disk(flt_num_t flt)
+{
+    CLU_FLT_IS_SAFE(flt);
+    assert(flt.sig.num);
+
+    flt.sig = sig_num_realloc_disk(flt.sig);
+    return flt;
 }
 
 void flt_num_free(flt_num_t flt)

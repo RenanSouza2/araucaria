@@ -10,7 +10,9 @@ runner: test.o $(DBG_FULL_FILE)
 
 test.o: test.c
 	echo "building test object $(DIR)"
-	gcc -o $@ $^ $(FLAGS) $(FLAGS_DBG) $(FLAGS_CMP) $(FLAGS_EXTRA)
+	gcc -o $@ $< $(FLAGS) $(FLAGS_DBG) $(FLAGS_CMP) $(FLAGS_EXTRA)
+
+-include test.d
 
 clean:
-	rm -rf test.o runner
+	rm -rf test.o test.d runner runner.dSYM

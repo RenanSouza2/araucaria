@@ -5,6 +5,7 @@
 #include "../../mods/macros/assert.h" // IWYU pragma: keep
 
 #include "../num/header.h"
+#include "../num/internal.h"
 
 #define CLU_MOD_IS_SAFE(MOD)            \
     {                                   \

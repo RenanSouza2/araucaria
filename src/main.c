@@ -692,7 +692,7 @@ static void mem_1(uint64_t index)
 static void mem_1(uint64_t)
 {
     printf("\n\tfunction should be run with ./run_debug");
-    assert(false);
+    revert()
 }
 #endif
 
@@ -704,7 +704,7 @@ static void time_assembly_mul()
 #ifdef DEBUG
     uint64_t base = 22;
 #else
-    uint64_t base = 28;
+    uint64_t base = 30;
 #endif
 
     tprintf("base: " U64P() "", base);
@@ -868,9 +868,9 @@ int main()
     // flt_num_pi_2(1000);
     // flt_num_pi_3(1000);
     // mem_1(21);
-    // time_assembly_mul();
+    time_assembly_mul();
     // time_assembly_sqr();
-    time_assembly_div();
+    // time_assembly_div();
 
     printf("\n");
     return 0;

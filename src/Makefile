@@ -1,6 +1,6 @@
-ROOT = $(shell git rev-parse --show-toplevel)
-include $(ROOT)/makefiles/flags.mk
-include $(ROOT)/makefiles/vars.mk
+PRJ_DIR := $(shell git rev-parse --show-toplevel)
+include $(PRJ_DIR)/makefiles/flags.mk
+include $(PRJ_DIR)/makefiles/vars.mk
 
 
 
@@ -10,24 +10,28 @@ dbg d: debug.out
 
 
 main.out: main.o $(LIB_FILE)
-	echo " linking $(PRJ_NAME) exec $(DIR) main"
-	gcc -o $@ $^ $(FLAGS) $(FLAGS_PRD) $(FLAGS_EXE)
+	echo " linking $(PRJ_NAME) exec $(DIR)"
+	gcc -o $@ $^ $(FLAGS) $(FLAGS_PRD) $(FLAGS_EXE) $(FLAGS_EXTRA)
 
 debug.out: debug.o $(DBG_FULL_FILE)
 	echo " linking $(PRJ_NAME) debug $(DIR)"
-	gcc -o $@ $^ $(FLAGS) $(FLAGS_DBG) $(FLAGS_EXE)
+	gcc -o $@ $^ $(FLAGS) $(FLAGS_DBG) $(FLAGS_EXE) $(FLAGS_EXTRA)
 
 
 
 main.o: main.c
-	echo "building $(PRJ_NAME) object src main"
-	gcc -c -o $@ $< $(FLAGS) $(FLAGS_PRD) $(FLAGS_CMP) $(FLAGS_EXTRA)
+	echo "building $(PRJ_NAME) object $(DIR) main"
+	gcc -o $@ $< $(FLAGS) $(FLAGS_PRD) $(FLAGS_CMP) $(FLAGS_EXTRA)
 
 debug.o: main.c
-	echo "building $(PRJ_NAME) object src debug"
-	gcc -c -o $@ $< $(FLAGS) $(FLAGS_DBG) $(FLAGS_CMP) $(FLAGS_EXTRA)
+	echo "building $(PRJ_NAME) object $(DIR) debug"
+	gcc -o $@ $< $(FLAGS) $(FLAGS_DBG) $(FLAGS_CMP) $(FLAGS_EXTRA)
+
+-include main.d debug.d
 
 
+
+FORCE:
 
 $(LIB_FILE): FORCE
 	$(MAKE) --directory=$(dir $@)
@@ -37,11 +41,7 @@ $(DBG_FULL_FILE): FORCE
 
 
 
-FORCE:
-
-
-
-clean:
+clean c:
 	echo "cleaning $(PRJ_NAME) $(DIR)"
-	rm -rf *.out *.o
+	rm -rf *.out *.o *.d *.dSYM
 	$(MAKE) clean --directory=$(LIB_DIR)

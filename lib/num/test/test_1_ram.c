@@ -19,7 +19,7 @@ static void test_num_ram()
 int main()
 {
     setvbuf(stdout, nullptr, _IONBF, 0);
-    srand((unsigned int)time(nullptr));
+    test_seed_init();
     test_num_ram();
     printf("\n\n\tTest successful\n\n");
     return 0;
