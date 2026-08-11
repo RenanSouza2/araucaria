@@ -83,17 +83,18 @@ Values are stored little-endian as arrays of 64-bit limbs.
 #include "mods/araucaria/lib/num/struct.h"
 
 araucaria_disk_config_t config = {
-    .disk_path      = "./cache",  // must already exist
-    .disk_threshold = 1024,       // limbs; larger allocations go to disk
+    .disk_path            = "./cache",  // must already exist
+    .disk_threshold_bytes = 8192,       // bytes; larger allocations go to disk
 };
 araucaria_disk_config_set(&config);
 ```
 
-Allocations above `disk_threshold` limbs come from an anonymous `mmap` over a
-temporary file that's `unlink`-ed immediately, so it disappears when the
-number is freed or the process exits. The default threshold is `UINT64_MAX`
-(nothing goes to disk); `num_realloc_disk` (and the `sig` / `flt`
-equivalents) moves an already-allocated value to disk on demand.
+Allocations whose backing size (in bytes) exceeds `disk_threshold_bytes` come
+from an anonymous `mmap` over a temporary file that's `unlink`-ed
+immediately, so it disappears when the number is freed or the process exits.
+The default threshold is `UINT64_MAX` (nothing goes to disk);
+`num_realloc_disk` (and the `sig` / `flt` equivalents) moves an
+already-allocated value to disk on demand.
 
 ## Ownership
 

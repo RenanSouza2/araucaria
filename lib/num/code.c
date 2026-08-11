@@ -238,7 +238,7 @@ static uint64_t uint_read(FILE *fp, uint64_t size, uint64_t base)
 
 
 static araucaria_disk_config_t s_araucaria_disk_config = {
-    .disk_threshold = UINT64_MAX,
+    .disk_threshold_bytes = UINT64_MAX,
     .is_set = false
 };
 
@@ -253,9 +253,9 @@ bool araucaria_disk_config_is_set()
     return s_araucaria_disk_config.is_set;
 }
 
-uint64_t araucaria_disk_config_get_threshold()
+uint64_t araucaria_disk_config_get_threshold_bytes()
 {
-    return s_araucaria_disk_config.disk_threshold;
+    return s_araucaria_disk_config.disk_threshold_bytes;
 }
 
 
@@ -393,7 +393,7 @@ num_p num_create(CLU_PARAMS(uint64_t size, uint64_t count))
     size = size ? size : 1;
     uint64_t total_size = sizeof(num_t) + (size * sizeof(uint64_t));
 
-    if(size > s_araucaria_disk_config.disk_threshold)
+    if(total_size > s_araucaria_disk_config.disk_threshold_bytes)
     {
         return num_create_disk(CLU_ARGS_RELAY(size, count));
     }
@@ -416,7 +416,7 @@ num_p num_create_dirty(CLU_PARAMS(uint64_t size, uint64_t count))
     size = size ? size : 1;
     uint64_t total_size = sizeof(num_t) + (size * sizeof(uint64_t));
 
-    if(size > s_araucaria_disk_config.disk_threshold)
+    if(total_size > s_araucaria_disk_config.disk_threshold_bytes)
     {
         return num_create_disk(CLU_ARGS_RELAY(size, count));
     }
@@ -3938,16 +3938,17 @@ num_p num_mul_core(num_p num_1, num_p num_2, bool free_inputs)
 
 
 
-// 0 if disk_threshold would redirect this size to disk, matching num_create's
-// per-buffer check.
-static double mem_estimate_ram_bytes(uint64_t size, uint64_t disk_threshold)
+// 0 if disk_threshold_bytes would redirect this size to disk, matching
+// num_create's per-buffer check.
+static double mem_estimate_ram_bytes(uint64_t size, uint64_t disk_threshold_bytes)
 {
-    if(size > disk_threshold)
+    uint64_t bytes = sizeof(num_t) + (size * sizeof(uint64_t));
+    if(bytes > disk_threshold_bytes)
     {
         return 0.0;
     }
 
-    return (double)(sizeof(num_t) + (size * sizeof(uint64_t)));
+    return (double)bytes;
 }
 
 // Butterfly-count proxy for FFT cost; K is always a power of two here.
@@ -3973,7 +3974,7 @@ static mem_profile_t ssm_pointwise_mem_estimate(
     uint64_t n,
     uint64_t K,
     double live_baseline,
-    uint64_t disk_threshold
+    uint64_t disk_threshold_bytes
 )
 {
     if(!ssm_is_recursive(n))
@@ -3987,10 +3988,10 @@ static mem_profile_t ssm_pointwise_mem_estimate(
     }
 
     ssm_params_t p_next = ssm_get_params_wrap(n);
-    double next_bytes = 2.0 * mem_estimate_ram_bytes(p_next.n * p_next.K, disk_threshold);
+    double next_bytes = 2.0 * mem_estimate_ram_bytes(p_next.n * p_next.K, disk_threshold_bytes);
     double live = live_baseline + next_bytes;
 
-    mem_profile_t inner = ssm_pointwise_mem_estimate(p_next.n, p_next.K, live, disk_threshold);
+    mem_profile_t inner = ssm_pointwise_mem_estimate(p_next.n, p_next.K, live, disk_threshold_bytes);
 
     double fft_inv_dt = (double)p_next.n * (double)p_next.K * mem_estimate_log2_pow2(p_next.K);
     double iter_integral = inner.integral + (live * fft_inv_dt);
@@ -4004,11 +4005,11 @@ static mem_profile_t ssm_pointwise_mem_estimate(
 }
 
 // Time-weighted average RAM (bytes) live during num_mul, mirroring num_mul_core's
-// allocation sites. disk_threshold excludes buffers num_create would put on disk.
+// allocation sites. disk_threshold_bytes excludes buffers num_create would put on disk.
 uint64_t num_mul_estimate_memory(
     uint64_t count_1,
     uint64_t count_2,
-    uint64_t disk_threshold
+    uint64_t disk_threshold_bytes
 )
 {
     if(count_1 == 0 || count_2 == 0)
@@ -4018,14 +4019,14 @@ uint64_t num_mul_estimate_memory(
 
     if(mul_is_classic(count_1, count_2))
     {
-        double bytes = mem_estimate_ram_bytes(count_1, disk_threshold)
-            + mem_estimate_ram_bytes(count_2, disk_threshold)
-            + mem_estimate_ram_bytes(count_1 + count_2, disk_threshold);
+        double bytes = mem_estimate_ram_bytes(count_1, disk_threshold_bytes)
+            + mem_estimate_ram_bytes(count_2, disk_threshold_bytes)
+            + mem_estimate_ram_bytes(count_1 + count_2, disk_threshold_bytes);
         return (uint64_t)bytes;
     }
 
-    double live = mem_estimate_ram_bytes(count_1, disk_threshold)
-        + mem_estimate_ram_bytes(count_2, disk_threshold);
+    double live = mem_estimate_ram_bytes(count_1, disk_threshold_bytes)
+        + mem_estimate_ram_bytes(count_2, disk_threshold_bytes);
     double integral = 0.0;
     double duration = 0.0;
 
@@ -4033,35 +4034,35 @@ uint64_t num_mul_estimate_memory(
     uint64_t n = p.n;
     uint64_t K = p.K;
 
-    live += mem_estimate_ram_bytes(n, disk_threshold) + mem_estimate_ram_bytes(2 * n, disk_threshold);
+    live += mem_estimate_ram_bytes(n, disk_threshold_bytes) + mem_estimate_ram_bytes(2 * n, disk_threshold_bytes);
 
     for(uint64_t side = 0; side < 2; side++)
     {
         uint64_t count = side == 0 ? count_1 : count_2;
-        live += mem_estimate_ram_bytes(n * K, disk_threshold);
-        live -= mem_estimate_ram_bytes(count, disk_threshold);
+        live += mem_estimate_ram_bytes(n * K, disk_threshold_bytes);
+        live -= mem_estimate_ram_bytes(count, disk_threshold_bytes);
 
         double dt = (double)n * (double)K * mem_estimate_log2_pow2(K);
         integral += live * dt;
         duration += dt;
     }
 
-    mem_profile_t pw = ssm_pointwise_mem_estimate(n, K, live, disk_threshold);
+    mem_profile_t pw = ssm_pointwise_mem_estimate(n, K, live, disk_threshold_bytes);
     integral += pw.integral;
     duration += pw.duration;
 
-    live -= mem_estimate_ram_bytes(n, disk_threshold);
-    live -= mem_estimate_ram_bytes(n * K, disk_threshold);
+    live -= mem_estimate_ram_bytes(n, disk_threshold_bytes);
+    live -= mem_estimate_ram_bytes(n * K, disk_threshold_bytes);
 
     double fft_inv_dt = (double)n * (double)K * mem_estimate_log2_pow2(K);
     integral += live * fft_inv_dt;
     duration += fft_inv_dt;
 
-    live -= mem_estimate_ram_bytes(2 * n, disk_threshold);
+    live -= mem_estimate_ram_bytes(2 * n, disk_threshold_bytes);
 
     uint64_t target_count = (p.M * (p.K - 1)) + p.n;
-    live += mem_estimate_ram_bytes(target_count, disk_threshold);
-    live -= mem_estimate_ram_bytes(n * K, disk_threshold);
+    live += mem_estimate_ram_bytes(target_count, disk_threshold_bytes);
+    live -= mem_estimate_ram_bytes(n * K, disk_threshold_bytes);
 
     double depad_dt = (double)target_count;
     integral += live * depad_dt;

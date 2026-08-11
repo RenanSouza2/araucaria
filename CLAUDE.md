@@ -40,8 +40,9 @@ make run_test_1_ram -C lib/num/test   # build+run just one runner
 
 Every module has a single `test.c` → `runner_test`, except `num`, which has
 three runners sharing case bodies from `behavior.c` and differing only in
-allocation strategy: `test_1_ram` (heap only), `test_2_disk` (`disk_threshold
-= 0`, everything on disk), `test_3_mist` (`disk_threshold = 1024`, mixed).
+allocation strategy: `test_1_ram` (heap only), `test_2_disk`
+(`disk_threshold_bytes = 0`, everything on disk), `test_3_mist`
+(`disk_threshold_bytes = 8192`, mixed).
 
 Fuzz cases derive their RNG seed from the case tag, so a failure is
 reproducible by rerunning the runner binary directly with the seed it
@@ -103,10 +104,10 @@ assembly and portable paths on both x86-64 and AArch64.
 ### Disk-backed allocation
 
 `araucaria_disk_config_set` (config struct in `lib/num/struct.h`) redirects
-allocations above `disk_threshold` limbs to an anonymous `mmap` over a
-temporary file in `disk_path` (unlinked immediately, so it disappears with
-the number or the process). Default threshold is `UINT64_MAX` (nothing goes
-to disk). This is load-bearing for the `num`/`sig`/`flt` test suites, which
+allocations whose backing size exceeds `disk_threshold_bytes` to an
+anonymous `mmap` over a temporary file in `disk_path` (unlinked immediately,
+so it disappears with the number or the process). Default threshold is
+`UINT64_MAX` (nothing goes to disk). This is load-bearing for the `num`/`sig`/`flt` test suites, which
 each run their behavior cases three ways (ram/disk/mist) against the same
 case bodies — a bug that only reproduces on the disk path is a real category
 here, not a hypothetical.

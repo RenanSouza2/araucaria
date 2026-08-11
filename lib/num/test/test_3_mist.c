@@ -11,7 +11,7 @@ static void test_num_mist()
 
     araucaria_disk_config_t config = {
         .disk_path = "./cache",
-        .disk_threshold = 1024
+        .disk_threshold_bytes = 8192
     };
     araucaria_disk_config_set(&config);
 

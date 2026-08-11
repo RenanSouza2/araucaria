@@ -11,7 +11,7 @@ PLACEHOLDER(num)
 
 void araucaria_disk_config_set(araucaria_disk_config_p config);
 bool araucaria_disk_config_is_set();
-uint64_t araucaria_disk_config_get_threshold();
+uint64_t araucaria_disk_config_get_threshold_bytes();
 
 void num_display_dec(num_p num);
 void num_display(num_p num);
@@ -45,7 +45,7 @@ num_p num_mul(num_p num_1, num_p num_2);
 uint64_t num_mul_estimate_memory(
     uint64_t count_1,
     uint64_t count_2,
-    uint64_t disk_threshold
+    uint64_t disk_threshold_bytes
 );
 num_p num_pow(num_p num, uint64_t value);
 num_p num_sqr(num_p num);

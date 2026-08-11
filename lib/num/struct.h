@@ -14,7 +14,7 @@ constexpr uint64_t chunk_bits = 64;
 
 STRUCT(araucaria_disk_config)
 {
-    uint64_t disk_threshold;
+    uint64_t disk_threshold_bytes;
     const char* disk_path;
     bool is_set;
 };
