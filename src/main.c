@@ -897,6 +897,67 @@ static void time_assembly_div()
 
 
 
+[[maybe_unused]]
+static void time_threads_div()
+{
+#ifdef DEBUG
+    uint64_t base = 22;
+#else
+    uint64_t base = 28;
+#endif
+
+    tprintf("base: " U64P() "", base);
+
+    // Divisor roughly half the dividend's size (num_1 is one generation ahead of
+    // num_2 in num_generate_1's doubling growth), large enough to hit the
+    // Burnikel-Ziegler recursion's SSM-sized multiply.
+    num_p num_2 = num_generate_1(base, 2);
+    num_p num_1 = num_generate_1(base + 1, 3);
+
+    tprintf("num_1->count: " U64P() "", num_1->count);
+    tprintf("num_2->count: " U64P() "", num_2->count);
+
+    uint64_t thread_counts[] = {1, 2, 4, 8, 16};
+    num_p num_res_ref = nullptr;
+
+    for(uint64_t i=0; i<sizeof(thread_counts)/sizeof(thread_counts[0]); i++)
+    {
+        uint64_t threads = thread_counts[i];
+
+        num_p num_1_c = num_copy(num_1);
+        num_p num_2_c = num_copy(num_2);
+
+        TIME_SETUP
+        num_p num_res = num_div_threads(num_1_c, num_2_c, threads);
+        TIME_END(t1)
+        tprintf("threads: " U64P(2) "  time: %.3f", threads, dtime(t1));
+
+        if(num_res_ref == nullptr)
+        {
+            num_res_ref = num_copy(num_res);
+        }
+        else
+        {
+            assert(num_cmp(num_res, num_res_ref) == 0)
+        }
+
+        num_free(num_res);
+    }
+
+    num_free(num_res_ref);
+    num_free(num_1);
+    num_free(num_2);
+
+#ifdef DEBUG
+    uint64_t count = clu_get_register_count();
+    tprintf("total allocations : " U64P() "", count);
+    tprintf("max occupancy     : " U64P() "", clu_get_max_occupancy());
+    assert(clu_mem_is_empty());
+#endif
+}
+
+
+
 // int main(int argc, char** argv)
 int main()
 {
@@ -925,7 +986,8 @@ int main()
     // flt_num_pi_3(1000);
     // mem_1(21);
     // time_assembly_mul();
-    time_threads_mul();
+    // time_threads_mul();
+    time_threads_div();
     // time_assembly_sqr();
     // time_assembly_div();
 

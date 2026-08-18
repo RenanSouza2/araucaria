@@ -58,8 +58,17 @@ void num_div_mod(
     num_p num_1,
     num_p num_2
 );
+void num_div_mod_threads(
+    num_p *out_num_q,
+    num_p *out_num_r,
+    num_p num_1,
+    num_p num_2,
+    uint64_t threads
+);
 num_p num_div(num_p num_1, num_p num_2);
+num_p num_div_threads(num_p num_1, num_p num_2, uint64_t threads);
 num_p num_mod(num_p num_1, num_p num_2);
+num_p num_mod_threads(num_p num_1, num_p num_2, uint64_t threads);
 num_p num_gcd(num_p num_1, num_p num_2);
 
 num_p num_base_to(num_p num, uint64_t base);

@@ -3185,6 +3185,35 @@ static void test_fuzz_num_bz_div(bool show)
 
     #undef TEST_FUZZ_NUM_BZ_DIV
 
+    // Same checks, but through num_div_mod_threads at sizes large enough for the
+    // recursion's one internal multiply to actually hit num_mul_ssm.
+    #define TEST_FUZZ_NUM_BZ_DIV_THREADED(TAG, COUNT_1, COUNT_2, RUNS, THREADS)     \
+    {                                                                               \
+        TEST_FUZZ_CASE_OPEN(TAG, RUNS)                                             \
+        {                                                                          \
+            fuzz_seed(_tag);                                                       \
+            num_p num_1 = num_create_rand(COUNT_1);                                \
+            num_p num_2 = num_create_rand(COUNT_2);                                \
+            num_p num_q, num_r;                                                    \
+            num_div_mod_threads(&num_q, &num_r, num_copy(num_1), num_copy(num_2), THREADS); \
+            assert(num_cmp(num_r, num_2) < 0)                                      \
+            num_p num_aux = num_mul(num_copy(num_q), num_copy(num_2));             \
+            num_aux = num_add(num_aux, num_copy(num_r));                           \
+            assert(num_eq_dbg(num_copy(num_aux), num_copy(num_1)))                 \
+            num_free(num_1);                                                       \
+            num_free(num_2);                                                       \
+            num_free(num_aux);                                                     \
+            num_free(num_q);                                                       \
+            num_free(num_r);                                                       \
+        }                                                                          \
+        TEST_FUZZ_CASE_CLOSE                                                       \
+    }
+
+    TEST_FUZZ_NUM_BZ_DIV_THREADED(12, 2000, 1000, 10, 2)
+    TEST_FUZZ_NUM_BZ_DIV_THREADED(13, 5000, 2000,  4, 4)
+
+    #undef TEST_FUZZ_NUM_BZ_DIV_THREADED
+
     TEST_FN_CLOSE
 }
 

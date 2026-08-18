@@ -4315,6 +4315,20 @@ static bool mul_is_classic(uint64_t count_1, uint64_t count_2)
     return (bool)((count_1 < threshold) || (count_2 < threshold));
 }
 
+// Separate from mul_is_classic's "use SSM at all" threshold: an operand can be well
+// past that and still be too small for spawning threads to pay off (pthread_create/
+// join plus a per-worker scratch allocation cost real time, worth paying once for a
+// huge multiply, not for a merely SSM-eligible one). Found via num_div_mod_bz_rec's
+// recursion, which calls num_mul_core at every level with shrinking operands -- this
+// is the one place that decides "is threading worth it" since it's the one place
+// that actually sees the operand size on every call, so every caller (division's deep
+// recursion included) gets this for free instead of having to reason about it itself.
+static bool mul_threads_worth_it(uint64_t count_1, uint64_t count_2)
+{
+    constexpr uint64_t threshold = 4096;
+    return (bool)(count_1 >= threshold && count_2 >= threshold);
+}
+
 num_p num_mul_core(num_p num_1, num_p num_2, bool free_inputs, uint64_t threads)
 {
     CLU_HANDLER_IS_SAFE(num_1)
@@ -4341,6 +4355,11 @@ num_p num_mul_core(num_p num_1, num_p num_2, bool free_inputs, uint64_t threads)
             num_free(num_2);
         }
         return num_res;
+    }
+
+    if(!mul_threads_worth_it(num_1->count, num_2->count))
+    {
+        threads = 1;
     }
 
     return num_mul_ssm(num_1, num_2, free_inputs, threads);
@@ -4893,11 +4912,23 @@ STRUCT(bz_frame)
 // Returns quotient
 // NUM_1 becomes remainder
 // Keeps NUM_2
+// This recursion never forks into concurrent branches (each step depends on the
+// previous one's effect on the shared remainder), so there's no oversubscription risk
+// from threading -- `threads` is passed unchanged at every level, all the way down.
+// It does call itself many times (depth ~log2(num_2->count)) with the multiply's
+// operand shrinking every level; threading every one of those calls uniformly was
+// tried and made things *worse* purely from pthread_create/join overhead at the many
+// small deep calls. Fixed at the source instead of here: num_mul_core now silently
+// drops to threads=1 for any operand below its own worth-it threshold
+// (mul_threads_worth_it), so this function doesn't need to reason about its own
+// recursion depth or size at all -- it just forwards `threads` everywhere and trusts
+// num_mul_core to only actually spawn threads where that pays off.
 static num_p num_div_mod_bz_rec(
     num_p num_aux,
     num_p num_1,
     num_p num_2,
-    bz_frame_t f[]
+    bz_frame_t f[],
+    uint64_t threads
 )
 {
     CLU_HANDLER_IS_SAFE(num_1)
@@ -4929,7 +4960,8 @@ static num_p num_div_mod_bz_rec(
             num_aux,
             &num_1_1,
             &f->num_2_1,
-            &f[1]
+            &f[1],
+            threads
         );
         num_normalize(num_1);
 
@@ -4939,7 +4971,7 @@ static num_p num_div_mod_bz_rec(
             continue;
         }
 
-        num_p num_aux_2 = num_mul_core(num_q_tmp, &f->num_2_0, false, 1);
+        num_p num_aux_2 = num_mul_core(num_q_tmp, &f->num_2_0, false, threads);
         while(num_cmp_offset(num_1, k * i, num_aux_2) < 0)
         {
             num_q_tmp = num_sub_uint(num_q_tmp, 1);
@@ -4961,7 +4993,7 @@ static num_p num_div_mod_bz_rec(
 // Returns quotient
 // NUM_1 becomes remainder
 // Keeps NUM_2
-static num_p num_div_mod_bz(num_p num_1, num_p num_2)
+static num_p num_div_mod_bz(num_p num_1, num_p num_2, uint64_t threads)
 {
     CLU_HANDLER_IS_SAFE(num_1)
     CLU_HANDLER_IS_SAFE(num_2)
@@ -4982,7 +5014,7 @@ static num_p num_div_mod_bz(num_p num_1, num_p num_2)
         num_t num_1_1;
         num_span(&num_1_1, num_1, n_1 - (2 * n_2), num_1->count);
 
-        num_p num_q_tmp = num_div_mod_bz_rec(num_aux, &num_1_1, num_2, f);
+        num_p num_q_tmp = num_div_mod_bz_rec(num_aux, &num_1_1, num_2, f, threads);
         num_normalize(num_1);
         num_q_tmp = num_expand_to(num_q_tmp, n_2 + num_q->count);
         num_add_offset(num_q_tmp, n_2, num_q);
@@ -4990,7 +5022,7 @@ static num_p num_div_mod_bz(num_p num_1, num_p num_2)
         num_q = num_q_tmp;
     }
 
-    num_p num_q_tmp = num_div_mod_bz_rec(num_aux, num_1, num_2, f);
+    num_p num_q_tmp = num_div_mod_bz_rec(num_aux, num_1, num_2, f, threads);
     num_q_tmp = num_expand_to(num_q_tmp, n_1 - n_2 + num_q->count);
     num_add_offset(num_q_tmp, n_1 - n_2, num_q);
 
@@ -5203,6 +5235,11 @@ static num_p num_sqr_core(num_p num, uint64_t threads)
         return num_sqr_classic(num);
     }
 
+    if(!mul_threads_worth_it(num->count, num->count))
+    {
+        threads = 1;
+    }
+
     return num_sqr_ssm(num, threads);
 }
 
@@ -5249,7 +5286,13 @@ num_p num_pow(num_p num, uint64_t value) // TODO TEST
 }
 
 // out_num_q and out_num_r can be nullptr
-void num_div_mod(num_p *out_num_q, num_p *out_num_r, num_p num_1, num_p num_2)
+static void num_div_mod_core(
+    num_p *out_num_q,
+    num_p *out_num_r,
+    num_p num_1,
+    num_p num_2,
+    uint64_t threads
+)
 {
     CLU_HANDLER_IS_SAFE(num_1)
     CLU_HANDLER_IS_SAFE(num_2)
@@ -5273,8 +5316,38 @@ void num_div_mod(num_p *out_num_q, num_p *out_num_r, num_p num_1, num_p num_2)
     }
 
     uint64_t bits = num_div_normalize(&num_1, &num_2);
-    num_p num_q = num_div_mod_bz(num_1, num_2);
+    num_p num_q = num_div_mod_bz(num_1, num_2, threads);
     num_div_mod_finalize(out_num_q, out_num_r, num_q, num_1, num_2, bits);
+}
+
+void num_div_mod(num_p *out_num_q, num_p *out_num_r, num_p num_1, num_p num_2)
+{
+    CLU_HANDLER_IS_SAFE(num_1)
+    CLU_HANDLER_IS_SAFE(num_2)
+    assert(num_1)
+    assert(num_2)
+
+    num_div_mod_core(out_num_q, out_num_r, num_1, num_2, 1);
+}
+
+// Same as num_div_mod, but the caller picks how many threads the one multiply inside
+// the Burnikel-Ziegler recursion (code.c num_div_mod_bz_rec) may use. That recursion
+// never forks into concurrent branches, so unlike num_mul_threads/num_sqr_threads
+// there's no "outermost call only" restriction -- every level can use the full count.
+void num_div_mod_threads(
+    num_p *out_num_q,
+    num_p *out_num_r,
+    num_p num_1,
+    num_p num_2,
+    uint64_t threads
+)
+{
+    CLU_HANDLER_IS_SAFE(num_1)
+    CLU_HANDLER_IS_SAFE(num_2)
+    assert(num_1)
+    assert(num_2)
+
+    num_div_mod_core(out_num_q, out_num_r, num_1, num_2, threads);
 }
 
 num_p num_div(num_p num_1, num_p num_2)
@@ -5289,6 +5362,18 @@ num_p num_div(num_p num_1, num_p num_2)
     return num_q;
 }
 
+num_p num_div_threads(num_p num_1, num_p num_2, uint64_t threads)
+{
+    CLU_HANDLER_IS_SAFE(num_1)
+    CLU_HANDLER_IS_SAFE(num_2)
+    assert(num_1)
+    assert(num_2)
+
+    num_p num_q;
+    num_div_mod_threads(&num_q, nullptr, num_1, num_2, threads);
+    return num_q;
+}
+
 num_p num_mod(num_p num_1, num_p num_2)
 {
     CLU_HANDLER_IS_SAFE(num_1)
@@ -5297,6 +5382,17 @@ num_p num_mod(num_p num_1, num_p num_2)
     assert(num_2)
 
     num_div_mod(nullptr, &num_1, num_1, num_2);
+    return num_1;
+}
+
+num_p num_mod_threads(num_p num_1, num_p num_2, uint64_t threads)
+{
+    CLU_HANDLER_IS_SAFE(num_1)
+    CLU_HANDLER_IS_SAFE(num_2)
+    assert(num_1)
+    assert(num_2)
+
+    num_div_mod_threads(nullptr, &num_1, num_1, num_2, threads);
     return num_1;
 }
 
