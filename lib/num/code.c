@@ -1,4 +1,3 @@
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -258,27 +257,6 @@ bool araucaria_disk_config_is_set()
 uint64_t araucaria_disk_config_get_threshold_bytes()
 {
     return s_araucaria_disk_config.disk_threshold_bytes;
-}
-
-
-
-static _Atomic uint64_t s_araucaria_thread_count = 1;
-static bool s_araucaria_thread_config_is_set = false;
-
-void araucaria_thread_config_set(araucaria_thread_config_p config)
-{
-    atomic_store_explicit(&s_araucaria_thread_count, config->thread_count, memory_order_relaxed);
-    s_araucaria_thread_config_is_set = true;
-}
-
-bool araucaria_thread_config_is_set()
-{
-    return s_araucaria_thread_config_is_set;
-}
-
-uint64_t araucaria_thread_config_get_thread_count()
-{
-    return atomic_load_explicit(&s_araucaria_thread_count, memory_order_relaxed);
 }
 
 
@@ -4046,7 +4024,7 @@ static num_p num_ssm_prepare_no_wrap(
 }
 
 // KEEPS NUM_1 NUM_2
-num_p num_mul_ssm(num_p num_1, num_p num_2, bool free_inputs)
+num_p num_mul_ssm(num_p num_1, num_p num_2, bool free_inputs, uint64_t threads)
 {
     CLU_HANDLER_IS_SAFE(num_1)
     CLU_HANDLER_IS_SAFE(num_2)
@@ -4065,7 +4043,7 @@ num_p num_mul_ssm(num_p num_1, num_p num_2, bool free_inputs)
         num_fft_1,
         num_fft_2,
         &p,
-        araucaria_thread_config_get_thread_count()
+        threads
     );
     num_free(num_aux_1);
     num_free(num_fft_2);
@@ -4085,7 +4063,7 @@ static bool mul_is_classic(uint64_t count_1, uint64_t count_2)
     return (bool)((count_1 < threshold) || (count_2 < threshold));
 }
 
-num_p num_mul_core(num_p num_1, num_p num_2, bool free_inputs)
+num_p num_mul_core(num_p num_1, num_p num_2, bool free_inputs, uint64_t threads)
 {
     CLU_HANDLER_IS_SAFE(num_1)
     CLU_HANDLER_IS_SAFE(num_2)
@@ -4113,7 +4091,7 @@ num_p num_mul_core(num_p num_1, num_p num_2, bool free_inputs)
         return num_res;
     }
 
-    return num_mul_ssm(num_1, num_2, free_inputs);
+    return num_mul_ssm(num_1, num_2, free_inputs, threads);
 }
 
 
@@ -4195,12 +4173,14 @@ static mem_profile_t ssm_pointwise_mem_estimate(
     };
 }
 
-// Time-weighted average RAM (bytes) live during num_mul, mirroring num_mul_core's
-// allocation sites. disk_threshold_bytes excludes buffers num_create would put on disk.
+// Time-weighted average RAM (bytes) live during num_mul_threads, mirroring
+// num_mul_core's allocation sites. disk_threshold_bytes excludes buffers num_create
+// would put on disk; threads should match whatever will be passed to num_mul_threads.
 uint64_t num_mul_estimate_memory(
     uint64_t count_1,
     uint64_t count_2,
-    uint64_t disk_threshold_bytes
+    uint64_t disk_threshold_bytes,
+    uint64_t threads
 )
 {
     if(count_1 == 0 || count_2 == 0)
@@ -4238,9 +4218,7 @@ uint64_t num_mul_estimate_memory(
         duration += dt;
     }
 
-    mem_profile_t pw = ssm_pointwise_mem_estimate(
-        n, K, live, disk_threshold_bytes, araucaria_thread_config_get_thread_count()
-    );
+    mem_profile_t pw = ssm_pointwise_mem_estimate(n, K, live, disk_threshold_bytes, threads);
     integral += pw.integral;
     duration += pw.duration;
 
@@ -4576,7 +4554,7 @@ static num_p num_div_mod_bz_rec(
             continue;
         }
 
-        num_p num_aux_2 = num_mul_core(num_q_tmp, &f->num_2_0, false);
+        num_p num_aux_2 = num_mul_core(num_q_tmp, &f->num_2_0, false, 1);
         while(num_cmp_offset(num_1, k * i, num_aux_2) < 0)
         {
             num_q_tmp = num_sub_uint(num_q_tmp, 1);
@@ -4808,7 +4786,20 @@ num_p num_mul(num_p num_1, num_p num_2)
     assert(num_1)
     assert(num_2)
 
-    return num_mul_core(num_1, num_2, true);
+    return num_mul_core(num_1, num_2, true, 1);
+}
+
+// Same as num_mul, but the caller picks how many threads the SSM pointwise multiply
+// (if reached) may fan its K-loop out across. threads is read once per call, so a
+// multiplication already in flight is unaffected by what later callers pass.
+num_p num_mul_threads(num_p num_1, num_p num_2, uint64_t threads)
+{
+    CLU_HANDLER_IS_SAFE(num_1)
+    CLU_HANDLER_IS_SAFE(num_2)
+    assert(num_1)
+    assert(num_2)
+
+    return num_mul_core(num_1, num_2, true, threads);
 }
 
 num_p num_sqr(num_p num)

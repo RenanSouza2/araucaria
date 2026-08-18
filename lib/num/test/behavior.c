@@ -2178,9 +2178,9 @@ static void test_num_mul(bool show)
 
     #define TEST_NUM_MUL_BATCH(TAG, NUM_1, NUM_2, RES)                                              \
     {                                                                                               \
-        TEST_NUM_MUL((10 * (TAG)) + 1, num_mul_classic(num_1, num_2),        NUM_1, NUM_2, RES)     \
-        TEST_NUM_MUL((10 * (TAG)) + 2, num_mul_ssm(num_1, num_2, false),     NUM_1, NUM_2, RES)     \
-        TEST_NUM_MUL((10 * (TAG)) + 3, num_mul_core(num_1, num_2, false),    NUM_1, NUM_2, RES)     \
+        TEST_NUM_MUL((10 * (TAG)) + 1, num_mul_classic(num_1, num_2),         NUM_1, NUM_2, RES)     \
+        TEST_NUM_MUL((10 * (TAG)) + 2, num_mul_ssm(num_1, num_2, false, 1),   NUM_1, NUM_2, RES)     \
+        TEST_NUM_MUL((10 * (TAG)) + 3, num_mul_core(num_1, num_2, false, 1), NUM_1, NUM_2, RES)     \
     }
 
     TEST_NUM_MUL_BATCH(1,
@@ -2992,15 +2992,15 @@ static void test_fuzz_num_ssm_mul(bool show)
 {
     TEST_FN_OPEN
 
-    #define TEST_FUZZ_NUM_SSM_MUL_COUNT(COUNT_1, COUNT_2)   \
-    {                                                       \
-        num_p num_1 = num_create_rand(COUNT_1);             \
-        num_p num_2 = num_create_rand(COUNT_2);             \
-        num_p num_res_1 = num_mul_ssm(num_1, num_2, false); \
-        num_p num_res_2 = num_mul_classic(num_1, num_2);    \
-        assert(num_eq_dbg(num_res_1, num_res_2));           \
-        num_free(num_1);                                    \
-        num_free(num_2);                                    \
+    #define TEST_FUZZ_NUM_SSM_MUL_COUNT(COUNT_1, COUNT_2)      \
+    {                                                          \
+        num_p num_1 = num_create_rand(COUNT_1);                \
+        num_p num_2 = num_create_rand(COUNT_2);                \
+        num_p num_res_1 = num_mul_ssm(num_1, num_2, false, 1); \
+        num_p num_res_2 = num_mul_classic(num_1, num_2);       \
+        assert(num_eq_dbg(num_res_1, num_res_2));              \
+        num_free(num_1);                                       \
+        num_free(num_2);                                       \
     }
 
     #define TEST_FUZZ_NUM_SSM_MUL(TAG, COUNT, RUNS)     \
@@ -3038,21 +3038,23 @@ static void test_fuzz_num_ssm_mul(bool show)
 
     #undef TEST_FUZZ_NUM_SSM_MUL
 
-    // Same oracle, but with the pointwise K-loop fanned out across threads. Each case
-    // runs in its own forked child (TEST_FUZZ_CASE_OPEN), so the config set here never
-    // leaks into sibling cases or the parent test process.
-    #define TEST_FUZZ_NUM_SSM_MUL_THREADED(TAG, COUNT, RUNS, THREAD_COUNT)             \
-    {                                                                                  \
-        TEST_FUZZ_CASE_OPEN(TAG, RUNS)                                                 \
-        {                                                                              \
-            fuzz_seed(_tag);                                                           \
-            araucaria_thread_config_set(&(araucaria_thread_config_t)                   \
-            {                                                                          \
-                .thread_count = THREAD_COUNT                                           \
-            });                                                                        \
-            TEST_FUZZ_NUM_SSM_MUL_COUNT(COUNT, COUNT)                                  \
-        }                                                                              \
-        TEST_FUZZ_CASE_CLOSE                                                           \
+    // Exercises the public num_mul_threads entry point directly (dispatch + consuming
+    // its inputs), not just the internal num_mul_ssm, at sizes large enough to hit the
+    // recursive pointwise path.
+    #define TEST_FUZZ_NUM_SSM_MUL_THREADED(TAG, COUNT, RUNS, THREADS)                       \
+    {                                                                                       \
+        TEST_FUZZ_CASE_OPEN(TAG, RUNS)                                                      \
+        {                                                                                   \
+            fuzz_seed(_tag);                                                                \
+            num_p num_1 = num_create_rand(COUNT);                                           \
+            num_p num_2 = num_create_rand(COUNT);                                           \
+            num_p num_res_1 = num_mul_threads(num_copy(num_1), num_copy(num_2), THREADS);   \
+            num_p num_res_2 = num_mul_classic(num_1, num_2);                                \
+            assert(num_eq_dbg(num_res_1, num_res_2));                                       \
+            num_free(num_1);                                                                \
+            num_free(num_2);                                                                \
+        }                                                                                   \
+        TEST_FUZZ_CASE_CLOSE                                                                \
     }
 
     TEST_FUZZ_NUM_SSM_MUL_THREADED(8, 1000, 10, 2)

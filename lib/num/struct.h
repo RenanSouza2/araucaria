@@ -19,12 +19,6 @@ STRUCT(araucaria_disk_config)
     bool is_set;
 };
 
-STRUCT(araucaria_thread_config)
-{
-    uint64_t thread_count;
-    bool is_set;
-};
-
 STRUCT(num)
 {
     uint64_t size;
