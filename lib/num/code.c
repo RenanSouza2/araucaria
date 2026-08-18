@@ -4525,10 +4525,13 @@ static void num_ssm_sqr_pointwise(
     num_p num_aux_1,
     num_p num_aux_2,
     num_p num_fft,
-    ssm_params_p p
+    ssm_params_p p,
+    uint64_t threads
 );
 
-// KEEPS NUM
+// KEEPS NUM. Always single-threaded: only num_ssm_sqr_pointwise's outermost call ever
+// fans out across threads; every call to num_ssm_sqr_wrap happens one recursion level
+// below that, so it has nothing to pass but 1.
 static void num_ssm_sqr_wrap(
     num_p num_aux_1,
     num_p num_aux_2,
@@ -4547,7 +4550,8 @@ static void num_ssm_sqr_wrap(
         num_aux_1,
         num_aux_2,
         num_fft,
-        p
+        p,
+        1
     );
 
     num_ssm_fft_inv(num_aux_2, num_fft, p, 1);
@@ -4561,13 +4565,63 @@ static void num_ssm_sqr_wrap(
     );
 }
 
+typedef struct
+{
+    num_p num_fft;
+    ssm_params_p p;
+    num_p num_aux_2;
+    uint64_t i_start;
+    uint64_t i_end;
+} ssm_sqr_pointwise_base_worker_t;
+
+static void * ssm_sqr_pointwise_base_worker(void * arg)
+{
+    ssm_sqr_pointwise_base_worker_t * w = arg;
+    for(uint64_t i = w->i_start; i < w->i_end; i++)
+    {
+        num_ssm_sqr_mod_span(w->num_aux_2, w->num_fft, i * w->p->n, w->p->n);
+    }
+    return nullptr;
+}
+
+typedef struct
+{
+    num_p num_fft;
+    ssm_params_p p;
+    ssm_params_p p_next;
+    num_p num_aux_1;
+    num_p num_aux_2;
+    num_p num_fft_next;
+    uint64_t i_start;
+    uint64_t i_end;
+} ssm_sqr_pointwise_rec_worker_t;
+
+static void * ssm_sqr_pointwise_rec_worker(void * arg)
+{
+    ssm_sqr_pointwise_rec_worker_t * w = arg;
+    for(uint64_t i = w->i_start; i < w->i_end; i++)
+    {
+        // NOLINTNEXTLINE(readability-suspicious-call-argument)
+        num_ssm_sqr_wrap(
+            w->num_aux_1,
+            w->num_aux_2,
+            w->num_fft_next,
+            w->num_fft,
+            i * w->p->n,
+            w->p_next
+        );
+    }
+    return nullptr;
+}
+
 // num_aux_1->size >= p->n
 // num_aux_2->size >= 2 * p->n
 static void num_ssm_sqr_pointwise(
     num_p num_aux_1,
     num_p num_aux_2,
     num_p num_fft,
-    ssm_params_p p
+    ssm_params_p p,
+    uint64_t threads
 )
 {
     CLU_HANDLER_IS_SAFE(num_aux_1)
@@ -4579,33 +4633,105 @@ static void num_ssm_sqr_pointwise(
     assert(num_aux_1->size >= p->n)
     assert(num_aux_2->size >= 2 * p->n)
 
+    uint64_t workers = ssm_worker_count(threads, p->K);
+
     if(!ssm_is_recursive(p->n))
     {
-        for(uint64_t i=0; i<p->K; i++)
+        if(workers <= 1)
         {
-            num_ssm_sqr_mod_span(num_aux_2, num_fft, i * p->n, p->n);
+            for(uint64_t i=0; i<p->K; i++)
+            {
+                num_ssm_sqr_mod_span(num_aux_2, num_fft, i * p->n, p->n);
+            }
+            return;
         }
+
+        ssm_sqr_pointwise_base_worker_t * worker_args = malloc(workers * sizeof(*worker_args));
+        assert(worker_args)
+        pthread_t * worker_ids = malloc(workers * sizeof(*worker_ids));
+        assert(worker_ids)
+
+        for(uint64_t w=0; w<workers; w++)
+        {
+            uint64_t i_start, i_end;
+            ssm_worker_range(w, workers, p->K, &i_start, &i_end);
+            worker_args[w] = (ssm_sqr_pointwise_base_worker_t)
+            {
+                .num_fft = num_fft,
+                .p = p,
+                .num_aux_2 = num_create_dirty(CLU_ARGS(2 * p->n, 0)),
+                .i_start = i_start,
+                .i_end = i_end,
+            };
+            TREAT(pthread_create(&worker_ids[w], nullptr, ssm_sqr_pointwise_base_worker, &worker_args[w]))
+        }
+        for(uint64_t w=0; w<workers; w++)
+        {
+            TREAT(pthread_join(worker_ids[w], nullptr))
+            num_free(worker_args[w].num_aux_2);
+        }
+
+        free(worker_ids);
+        free(worker_args);
         return;
     }
 
     ssm_params_t p_next = ssm_get_params_wrap(p->n);
-    num_p num_fft_next = num_create_dirty(CLU_ARGS(p_next.n * p_next.K, 0));
-    for(uint64_t i=0; i<p->K; i++)
+
+    if(workers <= 1)
     {
-        // NOLINTNEXTLINE(readability-suspicious-call-argument)
-        num_ssm_sqr_wrap(
-            num_aux_1,
-            num_aux_2,
-            num_fft_next,
-            num_fft,
-            i * p->n,
-            &p_next
-        );
+        num_p num_fft_next = num_create_dirty(CLU_ARGS(p_next.n * p_next.K, 0));
+        for(uint64_t i=0; i<p->K; i++)
+        {
+            // NOLINTNEXTLINE(readability-suspicious-call-argument)
+            num_ssm_sqr_wrap(
+                num_aux_1,
+                num_aux_2,
+                num_fft_next,
+                num_fft,
+                i * p->n,
+                &p_next
+            );
+        }
+        num_free(num_fft_next);
+        return;
     }
-    num_free(num_fft_next);
+
+    ssm_sqr_pointwise_rec_worker_t * worker_args = malloc(workers * sizeof(*worker_args));
+    assert(worker_args)
+    pthread_t * worker_ids = malloc(workers * sizeof(*worker_ids));
+    assert(worker_ids)
+
+    for(uint64_t w=0; w<workers; w++)
+    {
+        uint64_t i_start, i_end;
+        ssm_worker_range(w, workers, p->K, &i_start, &i_end);
+        worker_args[w] = (ssm_sqr_pointwise_rec_worker_t)
+        {
+            .num_fft = num_fft,
+            .p = p,
+            .p_next = &p_next,
+            .num_aux_1 = num_create_dirty(CLU_ARGS(p->n, 0)),
+            .num_aux_2 = num_create_dirty(CLU_ARGS(2 * p->n, 0)),
+            .num_fft_next = num_create_dirty(CLU_ARGS(p_next.n * p_next.K, 0)),
+            .i_start = i_start,
+            .i_end = i_end,
+        };
+        TREAT(pthread_create(&worker_ids[w], nullptr, ssm_sqr_pointwise_rec_worker, &worker_args[w]))
+    }
+    for(uint64_t w=0; w<workers; w++)
+    {
+        TREAT(pthread_join(worker_ids[w], nullptr))
+        num_free(worker_args[w].num_aux_1);
+        num_free(worker_args[w].num_aux_2);
+        num_free(worker_args[w].num_fft_next);
+    }
+
+    free(worker_ids);
+    free(worker_args);
 }
 
-num_p num_sqr_ssm(num_p num)
+num_p num_sqr_ssm(num_p num, uint64_t threads)
 {
     CLU_HANDLER_IS_SAFE(num)
     assert(num)
@@ -4613,12 +4739,12 @@ num_p num_sqr_ssm(num_p num)
     ssm_params_t p = ssm_get_params(2 * num->count);
     num_p num_aux_1 = num_create_dirty(CLU_ARGS(p.n, 0));
     num_p num_aux_2 = num_create_dirty(CLU_ARGS(2 * p.n, 0));
-    num_p num_fft = num_ssm_prepare_no_wrap(num_aux_2, num, &p, true, 1);
+    num_p num_fft = num_ssm_prepare_no_wrap(num_aux_2, num, &p, true, threads);
 
-    num_ssm_sqr_pointwise(num_aux_1, num_aux_2, num_fft, &p);
+    num_ssm_sqr_pointwise(num_aux_1, num_aux_2, num_fft, &p, threads);
     num_free(num_aux_1);
 
-    num_ssm_fft_inv(num_aux_2, num_fft, &p, 1);
+    num_ssm_fft_inv(num_aux_2, num_fft, &p, threads);
     num_free(num_aux_2);
 
     return num_ssm_depad_no_wrap(num_fft, &p);
@@ -5061,7 +5187,7 @@ num_p num_mul_threads(num_p num_1, num_p num_2, uint64_t threads)
     return num_mul_core(num_1, num_2, true, threads);
 }
 
-num_p num_sqr(num_p num)
+static num_p num_sqr_core(num_p num, uint64_t threads)
 {
     CLU_HANDLER_IS_SAFE(num);
     assert(num);
@@ -5077,7 +5203,25 @@ num_p num_sqr(num_p num)
         return num_sqr_classic(num);
     }
 
-    return num_sqr_ssm(num);
+    return num_sqr_ssm(num, threads);
+}
+
+num_p num_sqr(num_p num)
+{
+    CLU_HANDLER_IS_SAFE(num);
+    assert(num);
+
+    return num_sqr_core(num, 1);
+}
+
+// Same as num_sqr, but the caller picks how many threads the SSM pointwise square (if
+// reached) may fan its K-loop out across, same as num_mul_threads.
+num_p num_sqr_threads(num_p num, uint64_t threads)
+{
+    CLU_HANDLER_IS_SAFE(num);
+    assert(num);
+
+    return num_sqr_core(num, threads);
 }
 
 num_p num_pow(num_p num, uint64_t value) // TODO TEST

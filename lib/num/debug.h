@@ -120,7 +120,7 @@ STATIC num_p num_mul_ssm(num_p num_1, num_p num_2, bool free_inputs, uint64_t th
 STATIC num_p num_mul_core(num_p num_1, num_p num_2, bool free_inputs, uint64_t threads);
 
 STATIC num_p num_sqr_classic(num_p num);
-num_p num_sqr_ssm(num_p num);
+num_p num_sqr_ssm(num_p num, uint64_t threads);
 
 STATIC uint64_t num_div_normalize(num_p *num_1, num_p *num_2);
 

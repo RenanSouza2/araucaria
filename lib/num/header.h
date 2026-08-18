@@ -51,6 +51,7 @@ uint64_t num_mul_estimate_memory(
 );
 num_p num_pow(num_p num, uint64_t value);
 num_p num_sqr(num_p num);
+num_p num_sqr_threads(num_p num, uint64_t threads);
 void num_div_mod(
     num_p *out_num_q,
     num_p *out_num_r,

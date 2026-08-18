@@ -3081,12 +3081,12 @@ static void test_fuzz_num_ssm_sqr(bool show)
 {
     TEST_FN_OPEN
 
-    #define TEST_FUZZ_NUM_SSM_SQR_COUNT(COUNT)          \
-    {                                                   \
-        num_p num = num_create_rand(COUNT);             \
-        num_p num_res_1 = num_sqr_ssm(num_copy(num));   \
-        num_p num_res_2 = num_sqr_classic(num);         \
-        assert(num_eq_dbg(num_res_1, num_res_2));       \
+    #define TEST_FUZZ_NUM_SSM_SQR_COUNT(COUNT)             \
+    {                                                       \
+        num_p num = num_create_rand(COUNT);                \
+        num_p num_res_1 = num_sqr_ssm(num_copy(num), 1);    \
+        num_p num_res_2 = num_sqr_classic(num);              \
+        assert(num_eq_dbg(num_res_1, num_res_2));           \
     }
 
     #define TEST_FUZZ_NUM_SSM_SQR(TAG, COUNT, RUNS) \
@@ -3105,6 +3105,26 @@ static void test_fuzz_num_ssm_sqr(bool show)
 
     #undef TEST_FUZZ_NUM_SSM_SQR
     #undef TEST_FUZZ_NUM_SSM_SQR_COUNT
+
+    // Same oracle, but through the public num_sqr_threads entry point (dispatch +
+    // consuming its input), at sizes large enough to hit the recursive pointwise path.
+    #define TEST_FUZZ_NUM_SSM_SQR_THREADED(TAG, COUNT, RUNS, THREADS)   \
+    {                                                                   \
+        TEST_FUZZ_CASE_OPEN(TAG, RUNS)                                  \
+        {                                                               \
+            fuzz_seed(_tag);                                            \
+            num_p num = num_create_rand(COUNT);                         \
+            num_p num_res_1 = num_sqr_threads(num_copy(num), THREADS);  \
+            num_p num_res_2 = num_sqr_classic(num);                     \
+            assert(num_eq_dbg(num_res_1, num_res_2));                  \
+        }                                                               \
+        TEST_FUZZ_CASE_CLOSE                                            \
+    }
+
+    TEST_FUZZ_NUM_SSM_SQR_THREADED(4, 1000, 10, 2)
+    TEST_FUZZ_NUM_SSM_SQR_THREADED(5, 5000,  4, 4)
+
+    #undef TEST_FUZZ_NUM_SSM_SQR_THREADED
 
     TEST_FN_CLOSE
 }
