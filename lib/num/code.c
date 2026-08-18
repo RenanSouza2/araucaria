@@ -3696,7 +3696,9 @@ static void num_ssm_mul_pointwise(
     uint64_t threads
 );
 
-// KEEPS NUM_1 NUM_2
+// KEEPS NUM_1 NUM_2. Always single-threaded: only num_ssm_mul_pointwise's outermost
+// call ever fans out across threads; every call to num_ssm_mul_wrap happens one
+// recursion level below that, so it has nothing to pass but 1.
 void num_ssm_mul_wrap(
     num_p num_aux_1,
     num_p num_aux_2,
@@ -3705,8 +3707,7 @@ void num_ssm_mul_wrap(
     num_p num_1,
     num_p num_2,
     uint64_t pos,
-    ssm_params_p p,
-    uint64_t threads
+    ssm_params_p p
 )
 {
     CLU_HANDLER_IS_SAFE(num_1)
@@ -3723,7 +3724,7 @@ void num_ssm_mul_wrap(
         num_fft_1,
         num_fft_2,
         p,
-        threads
+        1
     );
 
     num_ssm_fft_inv(num_aux_2, num_fft_1, p);
@@ -3807,8 +3808,7 @@ static void * ssm_pointwise_rec_worker(void * arg)
             w->num_fft_1,
             w->num_fft_2,
             i * w->p->n,
-            w->p_next,
-            1
+            w->p_next
         );
     }
     return nullptr;
@@ -3897,8 +3897,7 @@ static void num_ssm_mul_pointwise(
                 num_fft_1,
                 num_fft_2,
                 i * p->n,
-                &p_next,
-                1
+                &p_next
             );
         }
         num_free(num_fft_1_next);

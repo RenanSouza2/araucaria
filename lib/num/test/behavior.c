@@ -1850,8 +1850,7 @@ static void test_num_ssm_mul_wrap(bool show)
                 num_fft_1,                                                      \
                 num_fft_2,                                                      \
                 0,                                                              \
-                &p,                                                             \
-                1                                                               \
+                &p                                                              \
             );                                                                  \
             assert(num_immed(num_fft_1, ARG_OPEN RES))                          \
             num_free(num_aux_1);                                                \
