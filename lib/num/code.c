@@ -2828,44 +2828,13 @@ static void num_ssm_butterfly(
 #endif
 }
 
-// Splits a thread budget in half for a 2-way fork; either half can be 0 (meaning
-// "run serially"), never both more than the parent, so the total concurrently active
-// threads across a whole recursive fan-out never exceeds the original budget.
-static void ssm_fft_split_threads(uint64_t threads, uint64_t * out_1, uint64_t * out_2)
-{
-    *out_1 = threads / 2;
-    *out_2 = threads - *out_1;
-}
-
-typedef struct
-{
-    num_p num_aux;
-    num_p num_fft;
-    uint64_t pos;
-    uint64_t step;
-    uint64_t n;
-    uint64_t K;
-    uint64_t bits;
-    uint64_t threads;
-} ssm_fft_fwd_worker_t;
-
-static void num_ssm_fft_fwd_rec(
-    num_p num_aux,
-    num_p num_fft, uint64_t pos,
-    uint64_t step,
-    uint64_t n,
-    uint64_t K,
-    uint64_t bits,
-    uint64_t threads
-);
-
-static void * ssm_fft_fwd_worker(void * arg)
-{
-    ssm_fft_fwd_worker_t * w = arg;
-    num_ssm_fft_fwd_rec(w->num_aux, w->num_fft, w->pos, w->step, w->n, w->K, w->bits, w->threads);
-    return nullptr;
-}
-
+// Loop-based equivalent of the divide-and-combine recursion this used to be:
+// stages run from deepest (group_step = K/2) up to the top (group_step = 1).
+// Butterflies within one stage touch disjoint (pos_1, pos_2) pairs, so
+// running them in any order (here: increasing j, then i) reaches the same
+// result as the original post-order recursive traversal.
+// Not parallelized (see git history for the previous threaded recursive
+// version); threading groundwork is a separate follow-up.
 // num_aux->size >= 2 * n
 static void num_ssm_fft_fwd_rec(
     num_p num_aux,
@@ -2873,8 +2842,7 @@ static void num_ssm_fft_fwd_rec(
     uint64_t step,
     uint64_t n,
     uint64_t K,
-    uint64_t bits,
-    uint64_t threads
+    uint64_t bits
 )
 {
     CLU_HANDLER_IS_SAFE(num_aux)
@@ -2883,48 +2851,27 @@ static void num_ssm_fft_fwd_rec(
     assert(num_fft)
     assert(num_aux->size >= 2 * n)
 
-    if(K > 2)
+    for(uint64_t group_step = K / 2; group_step >= 1; group_step /= 2)
     {
-        if(threads <= 1)
-        {
-            num_ssm_fft_fwd_rec(num_aux, num_fft, pos     , 2*step, n, K/2, 2*bits, 1);
-            num_ssm_fft_fwd_rec(num_aux, num_fft, pos+step, 2*step, n, K/2, 2*bits, 1);
-        }
-        else
-        {
-            uint64_t threads_1, threads_2;
-            ssm_fft_split_threads(threads, &threads_1, &threads_2);
+        uint64_t local_step = step * group_step;
+        uint64_t K_local = K / group_step;
+        uint64_t bits_local = bits * group_step;
 
-            ssm_fft_fwd_worker_t w_2 =
+        for(uint64_t j = 0; j < group_step; j++)
+        {
+            uint64_t pos_local = pos + (step * j);
+
+            for(uint64_t i = 0; i < K_local / 2; i++)
             {
-                .num_aux = num_create_dirty(CLU_ARGS(2 * n, 0)),
-                .num_fft = num_fft,
-                .pos = pos + step,
-                .step = 2 * step,
-                .n = n,
-                .K = K / 2,
-                .bits = 2 * bits,
-                .threads = threads_2,
-            };
-            pthread_t thread_2;
-            TREAT(pthread_create(&thread_2, nullptr, ssm_fft_fwd_worker, &w_2))
+                uint64_t pos_1 = (pos_local + (local_step * 2 * i)) * n;
+                uint64_t pos_2 = (pos_local + (local_step * ((2 * i) + 1))) * n;
 
-            num_ssm_fft_fwd_rec(num_aux, num_fft, pos, 2*step, n, K/2, 2*bits, threads_1);
+                uint64_t shift = ssm_bit_inv(i, K_local / 2) * bits_local;
+                num_ssm_shl_mod(num_aux, num_fft, pos_2, n, shift);
 
-            TREAT(pthread_join(thread_2, nullptr))
-            num_free(w_2.num_aux);
+                num_ssm_butterfly(num_aux, num_fft, pos_1, pos_2, n);
+            }
         }
-    }
-
-    for(uint64_t i=0; i<K/2; i++)
-    {
-        uint64_t pos_1 = (pos + (step * (2 * i))) * n;
-        uint64_t pos_2 = (pos + (step * ((2 * i) + 1))) * n;
-
-        uint64_t shift = ssm_bit_inv(i, K / 2) * bits;
-        num_ssm_shl_mod(num_aux, num_fft, pos_2, n, shift);
-
-        num_ssm_butterfly(num_aux, num_fft, pos_1, pos_2, n);
     }
 }
 
@@ -2999,37 +2946,16 @@ void num_ssm_fft_fwd(num_p num_aux, num_p num_fft, ssm_params_p p, uint64_t thre
         free(worker_args);
     }
 
-    num_ssm_fft_fwd_rec(num_aux, num_fft, 0, 1, p->n, p->K, 2 * p->Q, threads);
+    num_ssm_fft_fwd_rec(num_aux, num_fft, 0, 1, p->n, p->K, 2 * p->Q);
 }
 
-typedef struct
-{
-    num_p num_aux;
-    num_p num;
-    uint64_t pos;
-    uint64_t n;
-    uint64_t k;
-    uint64_t bits;
-    uint64_t threads;
-} ssm_fft_inv_worker_t;
-
-static void num_ssm_fft_inv_rec(
-    num_p num_aux,
-    num_p num,
-    uint64_t pos,
-    uint64_t n,
-    uint64_t k,
-    uint64_t bits,
-    uint64_t threads
-);
-
-static void * ssm_fft_inv_worker(void * arg)
-{
-    ssm_fft_inv_worker_t * w = arg;
-    num_ssm_fft_inv_rec(w->num_aux, w->num, w->pos, w->n, w->k, w->bits, w->threads);
-    return nullptr;
-}
-
+// Loop-based equivalent of the divide-and-combine recursion this used to be:
+// stages run from deepest (half = 1) up to the top (half = k/2). Butterflies
+// within one stage touch disjoint (pos_1, pos_2) pairs, so running them in
+// any order reaches the same result as the original post-order recursive
+// traversal.
+// Not parallelized (see git history for the previous threaded recursive
+// version); threading groundwork is a separate follow-up.
 // num_aux->size >= 2 * n
 static void num_ssm_fft_inv_rec(
     num_p num_aux,
@@ -3037,8 +2963,7 @@ static void num_ssm_fft_inv_rec(
     uint64_t pos,
     uint64_t n,
     uint64_t k,
-    uint64_t bits,
-    uint64_t threads
+    uint64_t bits
 )
 {
     CLU_HANDLER_IS_SAFE(num_aux)
@@ -3047,46 +2972,26 @@ static void num_ssm_fft_inv_rec(
     assert(num)
     assert(num_aux->size >= 2 * n)
 
-    if(k > 2)
-    {
-        if(threads <= 1)
-        {
-            num_ssm_fft_inv_rec(num_aux, num, pos      , n, k/2, 2*bits, 1);
-            num_ssm_fft_inv_rec(num_aux, num, pos+(k/2), n, k/2, 2*bits, 1);
-        }
-        else
-        {
-            uint64_t threads_1, threads_2;
-            ssm_fft_split_threads(threads, &threads_1, &threads_2);
+    uint64_t bits_local = bits * (k / 2);
 
-            ssm_fft_inv_worker_t w_2 =
+    for(uint64_t half = 1; half <= k / 2; half *= 2)
+    {
+        uint64_t k_local = 2 * half;
+
+        for(uint64_t pos_base = pos; pos_base < pos + k; pos_base += k_local)
+        {
+            for(uint64_t i = 0; i < half; i++)
             {
-                .num_aux = num_create_dirty(CLU_ARGS(2 * n, 0)),
-                .num = num,
-                .pos = pos + (k/2),
-                .n = n,
-                .k = k/2,
-                .bits = 2 * bits,
-                .threads = threads_2,
-            };
-            pthread_t thread_2;
-            TREAT(pthread_create(&thread_2, nullptr, ssm_fft_inv_worker, &w_2))
+                uint64_t pos_1 = (pos_base + i) * n;
+                uint64_t pos_2 = (pos_base + i + half) * n;
 
-            num_ssm_fft_inv_rec(num_aux, num, pos, n, k/2, 2*bits, threads_1);
+                num_ssm_shr_mod(num_aux, num, pos_2, n, i * bits_local);
 
-            TREAT(pthread_join(thread_2, nullptr))
-            num_free(w_2.num_aux);
+                num_ssm_butterfly(num_aux, num, pos_1, pos_2, n);
+            }
         }
-    }
 
-    for(uint64_t i=0; i<k/2; i++)
-    {
-        uint64_t pos_1 = (pos + i) * n;
-        uint64_t pos_2 = (pos + i + (k/2)) * n;
-
-        num_ssm_shr_mod(num_aux, num, pos_2, n, i * bits);
-
-        num_ssm_butterfly(num_aux, num, pos_1, pos_2, n);
+        bits_local /= 2;
     }
 }
 
@@ -3129,7 +3034,7 @@ void num_ssm_fft_inv(num_p num_aux, num_p num_fft, ssm_params_p p, uint64_t thre
     assert(num_fft)
     assert(num_aux->size >= 2 * p->n)
 
-    num_ssm_fft_inv_rec(num_aux, num_fft, 0, p->n, p->K, 2 * p->Q, threads);
+    num_ssm_fft_inv_rec(num_aux, num_fft, 0, p->n, p->K, 2 * p->Q);
 
     uint64_t k_ = stdc_trailing_zeros(p->K);
     uint64_t lim = ((chunk_bits * (p->n - 1)) - k_) / p->Q;
