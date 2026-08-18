@@ -1679,7 +1679,7 @@ static void test_num_ssm_fft_fwd(bool show)
                 .n = (Nv),                              \
             };                                          \
             num_p num_aux = num_create_rand(2 * (Nv));  \
-            num_ssm_fft_fwd(num_aux, num, &p);          \
+            num_ssm_fft_fwd(num_aux, num, &p, 1);       \
             num_free(num_aux);                          \
             assert(num_immed(num, ARG_OPEN RES));       \
         }                                               \
@@ -2939,7 +2939,7 @@ static void test_fuzz_num_ssm_fft(bool show)
 {
     TEST_FN_OPEN
 
-    #define TEST_FUZZ_NUM_SSM_FFT(TAG, Nv, Kv, RUNS)                    \
+    #define TEST_FUZZ_NUM_SSM_FFT_THREADS(TAG, Nv, Kv, RUNS, THREADS)   \
     {                                                                   \
         TEST_FUZZ_CASE_OPEN(TAG, RUNS)                                  \
         {                                                               \
@@ -2958,8 +2958,8 @@ static void test_fuzz_num_ssm_fft(bool show)
             num_fft->count = (Nv) * (Kv);                               \
             num_p num_res = num_copy(num_fft);                          \
             num_p num_aux = num_create_rand(2 * (Nv));                  \
-            num_ssm_fft_fwd(num_aux, num_res, &p);                      \
-            num_ssm_fft_inv(num_aux, num_res, &p);                      \
+            num_ssm_fft_fwd(num_aux, num_res, &p, THREADS);             \
+            num_ssm_fft_inv(num_aux, num_res, &p, THREADS);             \
             num_free(num_aux);                                          \
             if(!num_eq_dbg(num_copy(num_res), num_copy(num_fft)))       \
             {                                                           \
@@ -2976,6 +2976,9 @@ static void test_fuzz_num_ssm_fft(bool show)
         TEST_FUZZ_CASE_CLOSE                                            \
     }
 
+    #define TEST_FUZZ_NUM_SSM_FFT(TAG, Nv, Kv, RUNS) \
+        TEST_FUZZ_NUM_SSM_FFT_THREADS(TAG, Nv, Kv, RUNS, 1)
+
     TEST_FUZZ_NUM_SSM_FFT(1, 9, 4, 100)
     TEST_FUZZ_NUM_SSM_FFT(2, 9, 8, 100)
     TEST_FUZZ_NUM_SSM_FFT(3, 9, 16, 100)
@@ -2983,6 +2986,14 @@ static void test_fuzz_num_ssm_fft(bool show)
     TEST_FUZZ_NUM_SSM_FFT(5, 25, 128, 100)
 
     #undef TEST_FUZZ_NUM_SSM_FFT
+
+    // Same round-trip check, but with the recursive fwd/inv fan-out exercised via
+    // threads > 1 (K=128 gives K/2=64 possible leaves, comfortably above these counts).
+    TEST_FUZZ_NUM_SSM_FFT_THREADS(6, 25, 128, 100, 2)
+    TEST_FUZZ_NUM_SSM_FFT_THREADS(7, 25, 128, 100, 4)
+    TEST_FUZZ_NUM_SSM_FFT_THREADS(8, 25, 128, 100, 8)
+
+    #undef TEST_FUZZ_NUM_SSM_FFT_THREADS
 
     TEST_FN_CLOSE
 }

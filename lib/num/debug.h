@@ -89,8 +89,8 @@ STATIC void num_ssm_shr_mod(
 );
 STATIC ssm_params_t ssm_get_params(uint64_t count);
 STATIC ssm_params_t ssm_get_params_wrap(uint64_t n);
-STATIC void num_ssm_fft_fwd(num_p num_aux, num_p num_fft, ssm_params_p p);
-STATIC void num_ssm_fft_inv(num_p num_aux, num_p num_fft, ssm_params_p p);
+STATIC void num_ssm_fft_fwd(num_p num_aux, num_p num_fft, ssm_params_p p, uint64_t threads);
+STATIC void num_ssm_fft_inv(num_p num_aux, num_p num_fft, ssm_params_p p, uint64_t threads);
 
 STATIC void num_ssm_pad_wrap(num_p num_fft, num_p num, uint64_t pos, ssm_params_p p);
 STATIC void num_ssm_depad_wrap(
