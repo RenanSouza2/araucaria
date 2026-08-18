@@ -112,7 +112,8 @@ STATIC void num_ssm_mul_wrap(
     num_p num_1,
     num_p num_2,
     uint64_t pos,
-    ssm_params_p p
+    ssm_params_p p,
+    uint64_t threads
 );
 
 STATIC num_p num_mul_classic(num_p num_1, num_p num_2);

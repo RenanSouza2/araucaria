@@ -1850,7 +1850,8 @@ static void test_num_ssm_mul_wrap(bool show)
                 num_fft_1,                                                      \
                 num_fft_2,                                                      \
                 0,                                                              \
-                &p                                                              \
+                &p,                                                             \
+                1                                                               \
             );                                                                  \
             assert(num_immed(num_fft_1, ARG_OPEN RES))                          \
             num_free(num_aux_1);                                                \
@@ -3036,6 +3037,30 @@ static void test_fuzz_num_ssm_mul(bool show)
     TEST_FUZZ_NUM_SSM_MUL(7, 500, 5000, 100)
 
     #undef TEST_FUZZ_NUM_SSM_MUL
+
+    // Same oracle, but with the pointwise K-loop fanned out across threads. Each case
+    // runs in its own forked child (TEST_FUZZ_CASE_OPEN), so the config set here never
+    // leaks into sibling cases or the parent test process.
+    #define TEST_FUZZ_NUM_SSM_MUL_THREADED(TAG, COUNT, RUNS, THREAD_COUNT)             \
+    {                                                                                  \
+        TEST_FUZZ_CASE_OPEN(TAG, RUNS)                                                 \
+        {                                                                              \
+            fuzz_seed(_tag);                                                           \
+            araucaria_thread_config_set(&(araucaria_thread_config_t)                   \
+            {                                                                          \
+                .thread_count = THREAD_COUNT                                           \
+            });                                                                        \
+            TEST_FUZZ_NUM_SSM_MUL_COUNT(COUNT, COUNT)                                  \
+        }                                                                              \
+        TEST_FUZZ_CASE_CLOSE                                                           \
+    }
+
+    TEST_FUZZ_NUM_SSM_MUL_THREADED(8, 1000, 10, 2)
+    TEST_FUZZ_NUM_SSM_MUL_THREADED(9, 5000, 4, 4)
+    TEST_FUZZ_NUM_SSM_MUL_THREADED(10, 80000, 1, 4)
+
+    #undef TEST_FUZZ_NUM_SSM_MUL_THREADED
+    #undef TEST_FUZZ_NUM_SSM_MUL_COUNT
 
     TEST_FN_CLOSE
 }

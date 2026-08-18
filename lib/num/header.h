@@ -13,6 +13,10 @@ void araucaria_disk_config_set(araucaria_disk_config_p config);
 bool araucaria_disk_config_is_set();
 uint64_t araucaria_disk_config_get_threshold_bytes();
 
+void araucaria_thread_config_set(araucaria_thread_config_p config);
+bool araucaria_thread_config_is_set();
+uint64_t araucaria_thread_config_get_thread_count();
+
 void num_display_dec(num_p num);
 void num_display(num_p num);
 void num_display_tag(const char tag[], num_p num);

@@ -1,3 +1,4 @@
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,6 +10,7 @@
 #include "internal.h"
 #include "../../mods/macros/assert.h" // IWYU pragma: keep
 #include "../../mods/macros/stdbit.h" // IWYU pragma: keep
+#include "../../mods/macros/threads.h"
 #include "../../mods/macros/uint.h"
 #include "../../mods/clu/header.h"
 #include "struct.h"
@@ -256,6 +258,27 @@ bool araucaria_disk_config_is_set()
 uint64_t araucaria_disk_config_get_threshold_bytes()
 {
     return s_araucaria_disk_config.disk_threshold_bytes;
+}
+
+
+
+static _Atomic uint64_t s_araucaria_thread_count = 1;
+static bool s_araucaria_thread_config_is_set = false;
+
+void araucaria_thread_config_set(araucaria_thread_config_p config)
+{
+    atomic_store_explicit(&s_araucaria_thread_count, config->thread_count, memory_order_relaxed);
+    s_araucaria_thread_config_is_set = true;
+}
+
+bool araucaria_thread_config_is_set()
+{
+    return s_araucaria_thread_config_is_set;
+}
+
+uint64_t araucaria_thread_config_get_thread_count()
+{
+    return atomic_load_explicit(&s_araucaria_thread_count, memory_order_relaxed);
 }
 
 
@@ -3691,7 +3714,8 @@ static void num_ssm_mul_pointwise(
     num_p num_aux_2,
     num_p num_fft_1,
     num_p num_fft_2,
-    ssm_params_p p
+    ssm_params_p p,
+    uint64_t threads
 );
 
 // KEEPS NUM_1 NUM_2
@@ -3703,7 +3727,8 @@ void num_ssm_mul_wrap(
     num_p num_1,
     num_p num_2,
     uint64_t pos,
-    ssm_params_p p
+    ssm_params_p p,
+    uint64_t threads
 )
 {
     CLU_HANDLER_IS_SAFE(num_1)
@@ -3719,7 +3744,8 @@ void num_ssm_mul_wrap(
         num_aux_2,
         num_fft_1,
         num_fft_2,
-        p
+        p,
+        threads
     );
 
     num_ssm_fft_inv(num_aux_2, num_fft_1, p);
@@ -3735,6 +3761,81 @@ void num_ssm_mul_wrap(
 
 
 
+// Only the outermost pointwise call parallelizes across K; every recursive call below
+// it is invoked with threads=1, so this never has to reason about nested fan-out.
+static uint64_t ssm_pointwise_worker_count(uint64_t threads, uint64_t K)
+{
+    uint64_t workers = threads < K ? threads : K;
+    return workers ? workers : 1;
+}
+
+static void ssm_pointwise_worker_range(
+    uint64_t worker,
+    uint64_t workers,
+    uint64_t K,
+    uint64_t * out_start,
+    uint64_t * out_end
+)
+{
+    *out_start = (K * worker) / workers;
+    *out_end = (K * (worker + 1)) / workers;
+}
+
+typedef struct
+{
+    num_p num_fft_1;
+    num_p num_fft_2;
+    ssm_params_p p;
+    num_p num_aux_2;
+    uint64_t i_start;
+    uint64_t i_end;
+} ssm_pointwise_base_worker_t;
+
+static void * ssm_pointwise_base_worker(void * arg)
+{
+    ssm_pointwise_base_worker_t * w = arg;
+    for(uint64_t i = w->i_start; i < w->i_end; i++)
+    {
+        num_ssm_mul_mod_span(w->num_aux_2, w->num_fft_1, w->num_fft_2, i * w->p->n, w->p->n);
+    }
+    return nullptr;
+}
+
+typedef struct
+{
+    num_p num_fft_1;
+    num_p num_fft_2;
+    ssm_params_p p;
+    ssm_params_p p_next;
+    num_p num_aux_1;
+    num_p num_aux_2;
+    num_p num_fft_1_next;
+    num_p num_fft_2_next;
+    uint64_t i_start;
+    uint64_t i_end;
+} ssm_pointwise_rec_worker_t;
+
+static void * ssm_pointwise_rec_worker(void * arg)
+{
+    ssm_pointwise_rec_worker_t * w = arg;
+    for(uint64_t i = w->i_start; i < w->i_end; i++)
+    {
+        // NOLINTNEXTLINE(readability-suspicious-call-argument)
+        num_ssm_mul_wrap(
+            w->num_aux_1,
+            w->num_aux_2,
+            w->num_fft_1_next,
+            w->num_fft_2_next,
+            w->num_fft_1,
+            w->num_fft_2,
+            i * w->p->n,
+            w->p_next,
+            1
+        );
+    }
+    return nullptr;
+}
+
 // num_aux_1->size >= p->n
 // num_aux_2->size >= 2 * p->n
 static void num_ssm_mul_pointwise(
@@ -3742,7 +3843,8 @@ static void num_ssm_mul_pointwise(
     num_p num_aux_2,
     num_p num_fft_1,
     num_p num_fft_2,
-    ssm_params_p p
+    ssm_params_p p,
+    uint64_t threads
 )
 {
     CLU_HANDLER_IS_SAFE(num_aux_1)
@@ -3756,34 +3858,111 @@ static void num_ssm_mul_pointwise(
     assert(num_aux_1->size >= p->n)
     assert(num_aux_2->size >= 2 * p->n)
 
+    uint64_t workers = ssm_pointwise_worker_count(threads, p->K);
+
     if(!ssm_is_recursive(p->n))
     {
-        for(uint64_t i=0; i<p->K; i++)
+        if(workers <= 1)
         {
-            num_ssm_mul_mod_span(num_aux_2, num_fft_1, num_fft_2, i * p->n, p->n);
+            for(uint64_t i=0; i<p->K; i++)
+            {
+                num_ssm_mul_mod_span(num_aux_2, num_fft_1, num_fft_2, i * p->n, p->n);
+            }
+            return;
         }
+
+        ssm_pointwise_base_worker_t * worker_args = malloc(workers * sizeof(*worker_args));
+        assert(worker_args)
+        pthread_t * worker_ids = malloc(workers * sizeof(*worker_ids));
+        assert(worker_ids)
+
+        for(uint64_t w=0; w<workers; w++)
+        {
+            uint64_t i_start, i_end;
+            ssm_pointwise_worker_range(w, workers, p->K, &i_start, &i_end);
+            worker_args[w] = (ssm_pointwise_base_worker_t)
+            {
+                .num_fft_1 = num_fft_1,
+                .num_fft_2 = num_fft_2,
+                .p = p,
+                .num_aux_2 = num_create_dirty(CLU_ARGS(2 * p->n, 0)),
+                .i_start = i_start,
+                .i_end = i_end,
+            };
+            TREAT(pthread_create(&worker_ids[w], nullptr, ssm_pointwise_base_worker, &worker_args[w]))
+        }
+        for(uint64_t w=0; w<workers; w++)
+        {
+            TREAT(pthread_join(worker_ids[w], nullptr))
+            num_free(worker_args[w].num_aux_2);
+        }
+
+        free(worker_ids);
+        free(worker_args);
         return;
     }
 
     ssm_params_t p_next = ssm_get_params_wrap(p->n);
-    num_p num_fft_1_next = num_create_dirty(CLU_ARGS(p_next.n * p_next.K, 0));
-    num_p num_fft_2_next = num_create_dirty(CLU_ARGS(p_next.n * p_next.K, 0));
-    for(uint64_t i=0; i<p->K; i++)
+
+    if(workers <= 1)
     {
-        // NOLINTNEXTLINE(readability-suspicious-call-argument)
-        num_ssm_mul_wrap(
-            num_aux_1,
-            num_aux_2,
-            num_fft_1_next,
-            num_fft_2_next,
-            num_fft_1,
-            num_fft_2,
-            i * p->n,
-            &p_next
-        );
+        num_p num_fft_1_next = num_create_dirty(CLU_ARGS(p_next.n * p_next.K, 0));
+        num_p num_fft_2_next = num_create_dirty(CLU_ARGS(p_next.n * p_next.K, 0));
+        for(uint64_t i=0; i<p->K; i++)
+        {
+            // NOLINTNEXTLINE(readability-suspicious-call-argument)
+            num_ssm_mul_wrap(
+                num_aux_1,
+                num_aux_2,
+                num_fft_1_next,
+                num_fft_2_next,
+                num_fft_1,
+                num_fft_2,
+                i * p->n,
+                &p_next,
+                1
+            );
+        }
+        num_free(num_fft_1_next);
+        num_free(num_fft_2_next);
+        return;
     }
-    num_free(num_fft_1_next);
-    num_free(num_fft_2_next);
+
+    ssm_pointwise_rec_worker_t * worker_args = malloc(workers * sizeof(*worker_args));
+    assert(worker_args)
+    pthread_t * worker_ids = malloc(workers * sizeof(*worker_ids));
+    assert(worker_ids)
+
+    for(uint64_t w=0; w<workers; w++)
+    {
+        uint64_t i_start, i_end;
+        ssm_pointwise_worker_range(w, workers, p->K, &i_start, &i_end);
+        worker_args[w] = (ssm_pointwise_rec_worker_t)
+        {
+            .num_fft_1 = num_fft_1,
+            .num_fft_2 = num_fft_2,
+            .p = p,
+            .p_next = &p_next,
+            .num_aux_1 = num_create_dirty(CLU_ARGS(p->n, 0)),
+            .num_aux_2 = num_create_dirty(CLU_ARGS(2 * p->n, 0)),
+            .num_fft_1_next = num_create_dirty(CLU_ARGS(p_next.n * p_next.K, 0)),
+            .num_fft_2_next = num_create_dirty(CLU_ARGS(p_next.n * p_next.K, 0)),
+            .i_start = i_start,
+            .i_end = i_end,
+        };
+        TREAT(pthread_create(&worker_ids[w], nullptr, ssm_pointwise_rec_worker, &worker_args[w]))
+    }
+    for(uint64_t w=0; w<workers; w++)
+    {
+        TREAT(pthread_join(worker_ids[w], nullptr))
+        num_free(worker_args[w].num_aux_1);
+        num_free(worker_args[w].num_aux_2);
+        num_free(worker_args[w].num_fft_1_next);
+        num_free(worker_args[w].num_fft_2_next);
+    }
+
+    free(worker_ids);
+    free(worker_args);
 }
 
 
@@ -3885,7 +4064,8 @@ num_p num_mul_ssm(num_p num_1, num_p num_2, bool free_inputs)
         num_aux_2,
         num_fft_1,
         num_fft_2,
-        &p
+        &p,
+        araucaria_thread_config_get_thread_count()
     );
     num_free(num_aux_1);
     num_free(num_fft_2);
@@ -3969,29 +4149,40 @@ typedef struct
 } mem_profile_t;
 
 // Mirrors num_ssm_mul_pointwise's allocation sites and recursion, weighting each
-// phase's RAM by a word-operation duration proxy.
+// phase's RAM by a word-operation duration proxy. `threads` mirrors the real code's
+// single-level cap: only this top call fans out across `workers`; the recursive
+// self-call below always passes 1.
 static mem_profile_t ssm_pointwise_mem_estimate(
     uint64_t n,
     uint64_t K,
     double live_baseline,
-    uint64_t disk_threshold_bytes
+    uint64_t disk_threshold_bytes,
+    uint64_t threads
 )
 {
+    uint64_t workers = ssm_pointwise_worker_count(threads, K);
+
     if(!ssm_is_recursive(n))
     {
-        double dt = (double)K * (double)n * (double)n;
+        double extra = (double)(workers - 1) * mem_estimate_ram_bytes(2 * n, disk_threshold_bytes);
+        double live = live_baseline + extra;
+        double dt = ((double)K * (double)n * (double)n) / (double)workers;
         return (mem_profile_t)
         {
-            .integral = live_baseline * dt,
+            .integral = live * dt,
             .duration = dt,
         };
     }
 
     ssm_params_t p_next = ssm_get_params_wrap(n);
-    double next_bytes = 2.0 * mem_estimate_ram_bytes(p_next.n * p_next.K, disk_threshold_bytes);
-    double live = live_baseline + next_bytes;
+    double extra_aux = (double)(workers - 1) * (
+        mem_estimate_ram_bytes(n, disk_threshold_bytes) +
+        mem_estimate_ram_bytes(2 * n, disk_threshold_bytes)
+    );
+    double next_bytes = (double)workers * 2.0 * mem_estimate_ram_bytes(p_next.n * p_next.K, disk_threshold_bytes);
+    double live = live_baseline + extra_aux + next_bytes;
 
-    mem_profile_t inner = ssm_pointwise_mem_estimate(p_next.n, p_next.K, live, disk_threshold_bytes);
+    mem_profile_t inner = ssm_pointwise_mem_estimate(p_next.n, p_next.K, live, disk_threshold_bytes, 1);
 
     double fft_inv_dt = (double)p_next.n * (double)p_next.K * mem_estimate_log2_pow2(p_next.K);
     double iter_integral = inner.integral + (live * fft_inv_dt);
@@ -3999,8 +4190,8 @@ static mem_profile_t ssm_pointwise_mem_estimate(
 
     return (mem_profile_t)
     {
-        .integral = iter_integral * (double)K,
-        .duration = iter_duration * (double)K,
+        .integral = (iter_integral * (double)K) / (double)workers,
+        .duration = (iter_duration * (double)K) / (double)workers,
     };
 }
 
@@ -4047,7 +4238,9 @@ uint64_t num_mul_estimate_memory(
         duration += dt;
     }
 
-    mem_profile_t pw = ssm_pointwise_mem_estimate(n, K, live, disk_threshold_bytes);
+    mem_profile_t pw = ssm_pointwise_mem_estimate(
+        n, K, live, disk_threshold_bytes, araucaria_thread_config_get_thread_count()
+    );
     integral += pw.integral;
     duration += pw.duration;
 
