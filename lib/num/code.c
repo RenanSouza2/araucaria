@@ -4316,17 +4316,29 @@ static bool mul_is_classic(uint64_t count_1, uint64_t count_2)
 }
 
 // Separate from mul_is_classic's "use SSM at all" threshold: an operand can be well
-// past that and still be too small for spawning threads to pay off (pthread_create/
-// join plus a per-worker scratch allocation cost real time, worth paying once for a
-// huge multiply, not for a merely SSM-eligible one). Found via num_div_mod_bz_rec's
-// recursion, which calls num_mul_core at every level with shrinking operands -- this
-// is the one place that decides "is threading worth it" since it's the one place
-// that actually sees the operand size on every call, so every caller (division's deep
+// past that and still be too small for spawning many threads to pay off
+// (pthread_create/join plus a per-worker scratch allocation cost real time, worth
+// paying for a huge multiply, not for a merely SSM-eligible one). A flat yes/no gate
+// on whether to thread at all isn't enough either -- found via num_div_mod_bz_rec's
+// recursion, which calls num_mul_core at every level with shrinking operands: capped
+// at a single global thread count once past the gate, the many mid-sized calls just
+// past it still got the full caller-requested thread count and spawned more workers
+// than that size could productively use, regressing above ~4 threads. Scaling the
+// *ceiling* to size instead (rather than a bool) fixes that: this is the one place
+// that decides "how much threading is this size worth" since it's the one place that
+// actually sees the operand size on every call, so every caller (division's deep
 // recursion included) gets this for free instead of having to reason about it itself.
-static bool mul_threads_worth_it(uint64_t count_1, uint64_t count_2)
+//
+// mul_min_limbs_per_thread is a starting point, not a derived constant -- tuned from
+// one real measurement (division at ~4-9M limb operands), not a closed-form model of
+// pthread overhead vs. SSM work. Revisit if it doesn't hold up at other sizes.
+constexpr uint64_t mul_min_limbs_per_thread = 16384;
+
+static uint64_t mul_threads_ceiling(uint64_t count_1, uint64_t count_2)
 {
-    constexpr uint64_t threshold = 4096;
-    return (bool)(count_1 >= threshold && count_2 >= threshold);
+    uint64_t count = count_1 < count_2 ? count_1 : count_2;
+    uint64_t ceiling = count / mul_min_limbs_per_thread;
+    return ceiling ? ceiling : 1;
 }
 
 num_p num_mul_core(num_p num_1, num_p num_2, bool free_inputs, uint64_t threads)
@@ -4357,9 +4369,10 @@ num_p num_mul_core(num_p num_1, num_p num_2, bool free_inputs, uint64_t threads)
         return num_res;
     }
 
-    if(!mul_threads_worth_it(num_1->count, num_2->count))
+    uint64_t ceiling = mul_threads_ceiling(num_1->count, num_2->count);
+    if(threads > ceiling)
     {
-        threads = 1;
+        threads = ceiling;
     }
 
     return num_mul_ssm(num_1, num_2, free_inputs, threads);
@@ -4918,11 +4931,11 @@ STRUCT(bz_frame)
 // It does call itself many times (depth ~log2(num_2->count)) with the multiply's
 // operand shrinking every level; threading every one of those calls uniformly was
 // tried and made things *worse* purely from pthread_create/join overhead at the many
-// small deep calls. Fixed at the source instead of here: num_mul_core now silently
-// drops to threads=1 for any operand below its own worth-it threshold
-// (mul_threads_worth_it), so this function doesn't need to reason about its own
-// recursion depth or size at all -- it just forwards `threads` everywhere and trusts
-// num_mul_core to only actually spawn threads where that pays off.
+// small deep calls. Fixed at the source instead of here: num_mul_core now caps
+// `threads` to a size-scaled ceiling (mul_threads_ceiling) for every call, so this
+// function doesn't need to reason about its own recursion depth or size at all -- it
+// just forwards `threads` everywhere and trusts num_mul_core to only ever spawn as
+// many workers as each call's own size can productively use.
 static num_p num_div_mod_bz_rec(
     num_p num_aux,
     num_p num_1,
@@ -5235,9 +5248,10 @@ static num_p num_sqr_core(num_p num, uint64_t threads)
         return num_sqr_classic(num);
     }
 
-    if(!mul_threads_worth_it(num->count, num->count))
+    uint64_t ceiling = mul_threads_ceiling(num->count, num->count);
+    if(threads > ceiling)
     {
-        threads = 1;
+        threads = ceiling;
     }
 
     return num_sqr_ssm(num, threads);
