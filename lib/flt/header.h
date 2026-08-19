@@ -30,12 +30,16 @@ flt_num_t flt_num_shr(flt_num_t flt, uint64_t bits);
 flt_num_t flt_num_add(flt_num_t flt_1, flt_num_t flt_2);
 flt_num_t flt_num_sub(flt_num_t flt_1, flt_num_t flt_2);
 flt_num_t flt_num_mul(flt_num_t flt_1, flt_num_t flt_2);
+flt_num_t flt_num_mul_threads(flt_num_t flt_1, flt_num_t flt_2, uint64_t threads);
 flt_num_t flt_num_pow(flt_num_t flt, int64_t value);
 flt_num_t flt_num_sqr(flt_num_t flt);
 flt_num_t flt_num_div(flt_num_t flt_1, flt_num_t flt_2);
+flt_num_t flt_num_div_threads(flt_num_t flt_1, flt_num_t flt_2, uint64_t threads);
 
 flt_num_t flt_num_mul_sig(flt_num_t flt, sig_num_t sig);
+flt_num_t flt_num_mul_sig_threads(flt_num_t flt, sig_num_t sig, uint64_t threads);
 flt_num_t flt_num_div_sig(flt_num_t flt, sig_num_t sig);
+flt_num_t flt_num_div_sig_threads(flt_num_t flt, sig_num_t sig, uint64_t threads);
 
 void file_write_flt_num_raw(file_p fp, flt_num_t flt);
 void file_write_flt_num(file_p fp, flt_num_t flt);

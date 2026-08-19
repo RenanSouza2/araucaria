@@ -653,6 +653,150 @@ static void test_sig_num_div(bool show)
 }
 
 
+// Coverage for the threaded entry points. Three things are checked, and they catch
+// different failures.
+//
+// The small tables assert absolute results through the _threads entry point rather
+// than comparing against the plain function. That distinction matters here: the plain
+// functions delegate to the threaded ones, so the two share a body, and a parity
+// comparison between them is satisfied by any bug that breaks both -- which is every
+// bug in the shared body. Pinning literals is what actually holds the behaviour down.
+// Operands this size sit below num's 256-limb SSM threshold, so the thread count is
+// inert and what these really pin is the signal handling.
+//
+// The large cases then compare threads=1 against threads>1 on the same operands, which
+// is the one place a parity comparison is the right oracle: same body, different worker
+// counts, so a disagreement means the fan-out itself corrupted something. Sizes are
+// picked so num's mul_threads_ceiling (16384 limbs per worker, code.c) lets the request
+// through instead of clamping it back to a single worker, and this suite builds with
+// ASan/UBSan/LeakSanitizer, so a race or a leaked worker buffer surfaces here. They
+// open with an explicit 0 timeout because the operands are deliberately large.
+//
+// One limit worth stating: threading never changes a result, so nothing here can detect
+// a wrapper that accepts a thread count and then forwards the wrong one.
+constexpr uint64_t threads_mul_count = 65536;
+constexpr uint64_t threads_mul_n = 4;
+constexpr uint64_t threads_div_count = 32768;
+constexpr uint64_t threads_div_n = 2;
+
+static void test_sig_num_mul_threads(bool show)
+{
+    TEST_FN_OPEN
+
+    #define TEST_SIG_NUM_MUL_THREADS(TAG, SIG_NUM_1, SIG_NUM_2, THREADS, SIG_NUM_OUT) \
+    {                                                                                 \
+        TEST_CASE_OPEN(TAG)                                                           \
+        {                                                                             \
+            sig_num_t sig = sig_num_mul_threads(                                      \
+                sig_num_create_immed(ARG_OPEN SIG_NUM_1),                             \
+                sig_num_create_immed(ARG_OPEN SIG_NUM_2),                             \
+                THREADS                                                               \
+            );                                                                        \
+            assert(sig_num_immed(sig, ARG_OPEN SIG_NUM_OUT));                         \
+        }                                                                             \
+        TEST_CASE_CLOSE                                                               \
+    }
+
+    TEST_SIG_NUM_MUL_THREADS(1, (POSITIVE, 1, 2), (POSITIVE, 1, 3), 4, (POSITIVE, 1, 6));
+    TEST_SIG_NUM_MUL_THREADS(2, (POSITIVE, 1, 2), (NEGATIVE, 1, 3), 4, (NEGATIVE, 1, 6));
+    TEST_SIG_NUM_MUL_THREADS(3, (NEGATIVE, 1, 2), (POSITIVE, 1, 3), 4, (NEGATIVE, 1, 6));
+    TEST_SIG_NUM_MUL_THREADS(4, (NEGATIVE, 1, 2), (NEGATIVE, 1, 3), 4, (POSITIVE, 1, 6));
+    TEST_SIG_NUM_MUL_THREADS(5, (POSITIVE, 1, 2), (ZERO, 0), 4, (ZERO, 0));
+    TEST_SIG_NUM_MUL_THREADS(6, (ZERO, 0), (NEGATIVE, 1, 2), 4, (ZERO, 0));
+
+    // threads = 1 must reach exactly what the plain entry point does.
+    TEST_SIG_NUM_MUL_THREADS(7, (NEGATIVE, 1, 2), (POSITIVE, 1, 3), 1, (NEGATIVE, 1, 6));
+
+    #undef TEST_SIG_NUM_MUL_THREADS
+
+    // Operands large enough for the fan-out to actually happen -- see the note above.
+    // The second thread count is deliberately not a power of two: num splits the
+    // synchronisation-free stage on the count rounded down to a power of two while the
+    // remaining stages fan out across all of them, so the two halves disagree on worker
+    // count and that asymmetry only appears at counts like 3.
+    #define TEST_SIG_NUM_MUL_THREADS_LARGE(TAG, THREADS)            \
+    {                                                               \
+        TEST_CASE_OPEN_TIMEOUT(TAG, 0)                              \
+        {                                                           \
+            sig_num_t sig_1 = sig_num_create_rand(threads_mul_count); \
+            sig_num_t sig_2 = sig_num_create_rand(threads_mul_count); \
+                                                                    \
+            sig_num_t ref = sig_num_mul(                            \
+                sig_num_copy(sig_1),                                \
+                sig_num_copy(sig_2)                                 \
+            );                                                      \
+            sig_num_t thr = sig_num_mul_threads(                    \
+                sig_num_copy(sig_1),                                \
+                sig_num_copy(sig_2),                                \
+                THREADS                                             \
+            );                                                      \
+            assert(sig_num_eq_dbg(ref, thr));                       \
+                                                                    \
+            sig_num_free(sig_1);                                    \
+            sig_num_free(sig_2);                                    \
+        }                                                           \
+        TEST_CASE_CLOSE                                             \
+    }
+
+    TEST_SIG_NUM_MUL_THREADS_LARGE(8, threads_mul_n);
+    TEST_SIG_NUM_MUL_THREADS_LARGE(9, 3);
+
+    #undef TEST_SIG_NUM_MUL_THREADS_LARGE
+
+    TEST_FN_CLOSE
+}
+
+static void test_sig_num_div_threads(bool show)
+{
+    TEST_FN_OPEN
+
+    #define TEST_SIG_NUM_DIV_THREADS(TAG, SIG_NUM_1, SIG_NUM_2, THREADS, SIG_NUM_OUT) \
+    {                                                                                 \
+        TEST_CASE_OPEN(TAG)                                                           \
+        {                                                                             \
+            sig_num_t sig = sig_num_div_threads(                                      \
+                sig_num_create_immed(ARG_OPEN SIG_NUM_1),                             \
+                sig_num_create_immed(ARG_OPEN SIG_NUM_2),                             \
+                THREADS                                                               \
+            );                                                                        \
+            assert(sig_num_immed(sig, ARG_OPEN SIG_NUM_OUT));                         \
+        }                                                                             \
+        TEST_CASE_CLOSE                                                               \
+    }
+
+    TEST_SIG_NUM_DIV_THREADS(1, (POSITIVE, 1, 3), (POSITIVE, 1, 2), 4, (POSITIVE, 1, 1));
+    TEST_SIG_NUM_DIV_THREADS(2, (NEGATIVE, 1, 3), (POSITIVE, 1, 2), 4, (NEGATIVE, 1, 1));
+    TEST_SIG_NUM_DIV_THREADS(3, (POSITIVE, 1, 3), (NEGATIVE, 1, 2), 4, (NEGATIVE, 1, 1));
+    TEST_SIG_NUM_DIV_THREADS(4, (NEGATIVE, 1, 3), (NEGATIVE, 1, 2), 4, (POSITIVE, 1, 1));
+    TEST_SIG_NUM_DIV_THREADS(5, (POSITIVE, 1, 2), (POSITIVE, 1, 3), 4, (ZERO, 0));
+    TEST_SIG_NUM_DIV_THREADS(6, (ZERO, 0), (POSITIVE, 1, 2), 4, (ZERO, 0));
+    TEST_SIG_NUM_DIV_THREADS(7, (POSITIVE, 1, 3), (POSITIVE, 1, 2), 1, (POSITIVE, 1, 1));
+
+    #undef TEST_SIG_NUM_DIV_THREADS
+
+    // Dividend twice the divisor so Burnikel-Ziegler actually recurses, at a size where
+    // the multiply inside it is threaded rather than clamped back to one worker.
+    TEST_CASE_OPEN_TIMEOUT(8, 0)
+    {
+        sig_num_t sig_1 = sig_num_create_rand(2 * threads_div_count);
+        sig_num_t sig_2 = sig_num_create_rand(threads_div_count);
+
+        sig_num_t ref = sig_num_div(sig_num_copy(sig_1), sig_num_copy(sig_2));
+        sig_num_t thr = sig_num_div_threads(
+            sig_num_copy(sig_1),
+            sig_num_copy(sig_2),
+            threads_div_n
+        );
+        assert(sig_num_eq_dbg(ref, thr));
+
+        sig_num_free(sig_1);
+        sig_num_free(sig_2);
+    }
+    TEST_CASE_CLOSE
+
+    TEST_FN_CLOSE
+}
+
 
 static void test_sig_num()
 {
@@ -679,6 +823,9 @@ static void test_sig_num()
     test_sig_num_sub(show);
     test_sig_num_mul(show);
     test_sig_num_div(show);
+
+    test_sig_num_mul_threads(show);
+    test_sig_num_div_threads(show);
 
     TEST_ASSERT_MEM_EMPTY
 }
