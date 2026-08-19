@@ -1,7 +1,23 @@
+// sched_setaffinity and cpu_set_t are GNU extensions that -D_POSIX_C_SOURCE alone
+// hides, and time_procs_mul needs them to pin one child per processor. Kept to this
+// translation unit rather than added to the library's flags, and harmless elsewhere.
+#define _GNU_SOURCE
+
+#include <stdlib.h>
 #include <unistd.h>
+#include <sys/mman.h>
+
+#if defined(__linux__)
+#include <sched.h>
+#elif defined(__APPLE__)
+#include <mach/mach.h>
+#include <mach/thread_policy.h>
+#include <pthread.h>
+#endif
 
 #include "../mods/clu/header.h"
 #include "../mods/macros/assert.h"
+#include "../mods/macros/fork.h"
 #include "../mods/macros/time.h"
 
 #include "../lib/fxd/header.h"
@@ -957,6 +973,147 @@ static void time_threads_div()
 }
 
 
+// Pin the calling process to one processor. pinhao's forked workers do this through
+// fork_lock_processor in its own copy of mods/macros; araucaria's vendored copy of
+// that submodule predates the function, so it lives here rather than diverging the
+// two copies. Note this repo's assert always evaluates its condition (mods/macros/
+// assert.h undefines the standard one), so the call is not compiled out of release.
+static void lock_processor([[maybe_unused]] uint64_t index)
+{
+#if defined(__linux__)
+
+    cpu_set_t cpu_set;
+    CPU_ZERO(&cpu_set);
+    CPU_SET(index, &cpu_set);
+    assert(sched_setaffinity(0, sizeof(cpu_set), &cpu_set) == 0)
+
+#elif defined(__APPLE__)
+
+    thread_affinity_policy_data_t policy = { .affinity_tag = (integer_t)index };
+    thread_policy_set(
+        pthread_mach_thread_np(pthread_self()),
+        THREAD_AFFINITY_POLICY,
+        (thread_policy_t)&policy,
+        THREAD_AFFINITY_POLICY_COUNT
+    );
+
+#endif
+}
+
+
+// How much a single-threaded multiply slows down when other processes are doing the
+// same thing at the same time. This is the shape pinhao runs in -- lib/big and
+// lib/tree fork one process per core and each works on its own numbers -- so the
+// per-process cost under concurrency matters more there than the solo cost measured
+// by time_threads_mul.
+//
+// Children are forked from a parent that already holds the operands, so they inherit
+// them copy-on-write exactly as pinhao's children do, and each is pinned to its own
+// processor. Every child re-checks its product against a reference the parent built
+// before forking, so a run that is fast because it computed the wrong thing fails
+// instead of reporting a number.
+[[maybe_unused]]
+static void time_procs_mul()
+{
+#ifdef DEBUG
+    uint64_t base = 22;
+#else
+    uint64_t base = 28;
+#endif
+
+    tprintf("base: " U64P() "", base);
+
+    num_p num_1 = num_generate_1(base, 2);
+    num_p num_2 = num_add(num_copy(num_1), num_wrap(1));
+
+    tprintf("num_1->count: " U64P() "", num_1->count);
+    tprintf("num_2->count: " U64P() "", num_2->count);
+
+    num_p num_res_ref = num_mul_threads(num_copy(num_1), num_copy(num_2), 1);
+
+    constexpr uint64_t procs_max = 16;
+    uint64_t proc_counts[] = {1, 2, 4, 8, 16};
+
+    // A child's heap is its own after the fork, so timings come back through a shared
+    // anonymous mapping rather than a plain array.
+    double * times = mmap(
+        nullptr,
+        procs_max * sizeof(double),
+        PROT_READ | PROT_WRITE,
+        MAP_SHARED | MAP_ANONYMOUS,
+        -1,
+        0
+    );
+    assert(times != MAP_FAILED);
+
+    double solo = 0;
+
+    for(uint64_t i=0; i<sizeof(proc_counts)/sizeof(proc_counts[0]); i++)
+    {
+        uint64_t procs = proc_counts[i];
+        pid_t pid[procs_max];
+
+        for(uint64_t p=0; p<procs; p++)
+        {
+            pid[p] = fork_safe();
+            if(pid[p] == 0)
+            {
+                lock_processor(p);
+
+                num_p num_1_c = num_copy(num_1);
+                num_p num_2_c = num_copy(num_2);
+
+                TIME_SETUP
+                num_p num_res = num_mul_threads(num_1_c, num_2_c, 1);
+                TIME_END(t1)
+
+                assert(num_cmp(num_res, num_res_ref) == 0)
+                times[p] = dtime(t1);
+
+                num_free(num_res);
+                exit(EXIT_SUCCESS);
+            }
+        }
+
+        for(uint64_t p=0; p<procs; p++)
+        {
+            waitpid_safe(pid[p], nullptr);
+        }
+
+        double total = 0;
+        double worst = 0;
+        for(uint64_t p=0; p<procs; p++)
+        {
+            total += times[p];
+            worst = times[p] > worst ? times[p] : worst;
+        }
+
+        double mean = total / (double)procs;
+        if(i == 0)
+        {
+            solo = mean;
+        }
+
+        tprintf(
+            "procs: " U64P(2) "  mean: %.3f  max: %.3f  vs solo: %.2fx  throughput: %.2fx",
+            procs, mean, worst, mean / solo, ((double)procs * solo) / mean
+        );
+    }
+
+    assert(munmap(times, procs_max * sizeof(double)) == 0);
+    num_free(num_res_ref);
+    num_free(num_1);
+    num_free(num_2);
+
+#ifdef DEBUG
+    uint64_t count = clu_get_register_count();
+    tprintf("total allocations : " U64P() "", count);
+    tprintf("max occupancy     : " U64P() "", clu_get_max_occupancy());
+    assert(clu_mem_is_empty());
+#endif
+}
+
+
 
 // int main(int argc, char** argv)
 int main()
@@ -987,7 +1144,8 @@ int main()
     // mem_1(21);
     // time_assembly_mul();
     // time_threads_mul();
-    time_threads_div();
+    // time_threads_div();
+    time_procs_mul();
     // time_assembly_sqr();
     // time_assembly_div();
 

@@ -2907,6 +2907,97 @@ static void ssm_fft_fwd_block(
     }
 }
 
+// Where the padded array is built from, when that build is fused into the forward
+// transform's first pass (see num_ssm_fft_fwd_rec). Mirrors num_ssm_pad_no_wrap's
+// layout decisions, hoisted out of the element loop.
+typedef struct
+{
+    num_p num;
+    uint64_t M;
+    uint64_t full_chunks;
+    uint64_t tail;
+    bool extra;
+} ssm_fft_fwd_pad_t;
+
+// Build one block's 2^r elements straight from the operand. Standalone, this is
+// num_ssm_pad_no_wrap: a zeroing allocation of the whole n*K array plus a scatter
+// over it, which the first pass then reads back. Done here the element is assembled
+// in cache and written out once, so the array is never read from DRAM at all and
+// never separately zeroed.
+static void ssm_fft_fwd_pad_block(
+    ssm_fft_fwd_pad_t * pad,
+    num_p num_fft,
+    uint64_t pos,
+    uint64_t step,
+    uint64_t n,
+    uint64_t K,
+    uint64_t gl,
+    uint64_t r,
+    uint64_t a,
+    uint64_t c
+)
+{
+    uint64_t width = U64(1) << r;
+    uint64_t base = a + ((gl << r) * c);
+    const uint64_t * restrict src = pad->num->chunk;
+
+    for(uint64_t b = 0; b < width; b++)
+    {
+        uint64_t x = base + (gl * b);
+        uint64_t * restrict dest = &num_fft->chunk[(pos + (step * x)) * n];
+
+        uint64_t copy = 0;
+        if(x < pad->full_chunks)
+        {
+            copy = pad->M;
+        }
+        else if(x == pad->full_chunks)
+        {
+            copy = pad->tail;
+        }
+
+        if(copy)
+        {
+            memcpy(dest, &src[pad->M * x], copy * sizeof(uint64_t));
+        }
+        memset(&dest[copy], 0, (n - copy) * sizeof(uint64_t));
+
+        if(pad->extra && (x == K - 1))
+        {
+            dest[pad->M] = src[pad->num->count - 1];
+        }
+    }
+}
+
+// The transform's per-element entry twiddle (element x scaled by 2^(Q*x)), applied to
+// one block's 2^r elements. It used to be a standalone pass over the whole K*n array
+// before the stages began; run here it rides along with the pass that is already
+// pulling the block into cache, which removes that pass's DRAM traffic outright. Every
+// element belongs to exactly one block of the first pass, so each is still twiddled
+// exactly once, and all of a block's elements are done before any butterfly pairs them.
+static void ssm_fft_fwd_preloop_block(
+    num_p num_aux,
+    num_p num_fft,
+    uint64_t pos,
+    uint64_t step,
+    uint64_t n,
+    uint64_t Q,
+    uint64_t gl,
+    uint64_t r,
+    uint64_t a,
+    uint64_t c
+)
+{
+    uint64_t width = U64(1) << r;
+    uint64_t base = a + ((gl << r) * c);
+
+    for(uint64_t b = 0; b < width; b++)
+    {
+        uint64_t x = base + (gl * b);
+        num_ssm_shl_mod(num_aux, num_fft, (pos + (step * x)) * n, n, Q * x);
+    }
+}
+
 // Every pass from stride K/2 down to stride_end, run by one worker per residue class
 // a == worker (mod workers) with no synchronisation between them at all (see
 // num_ssm_fft_fwd_rec's comment for why the classes stay disjoint). One dispatch
@@ -2920,6 +3011,8 @@ typedef struct
     uint64_t n;
     uint64_t K;
     uint64_t bits;
+    uint64_t Q;
+    ssm_fft_fwd_pad_t * pad;
     uint64_t stride_end;
     uint64_t worker;
     uint64_t workers;
@@ -2931,6 +3024,7 @@ static void * ssm_fft_fwd_split_worker(void * arg)
 
     uint64_t stages_left = (uint64_t)stdc_bit_width(w->K / w->stride_end) - 1;
     uint64_t stride_hi = w->K / 2;
+    bool first = true;
 
     while(stages_left)
     {
@@ -2942,6 +3036,22 @@ static void * ssm_fft_fwd_split_worker(void * arg)
         {
             for(uint64_t a = w->worker; a < gl; a += w->workers)
             {
+                if(first && w->pad)
+                {
+                    ssm_fft_fwd_pad_block(
+                        w->pad, w->num_fft, w->pos, w->step,
+                        w->n, w->K, gl, r, a, c
+                    );
+                }
+
+                if(first)
+                {
+                    ssm_fft_fwd_preloop_block(
+                        w->num_aux, w->num_fft, w->pos, w->step,
+                        w->n, w->Q, gl, r, a, c
+                    );
+                }
+
                 ssm_fft_fwd_block(
                     w->num_aux, w->num_fft, w->pos, w->step,
                     w->n, w->K, w->bits, gl, r, a, c
@@ -2949,6 +3059,7 @@ static void * ssm_fft_fwd_split_worker(void * arg)
             }
         }
 
+        first = false;
         stages_left -= r;
         stride_hi = gl / 2;
     }
@@ -2999,6 +3110,8 @@ static void * ssm_fft_fwd_pass_worker(void * arg)
 // needs P | s); the tail passes keep the full worker count, since splitting a pass's
 // block list doesn't care.
 // num_aux->size >= 2 * n
+// pad non-null builds the array from the operand inside the first pass instead of
+// expecting it already populated (see ssm_fft_fwd_pad_block).
 static void num_ssm_fft_fwd_rec(
     num_p num_aux,
     num_p num_fft, uint64_t pos,
@@ -3006,6 +3119,8 @@ static void num_ssm_fft_fwd_rec(
     uint64_t n,
     uint64_t K,
     uint64_t bits,
+    uint64_t Q,
+    ssm_fft_fwd_pad_t * pad,
     uint64_t threads
 )
 {
@@ -3028,6 +3143,8 @@ static void num_ssm_fft_fwd_rec(
             .n = n,
             .K = K,
             .bits = bits,
+            .Q = Q,
+            .pad = pad,
             .stride_end = 1,
             .worker = 0,
             .workers = 1,
@@ -3062,6 +3179,8 @@ static void num_ssm_fft_fwd_rec(
             .n = n,
             .K = K,
             .bits = bits,
+            .Q = Q,
+            .pad = pad,
             .stride_end = split,
             .worker = w,
             .workers = split,
@@ -3129,26 +3248,6 @@ static void num_ssm_fft_fwd_rec(
     free(worker_aux);
 }
 
-typedef struct
-{
-    num_p num_fft;
-    uint64_t n;
-    uint64_t Q;
-    num_p num_aux;
-    uint64_t i_start;
-    uint64_t i_end;
-} ssm_fft_fwd_preloop_worker_t;
-
-static void * ssm_fft_fwd_preloop_worker(void * arg)
-{
-    ssm_fft_fwd_preloop_worker_t * w = arg;
-    for(uint64_t i = w->i_start; i < w->i_end; i++)
-    {
-        num_ssm_shl_mod(w->num_aux, w->num_fft, w->n * i, w->n, w->Q * i);
-    }
-    return nullptr;
-}
-
 // num_aux->size >= 2 * n
 void num_ssm_fft_fwd(num_p num_aux, num_p num_fft, ssm_params_p p, uint64_t threads)
 {
@@ -3159,48 +3258,45 @@ void num_ssm_fft_fwd(num_p num_aux, num_p num_fft, ssm_params_p p, uint64_t thre
     assert(num_aux->size >= 2 * p->n)
     assert(num_fft->size >= p->n * p->K)
 
-    uint64_t workers = ssm_worker_count(threads, p->K);
+    num_ssm_fft_fwd_rec(num_aux, num_fft, 0, 1, p->n, p->K, 2 * p->Q, p->Q, nullptr, threads);
+}
 
-    if(workers <= 1)
+// num_ssm_fft_fwd over an array that has not been populated yet: the padding of NUM
+// into n-limb blocks happens inside the transform's first pass. NUM is only read.
+// num_fft->size >= p->n * p->K, num_aux->size >= 2 * p->n
+static void num_ssm_fft_fwd_pad(
+    num_p num_aux,
+    num_p num_fft,
+    num_p num,
+    ssm_params_p p,
+    uint64_t threads
+)
+{
+    CLU_HANDLER_IS_SAFE(num_aux)
+    CLU_HANDLER_IS_SAFE(num_fft)
+    CLU_HANDLER_IS_SAFE(num)
+    assert(num_aux)
+    assert(num_fft)
+    assert(num)
+    assert(num_aux->size >= 2 * p->n)
+    assert(num_fft->size >= p->n * p->K)
+
+    uint64_t full_chunks = num->count / p->M;
+    if(full_chunks > p->K)
     {
-        for(uint64_t i=0; i<p->K; i++)
-        {
-            num_ssm_shl_mod(num_aux, num_fft, p->n * i, p->n, p->Q * i);
-        }
-    }
-    else
-    {
-        ssm_fft_fwd_preloop_worker_t * worker_args = malloc(workers * sizeof(*worker_args));
-        assert(worker_args)
-        pthread_t * worker_ids = malloc(workers * sizeof(*worker_ids));
-        assert(worker_ids)
-
-        for(uint64_t w=0; w<workers; w++)
-        {
-            uint64_t i_start, i_end;
-            ssm_worker_range(w, workers, p->K, &i_start, &i_end);
-            worker_args[w] = (ssm_fft_fwd_preloop_worker_t)
-            {
-                .num_fft = num_fft,
-                .n = p->n,
-                .Q = p->Q,
-                .num_aux = num_create_dirty(CLU_ARGS(2 * p->n, 0)),
-                .i_start = i_start,
-                .i_end = i_end,
-            };
-            TREAT(pthread_create(&worker_ids[w], nullptr, ssm_fft_fwd_preloop_worker, &worker_args[w]))
-        }
-        for(uint64_t w=0; w<workers; w++)
-        {
-            TREAT(pthread_join(worker_ids[w], nullptr))
-            num_free(worker_args[w].num_aux);
-        }
-
-        free(worker_ids);
-        free(worker_args);
+        full_chunks = p->K;
     }
 
-    num_ssm_fft_fwd_rec(num_aux, num_fft, 0, 1, p->n, p->K, 2 * p->Q, threads);
+    ssm_fft_fwd_pad_t pad =
+    {
+        .num = num,
+        .M = p->M,
+        .full_chunks = full_chunks,
+        .tail = num->count % p->M,
+        .extra = (bool)(num->count == (p->M * p->K) + 1),
+    };
+
+    num_ssm_fft_fwd_rec(num_aux, num_fft, 0, 1, p->n, p->K, 2 * p->Q, p->Q, &pad, threads);
 }
 
 // The inverse transform is the mirror: stage s pairs x with x + s whenever (x / s)
@@ -3252,6 +3348,155 @@ static void ssm_fft_inv_block(
     }
 }
 
+// The transform's per-element exit twiddle (undoing the entry scaling and dividing by
+// k), applied to one block's 2^r elements. Mirrors ssm_fft_fwd_preloop_block: it used
+// to be a standalone pass over the whole k*n array after the stages finished, and runs
+// here inside the last pass, which already holds the block. Blocks of the last pass
+// partition the transform, so each element is still twiddled exactly once, after every
+// butterfly that touches it. Elements at or past lim take the shift in two steps
+// because a single one would exceed what num_ssm_shr_mod accepts.
+static void ssm_fft_inv_postloop_block(
+    num_p num_aux,
+    num_p num,
+    uint64_t pos,
+    uint64_t n,
+    uint64_t Q,
+    uint64_t k_,
+    uint64_t lim,
+    uint64_t gl,
+    uint64_t r,
+    uint64_t a,
+    uint64_t c
+)
+{
+    uint64_t width = U64(1) << r;
+    uint64_t base = a + ((gl << r) * c);
+
+    for(uint64_t b = 0; b < width; b++)
+    {
+        uint64_t x = base + (gl * b);
+        uint64_t pos_x = (pos + x) * n;
+
+        if(x < lim)
+        {
+            num_ssm_shr_mod(num_aux, num, pos_x, n, (Q * x) + k_);
+            continue;
+        }
+
+        num_ssm_shr_mod(num_aux, num, pos_x, n, Q * x);
+        num_ssm_shr_mod(num_aux, num, pos_x, n, k_);
+    }
+}
+
+// These live further down the file, past the transform they are fused into.
+static bool ssm_is_recursive(uint64_t n);
+
+static void num_ssm_mul_mod_span(
+    num_p num_aux,
+    num_p num_1,
+    num_p num_2,
+    uint64_t pos,
+    uint64_t n
+);
+
+// Scratch and operand for the convolution's pointwise multiply when it is fused into
+// the inverse transform (see num_ssm_fft_inv_rec). One of these per worker: the
+// recursive buffers are reused across every element that worker handles, so nothing
+// is allocated inside the element loop. p_next is nullptr when n is small enough for
+// the non-recursive base case, which needs no buffers of its own beyond the 2n
+// scratch the transform already carries.
+typedef struct
+{
+    num_p num_fft_2;
+    ssm_params_p p_next;
+    num_p num_aux_1;
+    num_p num_fft_1_next;
+    num_p num_fft_2_next;
+} ssm_fft_inv_pointwise_t;
+
+static ssm_fft_inv_pointwise_t ssm_fft_inv_pointwise_create(
+    num_p num_fft_2,
+    ssm_params_p p_next,
+    uint64_t n
+)
+{
+    if(!num_fft_2)
+    {
+        return (ssm_fft_inv_pointwise_t){0};
+    }
+
+    if(!p_next)
+    {
+        return (ssm_fft_inv_pointwise_t){ .num_fft_2 = num_fft_2 };
+    }
+
+    return (ssm_fft_inv_pointwise_t)
+    {
+        .num_fft_2 = num_fft_2,
+        .p_next = p_next,
+        .num_aux_1 = num_create_dirty(CLU_ARGS(n, 0)),
+        .num_fft_1_next = num_create_dirty(CLU_ARGS(p_next->n * p_next->K, 0)),
+        .num_fft_2_next = num_create_dirty(CLU_ARGS(p_next->n * p_next->K, 0)),
+    };
+}
+
+static void ssm_fft_inv_pointwise_free(ssm_fft_inv_pointwise_t * pw)
+{
+    if(!pw->p_next)
+    {
+        return;
+    }
+
+    num_free(pw->num_aux_1);
+    num_free(pw->num_fft_1_next);
+    num_free(pw->num_fft_2_next);
+}
+
+// Multiply one block's 2^r elements of num by the matching elements of num_fft_2,
+// in place. Per-element like the twiddles, so it rides along with the pass that is
+// already holding the block, which is what removes the standalone pointwise pass:
+// that pass wrote every product to DRAM only for the transform's first pass to read
+// it straight back.
+static void ssm_fft_inv_pointwise_block(
+    ssm_fft_inv_pointwise_t * pw,
+    num_p num_aux,
+    num_p num,
+    uint64_t pos,
+    uint64_t n,
+    uint64_t gl,
+    uint64_t r,
+    uint64_t a,
+    uint64_t c
+)
+{
+    uint64_t width = U64(1) << r;
+    uint64_t base = a + ((gl << r) * c);
+
+    for(uint64_t b = 0; b < width; b++)
+    {
+        uint64_t x = base + (gl * b);
+        uint64_t pos_x = (pos + x) * n;
+
+        if(pw->p_next)
+        {
+            // NOLINTNEXTLINE(readability-suspicious-call-argument)
+            num_ssm_mul_wrap(
+                pw->num_aux_1,
+                num_aux,
+                pw->num_fft_1_next,
+                pw->num_fft_2_next,
+                num,
+                pw->num_fft_2,
+                pos_x,
+                pw->p_next
+            );
+            continue;
+        }
+
+        num_ssm_mul_mod_span(num_aux, num, pw->num_fft_2, pos_x, n);
+    }
+}
+
 // Every pass whose blocks fit inside one worker's contiguous chunk of k / workers
 // elements, run with no synchronisation between workers at all (see
 // num_ssm_fft_inv_rec's comment). One dispatch covers the whole range. Also the
@@ -3264,6 +3509,11 @@ typedef struct
     uint64_t n;
     uint64_t k;
     uint64_t bits;
+    uint64_t Q;
+    uint64_t k_;
+    uint64_t lim;
+    bool postloop;
+    ssm_fft_inv_pointwise_t * pw;
     uint64_t worker;
     uint64_t workers;
 } ssm_fft_inv_split_worker_t;
@@ -3275,6 +3525,7 @@ static void * ssm_fft_inv_split_worker(void * arg)
     uint64_t chunk = w->k / w->workers;
     uint64_t stages_left = (uint64_t)stdc_bit_width(chunk) - 1;
     uint64_t gl = 1;
+    bool first = true;
 
     while(stages_left)
     {
@@ -3283,17 +3534,35 @@ static void * ssm_fft_inv_split_worker(void * arg)
         uint64_t c_start = (w->worker * chunk) / span;
         uint64_t c_end = c_start + (chunk / span);
 
+        bool last = w->postloop && (stages_left == r);
+
         for(uint64_t c = c_start; c < c_end; c++)
         {
             for(uint64_t a = 0; a < gl; a++)
             {
+                if(first && w->pw)
+                {
+                    ssm_fft_inv_pointwise_block(
+                        w->pw, w->num_aux, w->num, w->pos, w->n, gl, r, a, c
+                    );
+                }
+
                 ssm_fft_inv_block(
                     w->num_aux, w->num, w->pos,
                     w->n, w->k, w->bits, gl, r, a, c
                 );
+
+                if(last)
+                {
+                    ssm_fft_inv_postloop_block(
+                        w->num_aux, w->num, w->pos,
+                        w->n, w->Q, w->k_, w->lim, gl, r, a, c
+                    );
+                }
             }
         }
 
+        first = false;
         stages_left -= r;
         gl = span;
     }
@@ -3311,6 +3580,10 @@ typedef struct
     uint64_t bits;
     uint64_t gl;
     uint64_t r;
+    uint64_t Q;
+    uint64_t k_;
+    uint64_t lim;
+    bool postloop;
     uint64_t idx_start;
     uint64_t idx_end;
 } ssm_fft_inv_pass_worker_t;
@@ -3321,10 +3594,21 @@ static void * ssm_fft_inv_pass_worker(void * arg)
 
     for(uint64_t idx = w->idx_start; idx < w->idx_end; idx++)
     {
+        uint64_t a = idx % w->gl;
+        uint64_t c = idx / w->gl;
+
         ssm_fft_inv_block(
             w->num_aux, w->num, w->pos,
-            w->n, w->k, w->bits, w->gl, w->r, idx % w->gl, idx / w->gl
+            w->n, w->k, w->bits, w->gl, w->r, a, c
         );
+
+        if(w->postloop)
+        {
+            ssm_fft_inv_postloop_block(
+                w->num_aux, w->num, w->pos,
+                w->n, w->Q, w->k_, w->lim, w->gl, w->r, a, c
+            );
+        }
     }
     return nullptr;
 }
@@ -3342,6 +3626,10 @@ static void * ssm_fft_inv_pass_worker(void * arg)
 // bits_local, which the unfused loop carried down the stages by halving, is written
 // out as (bits * k) / 2s so a worker starting mid-way can compute it.
 // num_aux->size >= 2 * n
+// num_fft_2 non-null fuses the convolution's pointwise multiply into the first pass
+// (see ssm_fft_inv_pointwise_block). Only worth it at the top level, where the arrays
+// are hundreds of MB; the recursive inner multiplies work on a few KB that stay in
+// cache regardless, so they keep the plain num_ssm_mul_pointwise path.
 static void num_ssm_fft_inv_rec(
     num_p num_aux,
     num_p num,
@@ -3349,6 +3637,8 @@ static void num_ssm_fft_inv_rec(
     uint64_t n,
     uint64_t k,
     uint64_t bits,
+    uint64_t Q,
+    num_p num_fft_2,
     uint64_t threads
 )
 {
@@ -3358,10 +3648,26 @@ static void num_ssm_fft_inv_rec(
     assert(num)
     assert(num_aux->size >= 2 * n)
 
+    uint64_t k_ = stdc_trailing_zeros(k);
+    uint64_t lim = ((chunk_bits * (n - 1)) - k_) / Q;
+
+    ssm_params_t p_next;
+    bool pw_recursive = false;
+    if(num_fft_2)
+    {
+        pw_recursive = ssm_is_recursive(n);
+        if(pw_recursive)
+        {
+            p_next = ssm_get_params_wrap(n);
+        }
+    }
+
     uint64_t workers = ssm_worker_count(threads, k / 2);
 
     if(workers <= 1)
     {
+        ssm_fft_inv_pointwise_t pw = ssm_fft_inv_pointwise_create(num_fft_2, pw_recursive ? &p_next : nullptr, n);
+
         ssm_fft_inv_split_worker_t serial =
         {
             .num_aux = num_aux,
@@ -3370,10 +3676,16 @@ static void num_ssm_fft_inv_rec(
             .n = n,
             .k = k,
             .bits = bits,
+            .Q = Q,
+            .k_ = k_,
+            .lim = lim,
+            .postloop = true,
+            .pw = num_fft_2 ? &pw : nullptr,
             .worker = 0,
             .workers = 1,
         };
         ssm_fft_inv_split_worker(&serial);
+        ssm_fft_inv_pointwise_free(&pw);
         return;
     }
 
@@ -3391,9 +3703,13 @@ static void num_ssm_fft_inv_rec(
 
     ssm_fft_inv_split_worker_t * split_args = malloc(split * sizeof(*split_args));
     assert(split_args)
+    ssm_fft_inv_pointwise_t * split_pw = malloc(split * sizeof(*split_pw));
+    assert(split_pw)
 
     for(uint64_t w=0; w<split; w++)
     {
+        split_pw[w] = ssm_fft_inv_pointwise_create(num_fft_2, pw_recursive ? &p_next : nullptr, n);
+
         split_args[w] = (ssm_fft_inv_split_worker_t)
         {
             .num_aux = worker_aux[w],
@@ -3402,6 +3718,11 @@ static void num_ssm_fft_inv_rec(
             .n = n,
             .k = k,
             .bits = bits,
+            .Q = Q,
+            .k_ = k_,
+            .lim = lim,
+            .postloop = false,
+            .pw = num_fft_2 ? &split_pw[w] : nullptr,
             .worker = w,
             .workers = split,
         };
@@ -3413,6 +3734,11 @@ static void num_ssm_fft_inv_rec(
         TREAT(pthread_join(worker_ids[w], nullptr))
     }
 
+    for(uint64_t w=0; w<split; w++)
+    {
+        ssm_fft_inv_pointwise_free(&split_pw[w]);
+    }
+    free(split_pw);
     free(split_args);
 
     ssm_fft_inv_pass_worker_t * worker_args = malloc(workers * sizeof(*worker_args));
@@ -3442,6 +3768,10 @@ static void num_ssm_fft_inv_rec(
                 .bits = bits,
                 .gl = gl,
                 .r = r,
+                .Q = Q,
+                .k_ = k_,
+                .lim = lim,
+                .postloop = (stages_left == r),
                 .idx_start = idx_start,
                 .idx_end = idx_end,
             };
@@ -3466,36 +3796,6 @@ static void num_ssm_fft_inv_rec(
     free(worker_aux);
 }
 
-typedef struct
-{
-    num_p num_fft;
-    uint64_t n;
-    uint64_t Q;
-    uint64_t k_;
-    uint64_t lim;
-    num_p num_aux;
-    uint64_t i_start;
-    uint64_t i_end;
-} ssm_fft_inv_postloop_worker_t;
-
-static void * ssm_fft_inv_postloop_worker(void * arg)
-{
-    ssm_fft_inv_postloop_worker_t * w = arg;
-    for(uint64_t i = w->i_start; i < w->i_end; i++)
-    {
-        if(i < w->lim)
-        {
-            num_ssm_shr_mod(w->num_aux, w->num_fft, w->n * i, w->n, (w->Q * i) + w->k_);
-        }
-        else
-        {
-            num_ssm_shr_mod(w->num_aux, w->num_fft, w->n * i, w->n, w->Q * i);
-            num_ssm_shr_mod(w->num_aux, w->num_fft, w->n * i, w->n, w->k_);
-        }
-    }
-    return nullptr;
-}
-
 // num_aux->size >= 2 * p->n
 void num_ssm_fft_inv(num_p num_aux, num_p num_fft, ssm_params_p p, uint64_t threads)
 {
@@ -3505,57 +3805,29 @@ void num_ssm_fft_inv(num_p num_aux, num_p num_fft, ssm_params_p p, uint64_t thre
     assert(num_fft)
     assert(num_aux->size >= 2 * p->n)
 
-    num_ssm_fft_inv_rec(num_aux, num_fft, 0, p->n, p->K, 2 * p->Q, threads);
+    num_ssm_fft_inv_rec(num_aux, num_fft, 0, p->n, p->K, 2 * p->Q, p->Q, nullptr, threads);
+}
 
-    uint64_t k_ = stdc_trailing_zeros(p->K);
-    uint64_t lim = ((chunk_bits * (p->n - 1)) - k_) / p->Q;
+// num_ssm_fft_inv with the convolution's pointwise multiply against num_fft_2 folded
+// into its first pass. num_fft_2 is only read, and is left untouched.
+// num_aux->size >= 2 * p->n
+static void num_ssm_fft_inv_pointwise(
+    num_p num_aux,
+    num_p num_fft,
+    num_p num_fft_2,
+    ssm_params_p p,
+    uint64_t threads
+)
+{
+    CLU_HANDLER_IS_SAFE(num_aux)
+    CLU_HANDLER_IS_SAFE(num_fft)
+    CLU_HANDLER_IS_SAFE(num_fft_2)
+    assert(num_aux)
+    assert(num_fft)
+    assert(num_fft_2)
+    assert(num_aux->size >= 2 * p->n)
 
-    uint64_t workers = ssm_worker_count(threads, p->K);
-
-    if(workers <= 1)
-    {
-        for(uint64_t i=0; i<lim; i++)
-        {
-            num_ssm_shr_mod(num_aux, num_fft, p->n * i, p->n, (p->Q * i) + k_);
-        }
-        for(uint64_t i=lim; i<p->K; i++)
-        {
-            num_ssm_shr_mod(num_aux, num_fft, p->n * i, p->n, p->Q * i);
-            num_ssm_shr_mod(num_aux, num_fft, p->n * i, p->n, k_);
-        }
-        return;
-    }
-
-    ssm_fft_inv_postloop_worker_t * worker_args = malloc(workers * sizeof(*worker_args));
-    assert(worker_args)
-    pthread_t * worker_ids = malloc(workers * sizeof(*worker_ids));
-    assert(worker_ids)
-
-    for(uint64_t w=0; w<workers; w++)
-    {
-        uint64_t i_start, i_end;
-        ssm_worker_range(w, workers, p->K, &i_start, &i_end);
-        worker_args[w] = (ssm_fft_inv_postloop_worker_t)
-        {
-            .num_fft = num_fft,
-            .n = p->n,
-            .Q = p->Q,
-            .k_ = k_,
-            .lim = lim,
-            .num_aux = num_create_dirty(CLU_ARGS(2 * p->n, 0)),
-            .i_start = i_start,
-            .i_end = i_end,
-        };
-        TREAT(pthread_create(&worker_ids[w], nullptr, ssm_fft_inv_postloop_worker, &worker_args[w]))
-    }
-    for(uint64_t w=0; w<workers; w++)
-    {
-        TREAT(pthread_join(worker_ids[w], nullptr))
-        num_free(worker_args[w].num_aux);
-    }
-
-    free(worker_ids);
-    free(worker_args);
+    num_ssm_fft_inv_rec(num_aux, num_fft, 0, p->n, p->K, 2 * p->Q, p->Q, num_fft_2, threads);
 }
 
 constexpr uint64_t ssm_recursive_threshold = 129;
@@ -4572,6 +4844,10 @@ static void num_ssm_mul_pointwise(
 
 
 
+// Production pads inside the forward transform now (ssm_fft_fwd_pad_block), so this
+// standalone form is reached only by its own round-trip test, which is why it needs
+// the attribute: STATIC makes it static in release, where nothing calls it.
+[[maybe_unused]]
 num_p num_ssm_pad_no_wrap(num_p num, ssm_params_p p)
 {
     CLU_HANDLER_IS_SAFE(num)
@@ -4641,13 +4917,17 @@ static num_p num_ssm_prepare_no_wrap(
     assert(num)
     assert(num_aux->size >= 2 * p->n)
 
-    num_p num_fft = num_ssm_pad_no_wrap(num, p);
+    // Allocated dirty: every limb of every element is written by the pad fused into
+    // the transform's first pass, so num_create's zeroing of the whole n*K array
+    // would be a wasted pass over hundreds of MB.
+    num_p num_fft = num_create_dirty(CLU_ARGS(p->n * p->K, 0));
+
+    num_ssm_fft_fwd_pad(num_aux, num_fft, num, p, threads);
+
     if(free_inputs)
     {
         num_free(num);
     }
-
-    num_ssm_fft_fwd(num_aux, num_fft, p, threads);
     return num_fft;
 }
 
@@ -4660,23 +4940,15 @@ num_p num_mul_ssm(num_p num_1, num_p num_2, bool free_inputs, uint64_t threads)
     assert(num_2)
 
     ssm_params_t p = ssm_get_params(num_1->count + num_2->count);
-    num_p num_aux_1 = num_create_dirty(CLU_ARGS(p.n, 0));
     num_p num_aux_2 = num_create_dirty(CLU_ARGS(2 * p.n, 0));
     num_p num_fft_1 = num_ssm_prepare_no_wrap(num_aux_2, num_1, &p, free_inputs, threads);
     num_p num_fft_2 = num_ssm_prepare_no_wrap(num_aux_2, num_2, &p, free_inputs, threads);
 
-    num_ssm_mul_pointwise(
-        num_aux_1,
-        num_aux_2,
-        num_fft_1,
-        num_fft_2,
-        &p,
-        threads
-    );
-    num_free(num_aux_1);
+    // The pointwise multiply rides inside the inverse transform's first pass rather
+    // than running as a pass of its own, so the products are consumed from cache
+    // instead of being written to DRAM and read straight back.
+    num_ssm_fft_inv_pointwise(num_aux_2, num_fft_1, num_fft_2, &p, threads);
     num_free(num_fft_2);
-
-    num_ssm_fft_inv(num_aux_2, num_fft_1, &p, threads);
     num_free(num_aux_2);
 
     return num_ssm_depad_no_wrap(num_fft_1, &p);
