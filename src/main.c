@@ -973,6 +973,25 @@ static void time_threads_div()
 }
 
 
+// Logical processors per physical core. The logical processors of one core are
+// adjacent here -- core c owns CPUs 2c and 2c+1, per
+// /sys/devices/system/cpu/cpuN/topology/thread_siblings_list -- so a naive "worker i
+// on CPU i" doubles workers onto half the cores before touching the other half.
+constexpr uint64_t processor_siblings = 2;
+
+// Processor for the INDEX-th worker, taking one logical processor per physical core
+// before doubling up on siblings. Beyond the core count it wraps onto the siblings,
+// so the first half of the workers get a core each and the second half share.
+static uint64_t processor_of(uint64_t index)
+{
+    uint64_t cores = (uint64_t)sysconf(_SC_NPROCESSORS_ONLN) / processor_siblings;
+    if(index < cores)
+    {
+        return processor_siblings * index;
+    }
+    return (processor_siblings * (index - cores)) + 1;
+}
+
 // Pin the calling process to one processor. pinhao's forked workers do this through
 // fork_lock_processor in its own copy of mods/macros; araucaria's vendored copy of
 // that submodule predates the function, so it lives here rather than diverging the
@@ -1058,7 +1077,7 @@ static void time_procs_mul()
             pid[p] = fork_safe();
             if(pid[p] == 0)
             {
-                lock_processor(p);
+                lock_processor(processor_of(p));
 
                 num_p num_1_c = num_copy(num_1);
                 num_p num_2_c = num_copy(num_2);
@@ -1115,6 +1134,126 @@ static void time_procs_mul()
 
 
 
+// Restricts the calling process -- and so every thread it creates afterwards -- to
+// THREADS logical processors, either packed (both siblings of a core before moving
+// on) or spread (one sibling per core). Linux only: macOS has no process-wide
+// affinity mask, and its per-thread affinity is only a hint, so time_smt_mul reports
+// the same placement twice there rather than pretending to measure something.
+[[maybe_unused]]
+static void affinity_span([[maybe_unused]] uint64_t threads, [[maybe_unused]] bool spread)
+{
+#if defined(__linux__)
+
+    cpu_set_t cpu_set;
+    CPU_ZERO(&cpu_set);
+    for(uint64_t i = 0; i < threads; i++)
+    {
+        CPU_SET(spread ? (processor_siblings * i) : i, &cpu_set);
+    }
+    assert(sched_setaffinity(0, sizeof(cpu_set), &cpu_set) == 0)
+
+#endif
+}
+
+[[maybe_unused]]
+static void affinity_all()
+{
+#if defined(__linux__)
+
+    cpu_set_t cpu_set;
+    CPU_ZERO(&cpu_set);
+    for(uint64_t i = 0; i < (uint64_t)sysconf(_SC_NPROCESSORS_ONLN); i++)
+    {
+        CPU_SET(i, &cpu_set);
+    }
+    assert(sched_setaffinity(0, sizeof(cpu_set), &cpu_set) == 0)
+
+#endif
+}
+
+// The same multiply at the same thread count, placed two ways: packed onto the
+// fewest physical cores (both siblings of each) or spread one thread per core. The
+// thread count and the work are identical, so the difference is what a second thread
+// on the same core costs -- issue slots, L1 and L2 -- against what a second core
+// buys.
+//
+// The two thread counts answer different halves of the question. At 8 threads the
+// packed placement uses 4 cores and the spread one uses 8, which is the headline
+// effect but also changes how many cores are lit and therefore the clock. At 2
+// threads so few cores are active either way that the clock is nearly the same, so
+// that pair isolates the sibling-sharing cost on its own.
+//
+// This only measures anything where the affinity mask actually decides which
+// physical core a thread lands on. Under WSL2 it does not: the guest topology is
+// synthetic and the hypervisor floats vCPUs, so both placements return the same time
+// and the comparison is vacuous. Check before trusting a null result here -- pin two
+// copies of a small compute-bound loop to a CPU and to its listed sibling, and if
+// that pair is not roughly twice as slow as the pair on two listed cores, the
+// affinity mask is not controlling placement and this benchmark cannot see anything.
+[[maybe_unused]]
+static void time_smt_mul()
+{
+#ifdef DEBUG
+    uint64_t base = 22;
+#else
+    uint64_t base = 28;
+#endif
+
+    tprintf("base: " U64P() "", base);
+
+    num_p num_1 = num_generate_1(base, 2);
+    num_p num_2 = num_add(num_copy(num_1), num_wrap(1));
+
+    tprintf("num_1->count: " U64P() "", num_1->count);
+
+    num_p num_res_ref = num_mul_threads(num_copy(num_1), num_copy(num_2), 1);
+
+    uint64_t thread_counts[] = {2, 8};
+
+    for(uint64_t i=0; i<sizeof(thread_counts)/sizeof(thread_counts[0]); i++)
+    {
+        uint64_t threads = thread_counts[i];
+
+        for(uint64_t s=0; s<2; s++)
+        {
+            bool spread = (bool)s;
+            affinity_span(threads, spread);
+
+            num_p num_1_c = num_copy(num_1);
+            num_p num_2_c = num_copy(num_2);
+
+            TIME_SETUP
+            num_p num_res = num_mul_threads(num_1_c, num_2_c, threads);
+            TIME_END(t1)
+
+            assert(num_cmp(num_res, num_res_ref) == 0)
+            num_free(num_res);
+
+            tprintf(
+                "threads: " U64P(2) "  cores: " U64P(2) "  %-6s  time: %.3f",
+                threads,
+                spread ? threads : ((threads + processor_siblings - 1) / processor_siblings),
+                spread ? "spread" : "packed",
+                dtime(t1)
+            );
+        }
+    }
+
+    affinity_all();
+    num_free(num_res_ref);
+    num_free(num_1);
+    num_free(num_2);
+
+#ifdef DEBUG
+    uint64_t count = clu_get_register_count();
+    tprintf("total allocations : " U64P() "", count);
+    tprintf("max occupancy     : " U64P() "", clu_get_max_occupancy());
+    assert(clu_mem_is_empty());
+#endif
+}
+
+
+
 // int main(int argc, char** argv)
 int main()
 {
@@ -1144,8 +1283,9 @@ int main()
     // mem_1(21);
     // time_assembly_mul();
     // time_threads_mul();
-    // time_threads_div();
-    time_procs_mul();
+    time_threads_div();
+    // time_procs_mul();
+    // time_smt_mul();
     // time_assembly_sqr();
     // time_assembly_div();
 
