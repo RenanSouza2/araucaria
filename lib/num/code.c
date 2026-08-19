@@ -4,14 +4,12 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/mman.h>
-#include <stdatomic.h>
 
 #include "debug.h"
 #include "internal.h"
 #include "../../mods/macros/assert.h" // IWYU pragma: keep
 #include "../../mods/macros/stdbit.h" // IWYU pragma: keep
 #include "../../mods/macros/threads.h"
-#include "../../mods/macros/time.h"
 #include "../../mods/macros/uint.h"
 #include "../../mods/clu/header.h"
 #include "struct.h"
@@ -2596,342 +2594,6 @@ void num_ssm_shr_mod(
 // saved carry for adcs, cmp against the saved borrow for sbcs. Both are two instructions
 // per four words, which is what buys the second pass.
 //
-// A fixed-size pool of worker threads, created once (lazily, on first use that
-// actually wants more than one worker) and never joined - they block on their
-// own ready semaphore for the rest of the process's life. thread_pool_dispatch
-// replaces "spawn N threads, join N threads" with "wake exactly the N
-// already-running threads this round needs, wait for them to finish," which
-// matters here because the FFT stage loops call it log2(K) times per
-// multiply: real pthread_create/join overhead paid once per round adds up
-// fast across that many rounds.
-//
-// Each worker has its own ready semaphore, posted only for the workers a
-// round actually uses (worker w gets one iff w < count) - an earlier version
-// used one shared condition variable and pthread_cond_broadcast, which woke
-// every pool worker every round regardless of count: all of them had to wake,
-// contend for one shared mutex, and re-park if unused. Measured head-to-head
-// against raw pthread_create/join (src/main.c, since reverted), that design
-// was 1.3-3.6x *slower* than raw threads for any count below the full pool
-// size, and only broke even at count == pool size - the broadcast wakeup and
-// mutex contention cost roughly the same regardless of how many workers had
-// real work, so it never actually saved anything except at full width.
-// Per-worker semaphores fix this at the root: an unused worker is never
-// woken at all.
-//
-// Only one round is ever in flight: thread_pool_dispatch holds
-// thread_pool_dispatch_mutex for its whole duration, so concurrent callers
-// serialize rather than interleave. Nothing in this codebase currently
-// dispatches from more than one caller thread at a time, so this is
-// deliberately not a general task queue. This mutex only ever guards the
-// dispatch call itself (never touched by workers), so it stays uncontended
-// in the common case and costs nothing like the old shared job mutex did.
-//
-// Lazy init matters beyond just avoiding idle threads: lib/num/test's harness
-// (mods/macros/test.h, start_case) forks a fresh process per test case, and only
-// ever from a supervisor chain that never runs case bodies itself - actual test
-// logic only ever runs in a leaf process, after its own fork. As long as the pool
-// is created by the first real dispatch (which only ever happens inside a leaf
-// process), each test case gets its own working pool. Eager (e.g. constructor-
-// time) init would instead create the pool in some ancestor process, and every
-// forked descendant would inherit a pool struct whose worker threads don't exist
-// in the child - dispatch would hang until the test harness's timeout kills it.
-// The same constraint would apply if these APIs are later wired into pi_tree
-// (parent repo, itself fork()-based) - out of scope here, but why this matters.
-typedef struct
-{
-    void *(*fn)(void *);
-    void * args;
-    uint64_t stride;
-} thread_pool_round_t;
-
-// pool_state packs (generation << pool_count_bits) | count into one word, so a
-// thread decides whether it participates from the same snapshot that told it a
-// round exists. Reading count as a separate variable races: a worker that sits
-// out a round (index >= count) never decrements pool_remaining, so that round
-// can complete and the next one publish before the worker ever read count - it
-// would then test the *next* round's count against the previous round's
-// generation, run that job, and run it a second time once it noticed the
-// generation move.
-constexpr uint64_t pool_count_bits = 16;
-constexpr uint64_t pool_count_mask = 0xFFFF;
-
-// Pause-spins a thread burns waiting before it parks on a condvar. The FFT
-// stage loops dispatch back-to-back rounds microseconds apart, so spinning
-// across that gap keeps the whole handoff in userspace - no syscall, no
-// context switch. Parking is the fallback for the long serial stretches
-// between threaded multiplies, where spinning would just burn cores.
-// How long a thread spins waiting before it parks on a condvar. The FFT stage
-// loops dispatch back-to-back rounds, so spinning across the gap keeps the
-// handoff in userspace - no syscall, no context switch, no waiting on the
-// scheduler to bring the thread back. Parking is the fallback for the long
-// serial stretches between threaded multiplies, where spinning would just burn
-// cores that the serial work wants.
-//
-// Swept against the division benchmark (~20M/8.7M limbs, 16 threads, 44k
-// dispatch rounds): dispatch overhead falls from 5.03s at a ~6us budget to
-// 0.66s at ~1ms and stays flat past that, while total runtime starts climbing
-// again beyond ~1ms as idle spinners steal cycles from the serial phases
-// (measured per-round work time inflates 12.6s -> 13.5s at a 48ms budget).
-// This is a budget in nanoseconds rather than an iteration count because PAUSE
-// costs ~3ns on this Skylake-client part but ~48ns on Skylake-server, so a
-// fixed spin count would mean wildly different real durations per machine.
-constexpr uint64_t pool_spin_ns = 1'000'000;
-
-// Pause iterations between clock reads while spinning: enough that the clock
-// read is noise next to the spinning, few enough to not overshoot the budget.
-// A round that arrives promptly never reads the clock a second time at all.
-constexpr uint64_t pool_spin_probe = 256;
-
-// One park slot per worker, on its own cache line. A round only ever wakes the
-// workers it actually uses, so an idle worker outside [0, count) is never
-// touched - waking every worker and letting the unwanted ones re-sleep is the
-// thundering herd this pool exists to avoid, and it costs the same whether the
-// herd is woken by syscall or by spinning on a shared word.
-typedef struct
-{
-    alignas(64) pthread_mutex_t mutex;
-    pthread_cond_t cond;
-    bool parked;
-} pool_park_t;
-
-static alignas(64) _Atomic uint64_t pool_state;
-static alignas(64) _Atomic uint64_t pool_remaining;
-static alignas(64) thread_pool_round_t thread_pool_round;
-
-static pthread_mutex_t thread_pool_dispatch_mutex = PTHREAD_MUTEX_INITIALIZER;
-static pthread_mutex_t thread_pool_done_mutex = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t thread_pool_done_cond = PTHREAD_COND_INITIALIZER;
-static pthread_once_t thread_pool_once = PTHREAD_ONCE_INIT;
-static uint64_t thread_pool_worker_count;
-static uint64_t * thread_pool_worker_indices;
-static pool_park_t * thread_pool_park;
-
-static void pool_cpu_relax(void)
-{
-#if defined(__x86_64__) || defined(__i386__)
-    __builtin_ia32_pause();
-#elif defined(__aarch64__) && !defined(NO_ASSEMBLY)
-    __asm__ __volatile__("yield" ::: "memory");
-#endif
-}
-
-// Spins until the published round moves past seen_gen or the budget runs out,
-// returning the last state seen - the caller distinguishes the two by testing
-// the returned generation, and parks if it did not move.
-static uint64_t pool_spin_for_round(uint64_t seen_gen, uint64_t spin_ns)
-{
-    uint64_t state = atomic_load_explicit(&pool_state, memory_order_acquire);
-    if(spin_ns == 0 || (state >> pool_count_bits) != seen_gen)
-    {
-        return state;
-    }
-
-    uint64_t deadline = get_time() + spin_ns;
-    for(;;)
-    {
-        for(uint64_t i = 0; i < pool_spin_probe; i++)
-        {
-            pool_cpu_relax();
-
-            state = atomic_load_explicit(&pool_state, memory_order_acquire);
-            if((state >> pool_count_bits) != seen_gen)
-            {
-                return state;
-            }
-        }
-
-        if(get_time() >= deadline)
-        {
-            return state;
-        }
-    }
-}
-
-// Same shape as pool_spin_for_round, for the dispatcher waiting on the round's
-// workers. Returns true if the round finished within the budget.
-static bool pool_spin_for_done(uint64_t spin_ns)
-{
-    if(atomic_load_explicit(&pool_remaining, memory_order_acquire) == 0)
-    {
-        return true;
-    }
-
-    uint64_t deadline = get_time() + spin_ns;
-    for(;;)
-    {
-        for(uint64_t i = 0; i < pool_spin_probe; i++)
-        {
-            pool_cpu_relax();
-
-            if(atomic_load_explicit(&pool_remaining, memory_order_acquire) == 0)
-            {
-                return true;
-            }
-        }
-
-        if(get_time() >= deadline)
-        {
-            return false;
-        }
-    }
-}
-
-static void pool_run_job(uint64_t index)
-{
-    void *(*fn)(void *) = thread_pool_round.fn;
-    void * job_arg = (char *)thread_pool_round.args + (index * thread_pool_round.stride);
-
-    fn(job_arg);
-}
-
-static void * thread_pool_worker(void * arg)
-{
-    uint64_t index = *(uint64_t *)arg;
-    uint64_t seen_gen = 0;
-
-    // Spinning is only ever worth it for a worker the caller is actively using:
-    // inside an FFT stage loop the next round lands microseconds away, so the
-    // spin bridges it without a syscall. A worker that was not wanted this
-    // round parks instead of spinning - the following round is very likely to
-    // have the same width and not want it either.
-    uint64_t spin_ns = 0;
-
-    for(;;)
-    {
-        uint64_t state = pool_spin_for_round(seen_gen, spin_ns);
-
-        if((state >> pool_count_bits) == seen_gen)
-        {
-            pool_park_t * park = &thread_pool_park[index];
-
-            TREAT(pthread_mutex_lock(&park->mutex))
-            park->parked = true;
-            for(;;)
-            {
-                state = atomic_load_explicit(&pool_state, memory_order_acquire);
-                if((state >> pool_count_bits) != seen_gen)
-                {
-                    break;
-                }
-                TREAT(pthread_cond_wait(&park->cond, &park->mutex))
-            }
-            park->parked = false;
-            TREAT(pthread_mutex_unlock(&park->mutex))
-        }
-        seen_gen = state >> pool_count_bits;
-
-        if(index >= (state & pool_count_mask))
-        {
-            spin_ns = 0;
-            continue;
-        }
-
-        pool_run_job(index);
-        spin_ns = pool_spin_ns;
-
-        if(atomic_fetch_sub_explicit(&pool_remaining, U64(1), memory_order_acq_rel) == 1)
-        {
-            TREAT(pthread_mutex_lock(&thread_pool_done_mutex))
-            TREAT(pthread_cond_signal(&thread_pool_done_cond))
-            TREAT(pthread_mutex_unlock(&thread_pool_done_mutex))
-        }
-    }
-}
-
-static void thread_pool_init(void)
-{
-    long n = sysconf(_SC_NPROCESSORS_ONLN);
-    thread_pool_worker_count = n > 0 ? (uint64_t)n : 1;
-    assert(thread_pool_worker_count <= pool_count_mask)
-
-    thread_pool_worker_indices = malloc(thread_pool_worker_count * sizeof(*thread_pool_worker_indices));
-    assert(thread_pool_worker_indices)
-    thread_pool_park = malloc(thread_pool_worker_count * sizeof(*thread_pool_park));
-    assert(thread_pool_park)
-
-    // Index 0 is the dispatching thread itself (see thread_pool_dispatch), so
-    // the pool only owns threads for indices 1..count-1.
-    for(uint64_t i = 1; i < thread_pool_worker_count; i++)
-    {
-        thread_pool_worker_indices[i] = i;
-        thread_pool_park[i].parked = false;
-        TREAT(pthread_mutex_init(&thread_pool_park[i].mutex, nullptr))
-        TREAT(pthread_cond_init(&thread_pool_park[i].cond, nullptr))
-
-        pthread_t tid;
-        TREAT(pthread_create(&tid, nullptr, thread_pool_worker, &thread_pool_worker_indices[i]))
-    }
-}
-
-static uint64_t thread_pool_size(void)
-{
-    TREAT(pthread_once(&thread_pool_once, thread_pool_init))
-    return thread_pool_worker_count;
-}
-
-// Blocks until fn(args + i*stride) has run for every i in [0, count). count
-// must be <= thread_pool_size() - callers are expected to have already
-// clamped via ssm_worker_count, so oversubscription is a caller bug, not a
-// case to handle gracefully here.
-static void thread_pool_dispatch(void *(*fn)(void *), void * args, uint64_t stride, uint64_t count)
-{
-    TREAT(pthread_once(&thread_pool_once, thread_pool_init))
-    assert(count <= thread_pool_worker_count)
-
-    TREAT(pthread_mutex_lock(&thread_pool_dispatch_mutex))
-
-    thread_pool_round.fn = fn;
-    thread_pool_round.args = args;
-    thread_pool_round.stride = stride;
-
-    if(count > 1)
-    {
-        atomic_store_explicit(&pool_remaining, count - 1, memory_order_relaxed);
-
-        // One release store publishes the round to every spinning worker at
-        // once, instead of a serial loop of per-worker wakeups whose last
-        // worker only started after count syscalls had already retired.
-        uint64_t gen = (atomic_load_explicit(&pool_state, memory_order_relaxed) >> pool_count_bits) + 1;
-        atomic_store_explicit(&pool_state, (gen << pool_count_bits) | count, memory_order_release);
-
-        // Only the workers this round uses get looked at, and a spinning one
-        // costs an uncontended lock/unlock rather than a wakeup syscall - the
-        // steady state inside a stage loop is that none of them are parked.
-        // Publishing the state before taking the lock is what makes this safe:
-        // a worker on its way to park sets parked under the same lock and then
-        // re-checks the generation, so it either gets signalled here or sees
-        // the new round itself.
-        for(uint64_t w = 1; w < count; w++)
-        {
-            pool_park_t * park = &thread_pool_park[w];
-
-            TREAT(pthread_mutex_lock(&park->mutex))
-            if(park->parked)
-            {
-                TREAT(pthread_cond_signal(&park->cond))
-            }
-            TREAT(pthread_mutex_unlock(&park->mutex))
-        }
-    }
-
-    // The dispatching thread runs job 0 itself rather than waking a worker for
-    // it and then idling: one less wakeup per round, and the caller's core does
-    // useful work instead of spinning on the completion counter.
-    pool_run_job(0);
-
-    if(!pool_spin_for_done(pool_spin_ns))
-    {
-        TREAT(pthread_mutex_lock(&thread_pool_done_mutex))
-        while(atomic_load_explicit(&pool_remaining, memory_order_acquire) != 0)
-        {
-            TREAT(pthread_cond_wait(&thread_pool_done_cond, &thread_pool_done_mutex))
-        }
-        TREAT(pthread_mutex_unlock(&thread_pool_done_mutex))
-    }
-
-    TREAT(pthread_mutex_unlock(&thread_pool_dispatch_mutex))
-}
-
 // Shared by every flat, K-indexed loop this file parallelizes (FFT pre/post-loops,
 // pointwise's K-loop): only the outermost call of whichever recursion it's used in
 // parallelizes; deeper recursive calls are invoked with threads=1, so this never has
@@ -2939,13 +2601,7 @@ static void thread_pool_dispatch(void *(*fn)(void *), void * args, uint64_t stri
 static uint64_t ssm_worker_count(uint64_t threads, uint64_t K)
 {
     uint64_t workers = threads < K ? threads : K;
-    if(workers <= 1)
-    {
-        return workers ? workers : 1;
-    }
-
-    uint64_t pool_size = thread_pool_size();
-    return workers < pool_size ? workers : pool_size;
+    return workers ? workers : 1;
 }
 
 static void ssm_worker_range(
@@ -3272,6 +2928,8 @@ static void num_ssm_fft_fwd_rec(
 
     ssm_fft_fwd_stage_worker_t * worker_args = malloc(workers * sizeof(*worker_args));
     assert(worker_args)
+    pthread_t * worker_ids = malloc(workers * sizeof(*worker_ids));
+    assert(worker_ids)
 
     for(uint64_t w=0; w<workers; w++)
     {
@@ -3298,15 +2956,20 @@ static void num_ssm_fft_fwd_rec(
             worker_args[w].bits_local = bits_local;
             worker_args[w].idx_start = idx_start;
             worker_args[w].idx_end = idx_end;
-        }
 
-        thread_pool_dispatch(ssm_fft_fwd_stage_worker, worker_args, sizeof(*worker_args), workers);
+            TREAT(pthread_create(&worker_ids[w], nullptr, ssm_fft_fwd_stage_worker, &worker_args[w]))
+        }
+        for(uint64_t w=0; w<workers; w++)
+        {
+            TREAT(pthread_join(worker_ids[w], nullptr))
+        }
     }
 
     for(uint64_t w=0; w<workers; w++)
     {
         num_free(worker_args[w].num_aux);
     }
+    free(worker_ids);
     free(worker_args);
 }
 
@@ -3353,6 +3016,8 @@ void num_ssm_fft_fwd(num_p num_aux, num_p num_fft, ssm_params_p p, uint64_t thre
     {
         ssm_fft_fwd_preloop_worker_t * worker_args = malloc(workers * sizeof(*worker_args));
         assert(worker_args)
+        pthread_t * worker_ids = malloc(workers * sizeof(*worker_ids));
+        assert(worker_ids)
 
         for(uint64_t w=0; w<workers; w++)
         {
@@ -3367,14 +3032,15 @@ void num_ssm_fft_fwd(num_p num_aux, num_p num_fft, ssm_params_p p, uint64_t thre
                 .i_start = i_start,
                 .i_end = i_end,
             };
+            TREAT(pthread_create(&worker_ids[w], nullptr, ssm_fft_fwd_preloop_worker, &worker_args[w]))
         }
-
-        thread_pool_dispatch(ssm_fft_fwd_preloop_worker, worker_args, sizeof(*worker_args), workers);
-
         for(uint64_t w=0; w<workers; w++)
         {
+            TREAT(pthread_join(worker_ids[w], nullptr))
             num_free(worker_args[w].num_aux);
         }
+
+        free(worker_ids);
         free(worker_args);
     }
 
@@ -3470,6 +3136,8 @@ static void num_ssm_fft_inv_rec(
 
     ssm_fft_inv_stage_worker_t * worker_args = malloc(workers * sizeof(*worker_args));
     assert(worker_args)
+    pthread_t * worker_ids = malloc(workers * sizeof(*worker_ids));
+    assert(worker_ids)
 
     for(uint64_t w=0; w<workers; w++)
     {
@@ -3495,9 +3163,13 @@ static void num_ssm_fft_inv_rec(
             worker_args[w].bits_local = bits_local;
             worker_args[w].idx_start = idx_start;
             worker_args[w].idx_end = idx_end;
-        }
 
-        thread_pool_dispatch(ssm_fft_inv_stage_worker, worker_args, sizeof(*worker_args), workers);
+            TREAT(pthread_create(&worker_ids[w], nullptr, ssm_fft_inv_stage_worker, &worker_args[w]))
+        }
+        for(uint64_t w=0; w<workers; w++)
+        {
+            TREAT(pthread_join(worker_ids[w], nullptr))
+        }
 
         bits_local /= 2;
     }
@@ -3506,6 +3178,7 @@ static void num_ssm_fft_inv_rec(
     {
         num_free(worker_args[w].num_aux);
     }
+    free(worker_ids);
     free(worker_args);
 }
 
@@ -3571,6 +3244,8 @@ void num_ssm_fft_inv(num_p num_aux, num_p num_fft, ssm_params_p p, uint64_t thre
 
     ssm_fft_inv_postloop_worker_t * worker_args = malloc(workers * sizeof(*worker_args));
     assert(worker_args)
+    pthread_t * worker_ids = malloc(workers * sizeof(*worker_ids));
+    assert(worker_ids)
 
     for(uint64_t w=0; w<workers; w++)
     {
@@ -3587,14 +3262,15 @@ void num_ssm_fft_inv(num_p num_aux, num_p num_fft, ssm_params_p p, uint64_t thre
             .i_start = i_start,
             .i_end = i_end,
         };
+        TREAT(pthread_create(&worker_ids[w], nullptr, ssm_fft_inv_postloop_worker, &worker_args[w]))
     }
-
-    thread_pool_dispatch(ssm_fft_inv_postloop_worker, worker_args, sizeof(*worker_args), workers);
-
     for(uint64_t w=0; w<workers; w++)
     {
+        TREAT(pthread_join(worker_ids[w], nullptr))
         num_free(worker_args[w].num_aux);
     }
+
+    free(worker_ids);
     free(worker_args);
 }
 
@@ -4519,6 +4195,8 @@ static void num_ssm_mul_pointwise(
 
         ssm_pointwise_base_worker_t * worker_args = malloc(workers * sizeof(*worker_args));
         assert(worker_args)
+        pthread_t * worker_ids = malloc(workers * sizeof(*worker_ids));
+        assert(worker_ids)
 
         for(uint64_t w=0; w<workers; w++)
         {
@@ -4533,14 +4211,15 @@ static void num_ssm_mul_pointwise(
                 .i_start = i_start,
                 .i_end = i_end,
             };
+            TREAT(pthread_create(&worker_ids[w], nullptr, ssm_pointwise_base_worker, &worker_args[w]))
         }
-
-        thread_pool_dispatch(ssm_pointwise_base_worker, worker_args, sizeof(*worker_args), workers);
-
         for(uint64_t w=0; w<workers; w++)
         {
+            TREAT(pthread_join(worker_ids[w], nullptr))
             num_free(worker_args[w].num_aux_2);
         }
+
+        free(worker_ids);
         free(worker_args);
         return;
     }
@@ -4572,6 +4251,8 @@ static void num_ssm_mul_pointwise(
 
     ssm_pointwise_rec_worker_t * worker_args = malloc(workers * sizeof(*worker_args));
     assert(worker_args)
+    pthread_t * worker_ids = malloc(workers * sizeof(*worker_ids));
+    assert(worker_ids)
 
     for(uint64_t w=0; w<workers; w++)
     {
@@ -4590,18 +4271,18 @@ static void num_ssm_mul_pointwise(
             .i_start = i_start,
             .i_end = i_end,
         };
+        TREAT(pthread_create(&worker_ids[w], nullptr, ssm_pointwise_rec_worker, &worker_args[w]))
     }
-
-    thread_pool_dispatch(ssm_pointwise_rec_worker, worker_args, sizeof(*worker_args), workers);
-
     for(uint64_t w=0; w<workers; w++)
     {
+        TREAT(pthread_join(worker_ids[w], nullptr))
         num_free(worker_args[w].num_aux_1);
         num_free(worker_args[w].num_aux_2);
         num_free(worker_args[w].num_fft_1_next);
         num_free(worker_args[w].num_fft_2_next);
     }
 
+    free(worker_ids);
     free(worker_args);
 }
 
@@ -4743,34 +4424,7 @@ static bool mul_is_classic(uint64_t count_1, uint64_t count_2)
 // mul_min_limbs_per_thread is a starting point, not a derived constant -- tuned from
 // one real measurement (division at ~4-9M limb operands), not a closed-form model of
 // pthread overhead vs. SSM work. Revisit if it doesn't hold up at other sizes.
-//
-// This constant tracks the dispatch cost and has to be retuned whenever that
-// changes: it fell 16384 -> 2048 once thread_pool_dispatch started spinning
-// across the gap between rounds instead of parking (measured dispatch overhead
-// over the division benchmark dropped 5.03s -> 0.66s, so far smaller multiplies
-// pay for themselves). It is only safe at 2048 *because* of that: crossing the
-// two changes on the division benchmark at 16 threads gives
-//
-//                      ceiling 16384   ceiling 2048
-//     raw pthread/round    40.8s          60.0s
-//     pooled dispatch      35.8s          29.4s
-//
-// so the same ceiling that buys 1.22x with the pool costs 1.47x without it -
-// a finer ceiling multiplies the round count, and rounds are only cheap when
-// dispatch is. Never lower this without re-measuring dispatch overhead first.
-//
-// Two sweeps in opposite orders both put the minimum at 1024-2048,
-// indistinguishable from each other; 2048 is the pick because just below that
-// is a cliff (512 measured 3x *worse* than 1024 - tiny operands get a high
-// thread ceiling and drown in round overhead) and 2048 keeps a 4x margin from
-// it rather than sitting one step away.
-//
-// Beware when re-sweeping this: consecutive runs in one process contaminate
-// each other. A repeated control point measured 31.2s early in a sweep and
-// 53.1s late in the same sweep, after a pathological setting had spent 94s
-// spinning 16 threads flat out - only the early positions of each sweep are
-// trustworthy.
-constexpr uint64_t mul_min_limbs_per_thread = 2048;
+constexpr uint64_t mul_min_limbs_per_thread = 16384;
 
 static uint64_t mul_threads_ceiling(uint64_t count_1, uint64_t count_2)
 {
@@ -5118,6 +4772,8 @@ static void num_ssm_sqr_pointwise(
 
         ssm_sqr_pointwise_base_worker_t * worker_args = malloc(workers * sizeof(*worker_args));
         assert(worker_args)
+        pthread_t * worker_ids = malloc(workers * sizeof(*worker_ids));
+        assert(worker_ids)
 
         for(uint64_t w=0; w<workers; w++)
         {
@@ -5131,14 +4787,15 @@ static void num_ssm_sqr_pointwise(
                 .i_start = i_start,
                 .i_end = i_end,
             };
+            TREAT(pthread_create(&worker_ids[w], nullptr, ssm_sqr_pointwise_base_worker, &worker_args[w]))
         }
-
-        thread_pool_dispatch(ssm_sqr_pointwise_base_worker, worker_args, sizeof(*worker_args), workers);
-
         for(uint64_t w=0; w<workers; w++)
         {
+            TREAT(pthread_join(worker_ids[w], nullptr))
             num_free(worker_args[w].num_aux_2);
         }
+
+        free(worker_ids);
         free(worker_args);
         return;
     }
@@ -5166,6 +4823,8 @@ static void num_ssm_sqr_pointwise(
 
     ssm_sqr_pointwise_rec_worker_t * worker_args = malloc(workers * sizeof(*worker_args));
     assert(worker_args)
+    pthread_t * worker_ids = malloc(workers * sizeof(*worker_ids));
+    assert(worker_ids)
 
     for(uint64_t w=0; w<workers; w++)
     {
@@ -5182,17 +4841,17 @@ static void num_ssm_sqr_pointwise(
             .i_start = i_start,
             .i_end = i_end,
         };
+        TREAT(pthread_create(&worker_ids[w], nullptr, ssm_sqr_pointwise_rec_worker, &worker_args[w]))
     }
-
-    thread_pool_dispatch(ssm_sqr_pointwise_rec_worker, worker_args, sizeof(*worker_args), workers);
-
     for(uint64_t w=0; w<workers; w++)
     {
+        TREAT(pthread_join(worker_ids[w], nullptr))
         num_free(worker_args[w].num_aux_1);
         num_free(worker_args[w].num_aux_2);
         num_free(worker_args[w].num_fft_next);
     }
 
+    free(worker_ids);
     free(worker_args);
 }
 
