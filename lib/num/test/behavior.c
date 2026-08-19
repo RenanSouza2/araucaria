@@ -2993,6 +2993,13 @@ static void test_fuzz_num_ssm_fft(bool show)
     TEST_FUZZ_NUM_SSM_FFT_THREADS(7, 25, 128, 100, 4)
     TEST_FUZZ_NUM_SSM_FFT_THREADS(8, 25, 128, 100, 8)
 
+    // Thread counts that aren't powers of two: the synchronisation-free stage split
+    // runs on the count rounded down to a power of two while the remaining stages
+    // still fan out across all of them, so the two halves disagree on worker count.
+    TEST_FUZZ_NUM_SSM_FFT_THREADS(9, 25, 128, 100, 3)
+    TEST_FUZZ_NUM_SSM_FFT_THREADS(10, 25, 128, 100, 6)
+    TEST_FUZZ_NUM_SSM_FFT_THREADS(11, 25, 128, 100, 7)
+
     #undef TEST_FUZZ_NUM_SSM_FFT_THREADS
 
     TEST_FN_CLOSE
@@ -3070,6 +3077,8 @@ static void test_fuzz_num_ssm_mul(bool show)
     TEST_FUZZ_NUM_SSM_MUL_THREADED(8, 1000, 10, 2)
     TEST_FUZZ_NUM_SSM_MUL_THREADED(9, 5000, 4, 4)
     TEST_FUZZ_NUM_SSM_MUL_THREADED(10, 80000, 1, 4)
+    TEST_FUZZ_NUM_SSM_MUL_THREADED(11, 5000, 4, 3)
+    TEST_FUZZ_NUM_SSM_MUL_THREADED(12, 80000, 1, 6)
 
     #undef TEST_FUZZ_NUM_SSM_MUL_THREADED
     #undef TEST_FUZZ_NUM_SSM_MUL_COUNT
@@ -3123,6 +3132,7 @@ static void test_fuzz_num_ssm_sqr(bool show)
 
     TEST_FUZZ_NUM_SSM_SQR_THREADED(4, 1000, 10, 2)
     TEST_FUZZ_NUM_SSM_SQR_THREADED(5, 5000,  4, 4)
+    TEST_FUZZ_NUM_SSM_SQR_THREADED(6, 5000,  4, 3)
 
     #undef TEST_FUZZ_NUM_SSM_SQR_THREADED
 

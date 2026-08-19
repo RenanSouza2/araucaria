@@ -2833,9 +2833,54 @@ static void num_ssm_butterfly(
 // Butterflies within one stage touch disjoint (pos_1, pos_2) pairs, so
 // running them in any order (here: increasing j, then i) reaches the same
 // result as the original post-order recursive traversal.
-// Not parallelized (see git history for the previous threaded recursive
-// version); threading groundwork is a separate follow-up.
 // num_aux->size >= 2 * n
+
+// Stages with group_step >= workers, run by one worker per residue class with no
+// synchronisation between them at all (see num_ssm_fft_fwd_rec's comment for why
+// the classes stay disjoint across every stage in this range). One dispatch covers
+// the whole range, instead of one per stage.
+typedef struct
+{
+    num_p num_aux;
+    num_p num_fft;
+    uint64_t pos;
+    uint64_t step;
+    uint64_t n;
+    uint64_t K;
+    uint64_t bits;
+    uint64_t worker;
+    uint64_t workers;
+} ssm_fft_fwd_split_worker_t;
+
+static void * ssm_fft_fwd_split_worker(void * arg)
+{
+    ssm_fft_fwd_split_worker_t * w = arg;
+
+    for(uint64_t group_step = w->K / 2; group_step >= w->workers; group_step /= 2)
+    {
+        uint64_t local_step = w->step * group_step;
+        uint64_t half = w->K / group_step / 2;
+        uint64_t bits_local = w->bits * group_step;
+
+        for(uint64_t j = w->worker; j < group_step; j += w->workers)
+        {
+            uint64_t pos_local = w->pos + (w->step * j);
+
+            for(uint64_t i = 0; i < half; i++)
+            {
+                uint64_t pos_1 = (pos_local + (local_step * 2 * i)) * w->n;
+                uint64_t pos_2 = (pos_local + (local_step * ((2 * i) + 1))) * w->n;
+
+                uint64_t shift = ssm_bit_inv(i, half) * bits_local;
+                num_ssm_shl_mod(w->num_aux, w->num_fft, pos_2, w->n, shift);
+
+                num_ssm_butterfly(w->num_aux, w->num_fft, pos_1, pos_2, w->n);
+            }
+        }
+    }
+    return nullptr;
+}
+
 typedef struct
 {
     num_p num_aux;
@@ -2875,12 +2920,26 @@ static void * ssm_fft_fwd_stage_worker(void * arg)
     return nullptr;
 }
 
-// Stages run from deepest (group_step = K/2) up to the top (group_step = 1);
-// each stage's K/2 butterflies touch disjoint (pos_1, pos_2) pairs, so a
-// stage is safe to run as a single flat threaded loop (same one-level
-// fan-out pattern as num_ssm_mul_pointwise's K-loop) - no nested dispatch,
-// just log2(K) sequential join barriers between stages. Worker scratch
-// buffers are allocated once and reused across every stage.
+// Stages run from deepest (group_step = K/2) up to the top (group_step = 1). Each
+// stage's K/2 butterflies touch disjoint (pos_1, pos_2) pairs, so any stage is safe
+// to run as a flat threaded loop - but dispatching per stage means log2(K) rounds of
+// pthread_create/join per transform, which is what dominates the mid-sized multiplies
+// num_div_mod_bz_rec's recursion is full of. Most of those rounds are avoidable:
+//
+// A stage with group_step = g touches element indices e == j (mod g), and merges
+// group j with group j + g/2. So for a power-of-two split count P, while P divides g
+// every element a worker owning the residue class j == w (mod P) touches also lies in
+// e == w (mod P): the classes are disjoint and stay disjoint. Every stage from
+// group_step = K/2 down to group_step = P therefore runs under a single dispatch with
+// no synchronisation - workers may sit on different stages at the same time and still
+// never share an element (num_ssm_fft_fwd_split_worker).
+//
+// Only the last log2(P) stages (group_step < P) merge across classes, and those keep
+// the per-stage dispatch. Rounds per transform: log2(K) -> 1 + log2(P).
+//
+// The split count is workers rounded down to a power of two (P | g needs it); the
+// tail stages keep the full worker count, since a flat idx split doesn't care.
+// num_aux->size >= 2 * n
 static void num_ssm_fft_fwd_rec(
     num_p num_aux,
     num_p num_fft, uint64_t pos,
@@ -2926,17 +2985,49 @@ static void num_ssm_fft_fwd_rec(
         return;
     }
 
-    ssm_fft_fwd_stage_worker_t * worker_args = malloc(workers * sizeof(*worker_args));
-    assert(worker_args)
+    uint64_t split = B(stdc_bit_width(workers) - 1);
+
+    num_p * worker_aux = malloc(workers * sizeof(*worker_aux));
+    assert(worker_aux)
     pthread_t * worker_ids = malloc(workers * sizeof(*worker_ids));
     assert(worker_ids)
 
     for(uint64_t w=0; w<workers; w++)
     {
-        worker_args[w].num_aux = num_create_dirty(CLU_ARGS(2 * n, 0));
+        worker_aux[w] = num_create_dirty(CLU_ARGS(2 * n, 0));
     }
 
-    for(uint64_t group_step = K / 2; group_step >= 1; group_step /= 2)
+    ssm_fft_fwd_split_worker_t * split_args = malloc(split * sizeof(*split_args));
+    assert(split_args)
+
+    for(uint64_t w=0; w<split; w++)
+    {
+        split_args[w] = (ssm_fft_fwd_split_worker_t)
+        {
+            .num_aux = worker_aux[w],
+            .num_fft = num_fft,
+            .pos = pos,
+            .step = step,
+            .n = n,
+            .K = K,
+            .bits = bits,
+            .worker = w,
+            .workers = split,
+        };
+
+        TREAT(pthread_create(&worker_ids[w], nullptr, ssm_fft_fwd_split_worker, &split_args[w]))
+    }
+    for(uint64_t w=0; w<split; w++)
+    {
+        TREAT(pthread_join(worker_ids[w], nullptr))
+    }
+
+    free(split_args);
+
+    ssm_fft_fwd_stage_worker_t * worker_args = malloc(workers * sizeof(*worker_args));
+    assert(worker_args)
+
+    for(uint64_t group_step = split / 2; group_step >= 1; group_step /= 2)
     {
         uint64_t local_step = step * group_step;
         uint64_t K_local = K / group_step;
@@ -2947,6 +3038,7 @@ static void num_ssm_fft_fwd_rec(
             uint64_t idx_start, idx_end;
             ssm_worker_range(w, workers, K / 2, &idx_start, &idx_end);
 
+            worker_args[w].num_aux = worker_aux[w];
             worker_args[w].num_fft = num_fft;
             worker_args[w].pos = pos;
             worker_args[w].step = step;
@@ -2967,10 +3059,11 @@ static void num_ssm_fft_fwd_rec(
 
     for(uint64_t w=0; w<workers; w++)
     {
-        num_free(worker_args[w].num_aux);
+        num_free(worker_aux[w]);
     }
     free(worker_ids);
     free(worker_args);
+    free(worker_aux);
 }
 
 typedef struct
@@ -3047,6 +3140,50 @@ void num_ssm_fft_fwd(num_p num_aux, num_p num_fft, ssm_params_p p, uint64_t thre
     num_ssm_fft_fwd_rec(num_aux, num_fft, 0, 1, p->n, p->K, 2 * p->Q, threads);
 }
 
+// Stages with k_local <= k / workers, run by one worker per contiguous element
+// block with no synchronisation between them at all (see num_ssm_fft_inv_rec's
+// comment). One dispatch covers the whole range, instead of one per stage.
+typedef struct
+{
+    num_p num_aux;
+    num_p num;
+    uint64_t pos;
+    uint64_t n;
+    uint64_t k;
+    uint64_t bits;
+    uint64_t worker;
+    uint64_t workers;
+} ssm_fft_inv_split_worker_t;
+
+static void * ssm_fft_inv_split_worker(void * arg)
+{
+    ssm_fft_inv_split_worker_t * w = arg;
+
+    uint64_t chunk = w->k / w->workers;
+    uint64_t pos_start = w->pos + (w->worker * chunk);
+    uint64_t pos_end = pos_start + chunk;
+
+    for(uint64_t half = 1; half <= chunk / 2; half *= 2)
+    {
+        uint64_t k_local = 2 * half;
+        uint64_t bits_local = (w->bits * w->k) / k_local;
+
+        for(uint64_t pos_base = pos_start; pos_base < pos_end; pos_base += k_local)
+        {
+            for(uint64_t i = 0; i < half; i++)
+            {
+                uint64_t pos_1 = (pos_base + i) * w->n;
+                uint64_t pos_2 = (pos_base + i + half) * w->n;
+
+                num_ssm_shr_mod(w->num_aux, w->num, pos_2, w->n, i * bits_local);
+
+                num_ssm_butterfly(w->num_aux, w->num, pos_1, pos_2, w->n);
+            }
+        }
+    }
+    return nullptr;
+}
+
 typedef struct
 {
     num_p num_aux;
@@ -3083,12 +3220,25 @@ static void * ssm_fft_inv_stage_worker(void * arg)
     return nullptr;
 }
 
-// Stages run from deepest (half = 1) up to the top (half = k/2); each
-// stage's k/2 butterflies touch disjoint (pos_1, pos_2) pairs, so a stage
-// is safe to run as a single flat threaded loop (same one-level fan-out
-// pattern as num_ssm_mul_pointwise's K-loop) - no nested dispatch, just
-// log2(k) sequential join barriers between stages. Worker scratch buffers
-// are allocated once and reused across every stage.
+// Stages run from deepest (half = 1) up to the top (half = k/2). Each stage's k/2
+// butterflies touch disjoint (pos_1, pos_2) pairs, so any stage is safe to run as a
+// flat threaded loop - but dispatching per stage means log2(k) rounds of
+// pthread_create/join per transform. The mirror image of num_ssm_fft_fwd_rec's split
+// avoids most of them:
+//
+// A stage with block size k_local keeps its butterflies strictly inside each contiguous
+// [group * k_local, (group + 1) * k_local) block, and blocks merge pairwise as half
+// grows. So for a power-of-two split count P, every stage with k_local <= k / P
+// stays inside the contiguous chunk [w * k/P, (w + 1) * k/P) that worker w owns:
+// those stages all run under a single dispatch with no synchronisation - workers may
+// sit on different stages at the same time and still never share an element
+// (ssm_fft_inv_split_worker).
+//
+// Only the last log2(P) stages (k_local > k / P) merge across chunks, and those keep
+// the per-stage dispatch. Rounds per transform: log2(k) -> 1 + log2(P).
+//
+// bits_local, which the serial path carries down the stages by halving, is written
+// out here as (bits * k) / k_local so a worker starting mid-way can compute it.
 // num_aux->size >= 2 * n
 static void num_ssm_fft_inv_rec(
     num_p num_aux,
@@ -3134,27 +3284,58 @@ static void num_ssm_fft_inv_rec(
         return;
     }
 
-    ssm_fft_inv_stage_worker_t * worker_args = malloc(workers * sizeof(*worker_args));
-    assert(worker_args)
+    uint64_t split = B(stdc_bit_width(workers) - 1);
+
+    num_p * worker_aux = malloc(workers * sizeof(*worker_aux));
+    assert(worker_aux)
     pthread_t * worker_ids = malloc(workers * sizeof(*worker_ids));
     assert(worker_ids)
 
     for(uint64_t w=0; w<workers; w++)
     {
-        worker_args[w].num_aux = num_create_dirty(CLU_ARGS(2 * n, 0));
+        worker_aux[w] = num_create_dirty(CLU_ARGS(2 * n, 0));
     }
 
-    uint64_t bits_local = bits * (k / 2);
+    ssm_fft_inv_split_worker_t * split_args = malloc(split * sizeof(*split_args));
+    assert(split_args)
 
-    for(uint64_t half = 1; half <= k / 2; half *= 2)
+    for(uint64_t w=0; w<split; w++)
+    {
+        split_args[w] = (ssm_fft_inv_split_worker_t)
+        {
+            .num_aux = worker_aux[w],
+            .num = num,
+            .pos = pos,
+            .n = n,
+            .k = k,
+            .bits = bits,
+            .worker = w,
+            .workers = split,
+        };
+
+        TREAT(pthread_create(&worker_ids[w], nullptr, ssm_fft_inv_split_worker, &split_args[w]))
+    }
+    for(uint64_t w=0; w<split; w++)
+    {
+        TREAT(pthread_join(worker_ids[w], nullptr))
+    }
+
+    free(split_args);
+
+    ssm_fft_inv_stage_worker_t * worker_args = malloc(workers * sizeof(*worker_args));
+    assert(worker_args)
+
+    for(uint64_t half = k / split; half <= k / 2; half *= 2)
     {
         uint64_t k_local = 2 * half;
+        uint64_t bits_local = (bits * k) / k_local;
 
         for(uint64_t w=0; w<workers; w++)
         {
             uint64_t idx_start, idx_end;
             ssm_worker_range(w, workers, k / 2, &idx_start, &idx_end);
 
+            worker_args[w].num_aux = worker_aux[w];
             worker_args[w].num = num;
             worker_args[w].pos = pos;
             worker_args[w].n = n;
@@ -3170,16 +3351,15 @@ static void num_ssm_fft_inv_rec(
         {
             TREAT(pthread_join(worker_ids[w], nullptr))
         }
-
-        bits_local /= 2;
     }
 
     for(uint64_t w=0; w<workers; w++)
     {
-        num_free(worker_args[w].num_aux);
+        num_free(worker_aux[w]);
     }
     free(worker_ids);
     free(worker_args);
+    free(worker_aux);
 }
 
 typedef struct
