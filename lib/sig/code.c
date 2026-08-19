@@ -418,11 +418,6 @@ sig_num_t sig_num_mul(sig_num_t sig_1, sig_num_t sig_2)
     return sig_num_mul_threads(sig_1, sig_2, 1);
 }
 
-// Same as sig_num_mul, but the caller picks how many threads the underlying multiply
-// may fan out across -- see num_mul_threads. Sign handling is unaffected; the whole
-// difference is which num-level entry point the magnitudes go through. Every threaded
-// mul above this layer (fxd, flt) lands here, so this is the one place sig has to
-// forward the count.
 sig_num_t sig_num_mul_threads(sig_num_t sig_1, sig_num_t sig_2, uint64_t threads)
 {
     CLU_SIG_IS_SAFE(sig_1);
@@ -446,16 +441,6 @@ sig_num_t sig_num_div(sig_num_t sig_1, sig_num_t sig_2)
     return sig_num_div_threads(sig_1, sig_2, 1);
 }
 
-// Same as sig_num_div, but the caller picks how many threads the underlying division
-// may use -- see num_div_threads.
-//
-// Worth knowing before budgeting threads here: division scales much worse than
-// multiplication. Measured on an 8-core/16-thread i7-10700 at 20.2M / 8.75M limb
-// operands, num_div_threads gained 1.92x at 16 threads (64.5s -> 33.5s) where
-// num_mul_threads gained 4.59x on comparable operands. Burnikel-Ziegler never forks
-// into concurrent branches (see num_div_mod_threads), so only the one multiply per
-// recursion level threads, and the deep levels are too small to use it. Threads spent
-// on a division are worth roughly a third of the same threads spent on a multiply.
 sig_num_t sig_num_div_threads(sig_num_t sig_1, sig_num_t sig_2, uint64_t threads)
 {
     CLU_SIG_IS_SAFE(sig_1);

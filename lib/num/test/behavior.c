@@ -8,8 +8,6 @@
 static char buffer[256];
 
 #ifndef NAME
-// Fallback definition to keep the IDE/linter happy
-// when it parses behavior.c in isolation.
 #define NAME "UNDEFINED_TAG"
 #endif
 
@@ -37,20 +35,8 @@ static void test_seed_init()
     srand(seed_base);
 }
 
-// Every fuzz iteration executes in a fresh fork of the main process, so it
-// inherits whatever rand() state the parent holds — and the parent never
-// advances it, because the case body only ever runs in the child. Without an
-// explicit reseed each iteration therefore generates byte-identical operands
-// and RUNS=100 tests one input a hundred times.
-//
-// Deriving the seed from _tag (which TEST_FUZZ_CASE_OPEN sets to
-// TAG * 1000000 + iteration) keeps every iteration distinct while staying
-// reproducible: the same SEED replays the same operands for the same tag.
 static void fuzz_seed(uint64_t tag)
 {
-    // rand() is LCG-based, so consecutive seeds yield strongly correlated first
-    // outputs. Mix the tag before seeding or successive iterations would draw
-    // near-identical operands.
     uint32_t x = (uint32_t)(seed_base + tag);
     x ^= x >> 16;
     x *= 0x7feb352du;
@@ -2987,25 +2973,14 @@ static void test_fuzz_num_ssm_fft(bool show)
 
     #undef TEST_FUZZ_NUM_SSM_FFT
 
-    // Same round-trip check, but with the recursive fwd/inv fan-out exercised via
-    // threads > 1 (K=128 gives K/2=64 possible leaves, comfortably above these counts).
     TEST_FUZZ_NUM_SSM_FFT_THREADS(6, 25, 128, 100, 2)
     TEST_FUZZ_NUM_SSM_FFT_THREADS(7, 25, 128, 100, 4)
     TEST_FUZZ_NUM_SSM_FFT_THREADS(8, 25, 128, 100, 8)
 
-    // Thread counts that aren't powers of two: the synchronisation-free stage split
-    // runs on the count rounded down to a power of two while the remaining stages
-    // still fan out across all of them, so the two halves disagree on worker count.
     TEST_FUZZ_NUM_SSM_FFT_THREADS(9, 25, 128, 100, 3)
     TEST_FUZZ_NUM_SSM_FFT_THREADS(10, 25, 128, 100, 6)
     TEST_FUZZ_NUM_SSM_FFT_THREADS(11, 25, 128, 100, 7)
 
-    // n large enough that ssm_fft_block_bytes caps how many stages a pass fuses, and
-    // K large enough that the cap forces more than one pass. Every case above has a
-    // small enough n to fuse a whole phase in a single pass, which never exercises
-    // the pass loop or the stride arithmetic carried across a pass boundary. These
-    // fuse 4, 2 and 1 stages per pass respectively - the last being the degenerate
-    // "two elements don't fit, so fuse nothing" path, which is one stage per pass.
     TEST_FUZZ_NUM_SSM_FFT_THREADS(12, 4097, 256, 3, 4)
     TEST_FUZZ_NUM_SSM_FFT_THREADS(13, 16385, 64, 3, 4)
     TEST_FUZZ_NUM_SSM_FFT_THREADS(14, 65537, 16, 2, 4)
@@ -3065,9 +3040,6 @@ static void test_fuzz_num_ssm_mul(bool show)
 
     #undef TEST_FUZZ_NUM_SSM_MUL
 
-    // Exercises the public num_mul_threads entry point directly (dispatch + consuming
-    // its inputs), not just the internal num_mul_ssm, at sizes large enough to hit the
-    // recursive pointwise path.
     #define TEST_FUZZ_NUM_SSM_MUL_THREADED(TAG, COUNT, RUNS, THREADS)                       \
     {                                                                                       \
         TEST_FUZZ_CASE_OPEN(TAG, RUNS)                                                      \
@@ -3125,8 +3097,6 @@ static void test_fuzz_num_ssm_sqr(bool show)
     #undef TEST_FUZZ_NUM_SSM_SQR
     #undef TEST_FUZZ_NUM_SSM_SQR_COUNT
 
-    // Same oracle, but through the public num_sqr_threads entry point (dispatch +
-    // consuming its input), at sizes large enough to hit the recursive pointwise path.
     #define TEST_FUZZ_NUM_SSM_SQR_THREADED(TAG, COUNT, RUNS, THREADS)   \
     {                                                                   \
         TEST_FUZZ_CASE_OPEN(TAG, RUNS)                                  \
@@ -3205,8 +3175,6 @@ static void test_fuzz_num_bz_div(bool show)
 
     #undef TEST_FUZZ_NUM_BZ_DIV
 
-    // Same checks, but through num_div_mod_threads at sizes large enough for the
-    // recursion's one internal multiply to actually hit num_mul_ssm.
     #define TEST_FUZZ_NUM_BZ_DIV_THREADED(TAG, COUNT_1, COUNT_2, RUNS, THREADS)     \
     {                                                                               \
         TEST_FUZZ_CASE_OPEN(TAG, RUNS)                                             \

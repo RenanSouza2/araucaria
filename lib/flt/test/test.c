@@ -509,13 +509,6 @@ static void test_flt_num_div_sig(bool show)
 }
 
 
-// Coverage for the threaded entry points. See the long note in lib/sig/test/test.c for
-// why the small tables assert absolute results instead of comparing against the plain
-// function, and why the large cases do the opposite. The same reasoning applies here,
-// with flt's exponent arithmetic and normalization taking the place of sig's signal
-// handling as the wrapping being pinned -- and it matters more at this layer, since
-// flt_num_mul_sig has no plain test of its own, so these literals are the only thing
-// holding its result down.
 constexpr uint64_t threads_mul_count = 65536;
 constexpr uint64_t threads_mul_n = 4;
 constexpr uint64_t threads_div_count = 32768;
@@ -566,8 +559,6 @@ static void test_flt_num_mul_threads(bool show)
 
     #undef TEST_FLT_NUM_MUL_THREADS
 
-    // Operands large enough that num actually fans the multiply out instead of clamping
-    // the request back to one worker.
     TEST_CASE_OPEN_TIMEOUT(7, 0)
     {
         flt_num_t flt_1 = flt_num_create_rand(0, threads_mul_count);
@@ -622,8 +613,6 @@ static void test_flt_num_div_threads(bool show)
 
     #undef TEST_FLT_NUM_DIV_THREADS
 
-    // flt_num_div grows the dividend by its own size before dividing, so equal operand
-    // counts already give Burnikel-Ziegler a dividend twice the divisor to recurse on.
     TEST_CASE_OPEN_TIMEOUT(4, 0)
     {
         flt_num_t flt_1 = flt_num_create_rand(0, threads_div_count);
@@ -684,10 +673,6 @@ static void test_flt_num_mul_sig_threads(bool show)
         (0, 2, POSITIVE, 2, 18, 0)
     );
 
-    // Product wider than the flt's size, so normalization has to shift it back down and
-    // carry the exponent. Every case above leaves the count at size, where normalizing
-    // is a no-op -- a dropped flt_num_normalize would pass all of them and only fail
-    // here.
     TEST_FLT_NUM_MUL_SIG_THREADS(6,
         (0, 2, POSITIVE, 2, 6, 0), (POSITIVE, 2, 5, 0), 4,
         (1, 2, POSITIVE, 2, 30, 0)
@@ -755,8 +740,6 @@ static void test_flt_num_div_sig_threads(bool show)
         (0, 2, POSITIVE, 2, 2, 0)
     );
 
-    // Quotient that does not land on a limb boundary, so normalization has to shift and
-    // carry the exponent rather than leaving the result untouched.
     TEST_FLT_NUM_DIV_SIG_THREADS(5,
         (0, 2, POSITIVE, 2, 6, 0), (POSITIVE, 2, 5, 0), 4,
         (-1, 2, POSITIVE, 2, 1, 0x3333333333333333)

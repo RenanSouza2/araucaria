@@ -757,9 +757,6 @@ void num_free(num_p num)
     }
 
     uint64_t total_size = sizeof(num_t) + (num->size * sizeof(uint64_t));
-    // Unregister before unmapping: once munmap runs, the kernel is free to hand this
-    // VA range to a concurrent mmap on another thread, whose registration would then
-    // race this handle's removal from clu's tracking if the order were reversed.
     CLU_HANDLER_UNREGISTER(num)
     int res = munmap(num, total_size);
     assert(res == 0);
@@ -1809,10 +1806,6 @@ static void num_ssm_normalize(num_p num_fft, uint64_t pos, uint64_t n)
 
     uint64_t * chunk = &num_fft->chunk[pos];
 
-    // The top word is the carry out of a 64 * (n - 1) bit add, so it is 0 or 1 about half
-    // the time each and testing it first costs a mispredict. Reducing it unconditionally
-    // is a load, a subtract and two stores, and the borrow out of word 0 needs word 0 to
-    // have been below the top word, which for a full width coefficient never happens.
     uint64_t value = chunk[n - 1];
     uint64_t word = chunk[0];
     chunk[n - 1] = 0;
@@ -1858,12 +1851,6 @@ static void num_ssm_denormalize(num_p num_fft, uint64_t pos, uint64_t n)
 
 #ifdef NUM_ASM_AARCH64
 
-// One limb per iteration costs a load, a load, an adcs, a store and the loop overhead,
-// so the carry chain sits idle behind five other instructions. These mirror the x86-64
-// blocks below: eight limbs per pass, paired loads and stores, so the same work takes
-// roughly a third of the instructions. ldp / stp / add / sub leave the carry flag alone,
-// which is what lets the adcs chain span the whole unrolled body.
-
 #define SUB_MOD_STEP_4(SRC_1, OFF_0, OFF_1)                                                                    \
     "ldp %[a_0], %[a_1], [%[" #SRC_1 "], #" #OFF_0 "]   \n\t" /* (a_0, a_1)  = *(SRC_1 + OFF_0)            */  \
     "ldp %[a_2], %[a_3], [%[" #SRC_1 "], #" #OFF_1 "]   \n\t" /* (a_2, a_3)  = *(SRC_1 + OFF_1)            */  \
@@ -1876,9 +1863,6 @@ static void num_ssm_denormalize(num_p num_fft, uint64_t pos, uint64_t n)
     "stp %[a_0], %[a_1], [%[dest], #" #OFF_0 "]         \n\t" /* *(dest + OFF_0) = (a_0, a_1)              */  \
     "stp %[a_2], %[a_3], [%[dest], #" #OFF_1 "]         \n\t" /* *(dest + OFF_1) = (a_2, a_3)              */
 
-// Eight words per pass. The four flag shuffling instructions are per pass, not per word,
-// so doubling the block halves them; stp leaves NZCV alone, which is what lets the sum
-// stores sit inside the adcs chain and keeps the sum registers down to four.
 #define BUTTERFLY_STEP_8                                                                                    \
     "ldp %[a_0], %[a_1], [%[dest_1]]                \n\t" /* (a_0, a_1)  = *dest_1                       */  \
     "ldp %[a_2], %[a_3], [%[dest_1], #16]           \n\t" /* (a_2, a_3)  = *(dest_1 + 16)                */  \
@@ -2357,12 +2341,6 @@ static void num_ssm_sub_span_mod(
     uint64_t n
 );
 
-// The negacyclic rotate below only needs the few words of the shifted operand that cross
-// the 2^(64 * (n - 1)) boundary, and it can shift the coefficient where it already lives
-// instead of building both halves in num_aux. These four helpers are what num_ssm_shl and
-// num_ssm_shr become once the destination is the source and the span is bounded: no
-// memset over the words that are known zero, and no second array to read back.
-
 // num_res[pos_res .. pos_res + len) = (num_fft[pos .. pos + n) >> bits), low words only.
 // Requires (bits / 64) + len == n - 1, which is what the callers below always pass.
 static void num_ssm_shr_low(
@@ -2503,10 +2481,6 @@ static void num_ssm_shr_self(num_p num_fft, uint64_t pos, uint64_t n, uint64_t b
     memset(&chunk[n - count], 0, count * sizeof(uint64_t));
 }
 
-// Words of the shifted coefficient that land at or above 2^(64 * (n - 1)). A normalized
-// coefficient is below 2^(64 * (n - 1)) unless it is exactly that power, which is the one
-// case where the top word is set and the wrap spans the whole span; the rotates fall back
-// to the two-buffer path for it rather than special-casing the count.
 static uint64_t ssm_wrap_len(uint64_t bits)
 {
     constexpr uint64_t mask = 0x3f;
@@ -2586,18 +2560,6 @@ void num_ssm_shr_mod(
     num_ssm_sub_span_mod(num_fft, pos, num_aux, off, off, len, n);
 }
 
-// fft[pos_1] = A + B and fft[pos_2] = A - B, reading each coefficient once. Splitting it
-// into num_ssm_sub_mod into num_aux, num_ssm_add_mod_immed and a copy back reads both
-// coefficients twice and writes n words of num_aux that exist only to be copied.
-//
-// The two chains cannot share the flags, so each block reseeds its own: subs against the
-// saved carry for adcs, cmp against the saved borrow for sbcs. Both are two instructions
-// per four words, which is what buys the second pass.
-//
-// Shared by every flat, K-indexed loop this file parallelizes (FFT pre/post-loops,
-// pointwise's K-loop): only the outermost call of whichever recursion it's used in
-// parallelizes; deeper recursive calls are invoked with threads=1, so this never has
-// to reason about nested fan-out.
 static uint64_t ssm_worker_count(uint64_t threads, uint64_t K)
 {
     uint64_t workers = threads < K ? threads : K;
@@ -2618,10 +2580,6 @@ static void ssm_worker_range(
 
 
 
-// A borrowing difference leaves A - B + 2^(64 * n) in the span where A - B + 2^(64 * (n
-// - 1)) + 1 is wanted, so the modulus is added back afterwards. That is what
-// num_ssm_denormalize does, except the carry out of the top word here is the 2^(64 * n)
-// being discarded rather than an overflow to assert on.
 static void num_ssm_butterfly(
     num_p num_aux,
     num_p num_fft,
@@ -2800,10 +2758,6 @@ static void num_ssm_butterfly(
 
 #if defined(NUM_ASM_X86_64) || defined(NUM_ASM_AARCH64)
 
-    // A - B is negative about half the time, so testing the borrow costs a coin flip the
-    // branch predictor cannot win. Adding it unconditionally is two loads and two stores,
-    // and leaves only the ripple out of word 0 behind a branch, which needs word 0 to have
-    // been all ones and so is never taken in practice.
     uint64_t * chunk = &num_fft->chunk[pos_2];
     uint64_t low = chunk[0] + borrow;
     bool ripple = low < borrow;
@@ -2828,33 +2782,8 @@ static void num_ssm_butterfly(
 #endif
 }
 
-// Stage s of the forward transform pairs logical index x with x + s whenever
-// (x / s) is even, twiddling by ssm_bit_inv(x / 2s, K / 2s) * bits * s; stages run
-// from the deepest (s = K/2) up to the top (s = 1). Butterflies within one stage
-// touch disjoint pairs, so running them in any order reaches the same result as the
-// divide-and-combine recursion this used to be.
-//
-// Running one stage per pass over the array is memory-bound and cannot be fixed by
-// threading: K * n limbs is hundreds of MB at the sizes this is used at, every stage
-// reads and writes all of it, so a transform moves log2(K) * 2 * K * n limbs and
-// saturates DRAM bandwidth a couple of threads in. Stages are therefore fused r at a
-// time. Write the index as x = a + gl*b + (gl << r)*c with a < gl and b < 2^r: the r
-// stages with strides [gl, gl << (r-1)] only ever pair indices differing in the b
-// field, so the 2^r elements of one (a, c) block are closed under all r of them. A
-// block is loaded once, carried through r stages, and written back once, which cuts
-// traffic by a factor of r as long as those 2^r elements stay in cache.
-
-// Bytes one fused block may occupy. Wants to be L2: overshooting it costs the whole
-// gain, undershooting only fuses fewer stages per pass, and an n large enough that a
-// block spills to L3 still beats going to DRAM r times. Deliberately a constant
-// rather than a runtime cache query - this has to build and behave the same on
-// x86-64 and AArch64.
 constexpr uint64_t ssm_fft_block_bytes = 1024 * 1024;
 
-// How many stages one pass can fuse: as many as keep a block inside the budget,
-// never more than the stages actually left to run. An n so large that two elements
-// don't fit degrades to r = 1, which is one stage per pass - what this did before
-// fusing, so no size gets worse.
 static uint64_t ssm_fft_fuse_bits(uint64_t n, uint64_t stages_left)
 {
     uint64_t fit = ssm_fft_block_bytes / (n * sizeof(uint64_t));
@@ -2862,8 +2791,6 @@ static uint64_t ssm_fft_fuse_bits(uint64_t n, uint64_t stages_left)
     return r < stages_left ? r : stages_left;
 }
 
-// The r stages with strides [gl, gl << (r-1)] over the single block (a, c), stages
-// descending the same way the unfused loop runs them.
 static void ssm_fft_fwd_block(
     num_p num_aux,
     num_p num_fft,
@@ -2907,9 +2834,6 @@ static void ssm_fft_fwd_block(
     }
 }
 
-// Where the padded array is built from, when that build is fused into the forward
-// transform's first pass (see num_ssm_fft_fwd_rec). Mirrors num_ssm_pad_no_wrap's
-// layout decisions, hoisted out of the element loop.
 typedef struct
 {
     num_p num;
@@ -2919,11 +2843,6 @@ typedef struct
     bool extra;
 } ssm_fft_fwd_pad_t;
 
-// Build one block's 2^r elements straight from the operand. Standalone, this is
-// num_ssm_pad_no_wrap: a zeroing allocation of the whole n*K array plus a scatter
-// over it, which the first pass then reads back. Done here the element is assembled
-// in cache and written out once, so the array is never read from DRAM at all and
-// never separately zeroed.
 static void ssm_fft_fwd_pad_block(
     ssm_fft_fwd_pad_t * pad,
     num_p num_fft,
@@ -2969,12 +2888,6 @@ static void ssm_fft_fwd_pad_block(
     }
 }
 
-// The transform's per-element entry twiddle (element x scaled by 2^(Q*x)), applied to
-// one block's 2^r elements. It used to be a standalone pass over the whole K*n array
-// before the stages began; run here it rides along with the pass that is already
-// pulling the block into cache, which removes that pass's DRAM traffic outright. Every
-// element belongs to exactly one block of the first pass, so each is still twiddled
-// exactly once, and all of a block's elements are done before any butterfly pairs them.
 static void ssm_fft_fwd_preloop_block(
     num_p num_aux,
     num_p num_fft,
@@ -2998,10 +2911,6 @@ static void ssm_fft_fwd_preloop_block(
     }
 }
 
-// Every pass from stride K/2 down to stride_end, run by one worker per residue class
-// a == worker (mod workers) with no synchronisation between them at all (see
-// num_ssm_fft_fwd_rec's comment for why the classes stay disjoint). One dispatch
-// covers the whole range. Also the serial path, as worker 0 of 1 down to stride 1.
 typedef struct
 {
     num_p num_aux;
@@ -3096,19 +3005,6 @@ static void * ssm_fft_fwd_pass_worker(void * arg)
     return nullptr;
 }
 
-// A stage with stride s pairs x with x + s, so for a power-of-two split count P every
-// stage with s >= P keeps x in its class x == a (mod P): worker w can own the whole
-// class a == w (mod P) and run every pass from stride K/2 down to stride P without
-// ever touching another worker's element. That is one dispatch for
-// log2(K) - log2(P) stages, with workers free to sit on different passes at once.
-//
-// Only the last log2(P) stages (stride < P) merge across classes. Those still need a
-// join between passes, but fusing means ceil(log2(P) / r) of them rather than
-// log2(P). Dispatches per transform: log2(K) -> 1 + ceil(log2(P) / r).
-//
-// The split count is workers rounded down to a power of two (the residue argument
-// needs P | s); the tail passes keep the full worker count, since splitting a pass's
-// block list doesn't care.
 // num_aux->size >= 2 * n
 // pad non-null builds the array from the operand inside the first pass instead of
 // expecting it already populated (see ssm_fft_fwd_pad_block).
@@ -3299,15 +3195,6 @@ static void num_ssm_fft_fwd_pad(
     num_ssm_fft_fwd_rec(num_aux, num_fft, 0, 1, p->n, p->K, 2 * p->Q, p->Q, &pad, threads);
 }
 
-// The inverse transform is the mirror: stage s pairs x with x + s whenever (x / s)
-// is even, twiddling by (x mod s) * bits * k / 2s, and stages ascend from s = 1 up
-// to s = k/2. The same index decomposition fuses it - x = a + gl*b + (gl << r)*c,
-// with the r stages of strides [gl, gl << (r-1)] closed over the b field - except
-// that here a block's 2^r elements are contiguous rather than strided, since the
-// pass fusing the deepest stages is the one with gl = 1.
-
-// The r stages with strides [gl, gl << (r-1)] over the single block (a, c), stages
-// ascending the same way the unfused loop runs them.
 static void ssm_fft_inv_block(
     num_p num_aux,
     num_p num,
@@ -3348,13 +3235,6 @@ static void ssm_fft_inv_block(
     }
 }
 
-// The transform's per-element exit twiddle (undoing the entry scaling and dividing by
-// k), applied to one block's 2^r elements. Mirrors ssm_fft_fwd_preloop_block: it used
-// to be a standalone pass over the whole k*n array after the stages finished, and runs
-// here inside the last pass, which already holds the block. Blocks of the last pass
-// partition the transform, so each element is still twiddled exactly once, after every
-// butterfly that touches it. Elements at or past lim take the shift in two steps
-// because a single one would exceed what num_ssm_shr_mod accepts.
 static void ssm_fft_inv_postloop_block(
     num_p num_aux,
     num_p num,
@@ -3388,7 +3268,6 @@ static void ssm_fft_inv_postloop_block(
     }
 }
 
-// These live further down the file, past the transform they are fused into.
 static bool ssm_is_recursive(uint64_t n);
 
 static void num_ssm_mul_mod_span(
@@ -3399,12 +3278,6 @@ static void num_ssm_mul_mod_span(
     uint64_t n
 );
 
-// Scratch and operand for the convolution's pointwise multiply when it is fused into
-// the inverse transform (see num_ssm_fft_inv_rec). One of these per worker: the
-// recursive buffers are reused across every element that worker handles, so nothing
-// is allocated inside the element loop. p_next is nullptr when n is small enough for
-// the non-recursive base case, which needs no buffers of its own beyond the 2n
-// scratch the transform already carries.
 typedef struct
 {
     num_p num_fft_2;
@@ -3452,11 +3325,6 @@ static void ssm_fft_inv_pointwise_free(ssm_fft_inv_pointwise_t * pw)
     num_free(pw->num_fft_2_next);
 }
 
-// Multiply one block's 2^r elements of num by the matching elements of num_fft_2,
-// in place. Per-element like the twiddles, so it rides along with the pass that is
-// already holding the block, which is what removes the standalone pointwise pass:
-// that pass wrote every product to DRAM only for the transform's first pass to read
-// it straight back.
 static void ssm_fft_inv_pointwise_block(
     ssm_fft_inv_pointwise_t * pw,
     num_p num_aux,
@@ -3497,10 +3365,6 @@ static void ssm_fft_inv_pointwise_block(
     }
 }
 
-// Every pass whose blocks fit inside one worker's contiguous chunk of k / workers
-// elements, run with no synchronisation between workers at all (see
-// num_ssm_fft_inv_rec's comment). One dispatch covers the whole range. Also the
-// serial path, as worker 0 of 1, whose chunk is the entire transform.
 typedef struct
 {
     num_p num_aux;
@@ -3613,23 +3477,9 @@ static void * ssm_fft_inv_pass_worker(void * arg)
     return nullptr;
 }
 
-// A stage with stride s keeps every butterfly inside a contiguous aligned run of 2s
-// elements, so for a power-of-two split count P every pass whose blocks span at most
-// k / P elements stays inside the chunk [w * k/P, (w+1) * k/P) that worker w owns:
-// worker w runs all of them - log2(k) - log2(P) stages - under a single dispatch
-// with no synchronisation, free to sit on a different pass than its neighbours.
-//
-// Only the last log2(P) stages span across chunks. Those still need a join between
-// passes, but fusing means ceil(log2(P) / r) of them rather than log2(P).
-// Dispatches per transform: log2(k) -> 1 + ceil(log2(P) / r).
-//
-// bits_local, which the unfused loop carried down the stages by halving, is written
-// out as (bits * k) / 2s so a worker starting mid-way can compute it.
 // num_aux->size >= 2 * n
 // num_fft_2 non-null fuses the convolution's pointwise multiply into the first pass
-// (see ssm_fft_inv_pointwise_block). Only worth it at the top level, where the arrays
-// are hundreds of MB; the recursive inner multiplies work on a few KB that stay in
-// cache regardless, so they keep the plain num_ssm_mul_pointwise path.
+// (see ssm_fft_inv_pointwise_block).
 static void num_ssm_fft_inv_rec(
     num_p num_aux,
     num_p num,
@@ -3844,18 +3694,12 @@ static bool ssm_pad_is_needed(uint64_t n, uint64_t moduli)
         return true;
     }
 
-    // Below one full block there is no 8 wide body to trim, only tail, so unpadding saves
-    // a word or two of width while the padded form still runs a single clean block.
     constexpr uint64_t unroll = 8;
     if(n - 1 < unroll)
     {
         return true;
     }
 
-    // For a leaf it is a straight trade: padding buys 8 - moduli words of extra width in
-    // every add, subtract, rotate and in the (n - 1)^2 pointwise multiply, and saves the
-    // moduli scalar steps that each kernel's tail loop would otherwise run. Below the
-    // midpoint the width is worth more than the tail, above it the tail wins.
     constexpr uint64_t tail_break_even = 4;
     return moduli > tail_break_even;
 }
@@ -4107,9 +3951,6 @@ static void num_ssm_mul_mod_span(
     }
     dest[count] = LOW(carry);
 
-    // Two rows of src_1 per pass: one dest load/store per two multiplies instead of
-    // two. The two products plus dest plus carry exceed 128 bits, so the carry is kept
-    // as two words (c0 full width, c1 a single bit) rather than a uint128_t.
     uint64_t i = 1;
     for(; i + 3 < count; i += 4)
     {
@@ -4266,8 +4107,7 @@ void num_ssm_pad_wrap(num_p num_fft, num_p num, uint64_t pos, ssm_params_p p)
 
 // num_res[pos .. pos + n - 1] += num_src[src_pos .. src_pos + len - 1] << (64 * off)
 // modulo 2^(64 * (n - 1)) + 1. Requires off + len <= n - 1, so nothing crosses the
-// negacyclic boundary. Same arithmetic as num_ssm_add_mod_immed against a zero-padded
-// n word operand, but only touches the span plus however far the carry actually travels.
+// negacyclic boundary.
 static void num_ssm_add_span_mod(
     num_p num_res, uint64_t pos,
     num_p num_src, uint64_t src_pos,
@@ -4397,10 +4237,6 @@ static void num_ssm_sub_span_mod(
 
 #elif defined(NUM_ASM_AARCH64)
 
-    // Same 8 wide sbcs chain as num_ssm_sub_mod_immed, but over an arbitrary len rather
-    // than the 8k + 1 the full width kernels are guaranteed, so the tail loop earns its
-    // keep here. The borrow leaves in a register instead of being consumed by a
-    // normalize, because the caller still has to walk it up to the top word.
     {
         uint64_t a_0, a_1, a_2, a_3;
         uint64_t b_0, b_1, b_2, b_3;
@@ -4528,9 +4364,6 @@ void num_ssm_depad_wrap(
             num_ssm_opposite(num_fft, src_pos, src_len);
         }
 
-        // Common case: the whole coefficient sits below the negacyclic boundary, so it
-        // goes straight into the accumulator at its word offset. Only the last few
-        // coefficients (p->n > 2 * p->M, so at least the last one) need the wrap path.
         if(dest_pos + src_len <= wrap_boundary)
         {
             if(is_add)
@@ -4616,9 +4449,7 @@ static void num_ssm_mul_pointwise(
     uint64_t threads
 );
 
-// KEEPS NUM_1 NUM_2. Always single-threaded: only num_ssm_mul_pointwise's outermost
-// call ever fans out across threads; every call to num_ssm_mul_wrap happens one
-// recursion level below that, so it has nothing to pass but 1.
+// KEEPS NUM_1 NUM_2
 void num_ssm_mul_wrap(
     num_p num_aux_1,
     num_p num_aux_2,
@@ -4844,9 +4675,6 @@ static void num_ssm_mul_pointwise(
 
 
 
-// Production pads inside the forward transform now (ssm_fft_fwd_pad_block), so this
-// standalone form is reached only by its own round-trip test, which is why it needs
-// the attribute: STATIC makes it static in release, where nothing calls it.
 [[maybe_unused]]
 num_p num_ssm_pad_no_wrap(num_p num, ssm_params_p p)
 {
@@ -4917,9 +4745,6 @@ static num_p num_ssm_prepare_no_wrap(
     assert(num)
     assert(num_aux->size >= 2 * p->n)
 
-    // Allocated dirty: every limb of every element is written by the pad fused into
-    // the transform's first pass, so num_create's zeroing of the whole n*K array
-    // would be a wasted pass over hundreds of MB.
     num_p num_fft = num_create_dirty(CLU_ARGS(p->n * p->K, 0));
 
     num_ssm_fft_fwd_pad(num_aux, num_fft, num, p, threads);
@@ -4944,9 +4769,6 @@ num_p num_mul_ssm(num_p num_1, num_p num_2, bool free_inputs, uint64_t threads)
     num_p num_fft_1 = num_ssm_prepare_no_wrap(num_aux_2, num_1, &p, free_inputs, threads);
     num_p num_fft_2 = num_ssm_prepare_no_wrap(num_aux_2, num_2, &p, free_inputs, threads);
 
-    // The pointwise multiply rides inside the inverse transform's first pass rather
-    // than running as a pass of its own, so the products are consumed from cache
-    // instead of being written to DRAM and read straight back.
     num_ssm_fft_inv_pointwise(num_aux_2, num_fft_1, num_fft_2, &p, threads);
     num_free(num_fft_2);
     num_free(num_aux_2);
@@ -4963,23 +4785,6 @@ static bool mul_is_classic(uint64_t count_1, uint64_t count_2)
     return (bool)((count_1 < threshold) || (count_2 < threshold));
 }
 
-// Separate from mul_is_classic's "use SSM at all" threshold: an operand can be well
-// past that and still be too small for spawning many threads to pay off
-// (pthread_create/join plus a per-worker scratch allocation cost real time, worth
-// paying for a huge multiply, not for a merely SSM-eligible one). A flat yes/no gate
-// on whether to thread at all isn't enough either -- found via num_div_mod_bz_rec's
-// recursion, which calls num_mul_core at every level with shrinking operands: capped
-// at a single global thread count once past the gate, the many mid-sized calls just
-// past it still got the full caller-requested thread count and spawned more workers
-// than that size could productively use, regressing above ~4 threads. Scaling the
-// *ceiling* to size instead (rather than a bool) fixes that: this is the one place
-// that decides "how much threading is this size worth" since it's the one place that
-// actually sees the operand size on every call, so every caller (division's deep
-// recursion included) gets this for free instead of having to reason about it itself.
-//
-// mul_min_limbs_per_thread is a starting point, not a derived constant -- tuned from
-// one real measurement (division at ~4-9M limb operands), not a closed-form model of
-// pthread overhead vs. SSM work. Revisit if it doesn't hold up at other sizes.
 constexpr uint64_t mul_min_limbs_per_thread = 16384;
 
 static uint64_t mul_threads_ceiling(uint64_t count_1, uint64_t count_2)
@@ -5059,9 +4864,7 @@ typedef struct
 } mem_profile_t;
 
 // Mirrors num_ssm_mul_pointwise's allocation sites and recursion, weighting each
-// phase's RAM by a word-operation duration proxy. `threads` mirrors the real code's
-// single-level cap: only this top call fans out across `workers`; the recursive
-// self-call below always passes 1.
+// phase's RAM by a word-operation duration proxy.
 static mem_profile_t ssm_pointwise_mem_estimate(
     uint64_t n,
     uint64_t K,
@@ -5139,9 +4942,6 @@ uint64_t num_mul_estimate_memory(
 
     live += mem_estimate_ram_bytes(n, disk_threshold_bytes) + mem_estimate_ram_bytes(2 * n, disk_threshold_bytes);
 
-    // Fwd/inv FFT phases are threaded the same single-level way as the pointwise
-    // K-loop, but the recursion bottoms out at K=2 per leaf, so K/2 leaves is the most
-    // fan-out achievable (vs pointwise's min(threads, K)).
     uint64_t fft_workers = ssm_worker_count(threads, K / 2);
 
     for(uint64_t side = 0; side < 2; side++)
@@ -5209,9 +5009,7 @@ static void num_ssm_sqr_pointwise(
     uint64_t threads
 );
 
-// KEEPS NUM. Always single-threaded: only num_ssm_sqr_pointwise's outermost call ever
-// fans out across threads; every call to num_ssm_sqr_wrap happens one recursion level
-// below that, so it has nothing to pass but 1.
+// KEEPS NUM
 static void num_ssm_sqr_wrap(
     num_p num_aux_1,
     num_p num_aux_2,
@@ -5573,17 +5371,6 @@ STRUCT(bz_frame)
 // Returns quotient
 // NUM_1 becomes remainder
 // Keeps NUM_2
-// This recursion never forks into concurrent branches (each step depends on the
-// previous one's effect on the shared remainder), so there's no oversubscription risk
-// from threading -- `threads` is passed unchanged at every level, all the way down.
-// It does call itself many times (depth ~log2(num_2->count)) with the multiply's
-// operand shrinking every level; threading every one of those calls uniformly was
-// tried and made things *worse* purely from pthread_create/join overhead at the many
-// small deep calls. Fixed at the source instead of here: num_mul_core now caps
-// `threads` to a size-scaled ceiling (mul_threads_ceiling) for every call, so this
-// function doesn't need to reason about its own recursion depth or size at all -- it
-// just forwards `threads` everywhere and trusts num_mul_core to only ever spawn as
-// many workers as each call's own size can productively use.
 static num_p num_div_mod_bz_rec(
     num_p num_aux,
     num_p num_1,
@@ -5867,9 +5654,6 @@ num_p num_mul(num_p num_1, num_p num_2)
     return num_mul_core(num_1, num_2, true, 1);
 }
 
-// Same as num_mul, but the caller picks how many threads the SSM pointwise multiply
-// (if reached) may fan its K-loop out across. threads is read once per call, so a
-// multiplication already in flight is unaffected by what later callers pass.
 num_p num_mul_threads(num_p num_1, num_p num_2, uint64_t threads)
 {
     CLU_HANDLER_IS_SAFE(num_1)
@@ -5913,8 +5697,6 @@ num_p num_sqr(num_p num)
     return num_sqr_core(num, 1);
 }
 
-// Same as num_sqr, but the caller picks how many threads the SSM pointwise square (if
-// reached) may fan its K-loop out across, same as num_mul_threads.
 num_p num_sqr_threads(num_p num, uint64_t threads)
 {
     CLU_HANDLER_IS_SAFE(num);
@@ -5992,10 +5774,6 @@ void num_div_mod(num_p *out_num_q, num_p *out_num_r, num_p num_1, num_p num_2)
     num_div_mod_core(out_num_q, out_num_r, num_1, num_2, 1);
 }
 
-// Same as num_div_mod, but the caller picks how many threads the one multiply inside
-// the Burnikel-Ziegler recursion (code.c num_div_mod_bz_rec) may use. That recursion
-// never forks into concurrent branches, so unlike num_mul_threads/num_sqr_threads
-// there's no "outermost call only" restriction -- every level can use the full count.
 void num_div_mod_threads(
     num_p *out_num_q,
     num_p *out_num_r,

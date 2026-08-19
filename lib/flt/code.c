@@ -623,9 +623,6 @@ flt_num_t flt_num_mul(flt_num_t flt_1, flt_num_t flt_2) // TODO TEST
     return flt_num_mul_threads(flt_1, flt_2, 1);
 }
 
-// Same as flt_num_mul, but the caller picks how many threads the underlying multiply
-// may use -- see sig_num_mul_threads. Exponent arithmetic and normalization are
-// unaffected, so a threaded call returns bit-for-bit what the plain one would.
 flt_num_t flt_num_mul_threads(flt_num_t flt_1, flt_num_t flt_2, uint64_t threads)
 {
     CLU_FLT_IS_SAFE(flt_1);
@@ -679,10 +676,6 @@ flt_num_t flt_num_div(flt_num_t flt_1, flt_num_t flt_2) // TODO TEST
     return flt_num_div_threads(flt_1, flt_2, 1);
 }
 
-// Same as flt_num_div, but the caller picks how many threads the underlying division
-// may use -- see sig_num_div_threads for why that buys less than the same count spent
-// on a multiply. Still worth passing where the division is the only work in flight:
-// a single full-precision divide is otherwise one core against an idle machine.
 flt_num_t flt_num_div_threads(flt_num_t flt_1, flt_num_t flt_2, uint64_t threads)
 {
     CLU_FLT_IS_SAFE(flt_1);
@@ -702,8 +695,6 @@ flt_num_t flt_num_mul_sig(flt_num_t flt, sig_num_t sig) // TODO TEST
     return flt_num_mul_sig_threads(flt, sig, 1);
 }
 
-// Same as flt_num_mul_sig, but the caller picks how many threads the underlying
-// multiply may use -- see sig_num_mul_threads.
 flt_num_t flt_num_mul_sig_threads(flt_num_t flt, sig_num_t sig, uint64_t threads)
 {
     CLU_FLT_IS_SAFE(flt);
@@ -718,8 +709,6 @@ flt_num_t flt_num_div_sig(flt_num_t flt, sig_num_t sig) // TODO TEST
     return flt_num_div_sig_threads(flt, sig, 1);
 }
 
-// Same as flt_num_div_sig, but the caller picks how many threads the underlying
-// division may use -- see sig_num_div_threads.
 flt_num_t flt_num_div_sig_threads(flt_num_t flt, sig_num_t sig, uint64_t threads)
 {
     CLU_FLT_IS_SAFE(flt);

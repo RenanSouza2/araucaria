@@ -365,8 +365,6 @@ fxd_num_t fxd_num_mul(fxd_num_t fxd_1, fxd_num_t fxd_2) // TODO test
     return fxd_num_mul_threads(fxd_1, fxd_2, 1);
 }
 
-// Same as fxd_num_mul, but the caller picks how many threads the underlying multiply
-// may use -- see sig_num_mul_threads. Repositioning is unaffected.
 fxd_num_t fxd_num_mul_threads(fxd_num_t fxd_1, fxd_num_t fxd_2, uint64_t threads)
 {
     CLU_FXD_IS_SAFE(fxd_1);
@@ -392,9 +390,6 @@ fxd_num_t fxd_num_div(fxd_num_t fxd_1, fxd_num_t fxd_2) // TODO test
     return fxd_num_div_threads(fxd_1, fxd_2, 1);
 }
 
-// Same as fxd_num_div, but the caller picks how many threads the underlying division
-// may use -- see sig_num_div_threads for why that buys less than the same count spent
-// on a multiply.
 fxd_num_t fxd_num_div_threads(fxd_num_t fxd_1, fxd_num_t fxd_2, uint64_t threads)
 {
     CLU_FXD_IS_SAFE(fxd_1);
@@ -413,8 +408,6 @@ fxd_num_t fxd_num_mul_sig(fxd_num_t fxd, sig_num_t sig) // TODO test
     return fxd_num_mul_sig_threads(fxd, sig, 1);
 }
 
-// Same as fxd_num_mul_sig, but the caller picks how many threads the underlying
-// multiply may use -- see sig_num_mul_threads.
 fxd_num_t fxd_num_mul_sig_threads(fxd_num_t fxd, sig_num_t sig, uint64_t threads)
 {
     CLU_FXD_IS_SAFE(fxd);
@@ -429,8 +422,6 @@ fxd_num_t fxd_num_div_sig(fxd_num_t fxd, sig_num_t sig) // TODO test
     return fxd_num_div_sig_threads(fxd, sig, 1);
 }
 
-// Same as fxd_num_div_sig, but the caller picks how many threads the underlying
-// division may use -- see sig_num_div_threads.
 fxd_num_t fxd_num_div_sig_threads(fxd_num_t fxd, sig_num_t sig, uint64_t threads)
 {
     CLU_FXD_IS_SAFE(fxd);

@@ -33,11 +33,6 @@ static void test_fxd_div(bool show)
 }
 
 
-// Coverage for the threaded entry points. See the long note in lib/sig/test/test.c for
-// why the small tables assert absolute results instead of comparing against the plain
-// function, and why the large cases do the opposite. The same reasoning applies here,
-// with fxd's repositioning taking the place of sig's signal handling as the wrapping
-// being pinned.
 constexpr uint64_t threads_mul_count = 65536;
 constexpr uint64_t threads_mul_n = 4;
 constexpr uint64_t threads_div_count = 32768;
@@ -79,8 +74,6 @@ static void test_fxd_num_mul_threads(bool show)
         (1, POSITIVE, 2, 18, 0)
     );
 
-    // Product wider than the operands, so the trim back down to pos actually removes a
-    // limb. The cases above all stay at two limbs, where trimming is a no-op.
     TEST_FXD_NUM_MUL_THREADS(5,
         (1, POSITIVE, 2, 6, 0), (1, POSITIVE, 2, 5, 0), 4,
         (1, POSITIVE, 2, 30, 0)
@@ -88,8 +81,6 @@ static void test_fxd_num_mul_threads(bool show)
 
     #undef TEST_FXD_NUM_MUL_THREADS
 
-    // Operands large enough that num actually fans the multiply out instead of clamping
-    // the request back to one worker.
     TEST_CASE_OPEN_TIMEOUT(6, 0)
     {
         fxd_num_t fxd_1 = fxd_num_wrap_sig(sig_num_create_rand(threads_mul_count), threads_pos);
@@ -148,7 +139,6 @@ static void test_fxd_num_div_threads(bool show)
 
     #undef TEST_FXD_NUM_DIV_THREADS
 
-    // Dividend twice the divisor so Burnikel-Ziegler actually recurses.
     TEST_CASE_OPEN_TIMEOUT(5, 0)
     {
         fxd_num_t fxd_1 = fxd_num_wrap_sig(
@@ -211,8 +201,6 @@ static void test_fxd_num_mul_sig_threads(bool show)
         (1, POSITIVE, 2, 18, 0)
     );
 
-    // Unlike fxd_num_mul, fxd_num_mul_sig does not trim, so the product keeps its third
-    // limb -- pinned here so the two are not silently made to behave the same.
     TEST_FXD_NUM_MUL_SIG_THREADS(5,
         (1, POSITIVE, 2, 6, 0), (POSITIVE, 2, 5, 0), 4,
         (1, POSITIVE, 3, 30, 0, 0)
