@@ -2828,17 +2828,89 @@ static void num_ssm_butterfly(
 #endif
 }
 
-// Loop-based equivalent of the divide-and-combine recursion this used to be:
-// stages run from deepest (group_step = K/2) up to the top (group_step = 1).
-// Butterflies within one stage touch disjoint (pos_1, pos_2) pairs, so
-// running them in any order (here: increasing j, then i) reaches the same
-// result as the original post-order recursive traversal.
-// num_aux->size >= 2 * n
+// Stage s of the forward transform pairs logical index x with x + s whenever
+// (x / s) is even, twiddling by ssm_bit_inv(x / 2s, K / 2s) * bits * s; stages run
+// from the deepest (s = K/2) up to the top (s = 1). Butterflies within one stage
+// touch disjoint pairs, so running them in any order reaches the same result as the
+// divide-and-combine recursion this used to be.
+//
+// Running one stage per pass over the array is memory-bound and cannot be fixed by
+// threading: K * n limbs is hundreds of MB at the sizes this is used at, every stage
+// reads and writes all of it, so a transform moves log2(K) * 2 * K * n limbs and
+// saturates DRAM bandwidth a couple of threads in. Stages are therefore fused r at a
+// time. Write the index as x = a + gl*b + (gl << r)*c with a < gl and b < 2^r: the r
+// stages with strides [gl, gl << (r-1)] only ever pair indices differing in the b
+// field, so the 2^r elements of one (a, c) block are closed under all r of them. A
+// block is loaded once, carried through r stages, and written back once, which cuts
+// traffic by a factor of r as long as those 2^r elements stay in cache.
 
-// Stages with group_step >= workers, run by one worker per residue class with no
-// synchronisation between them at all (see num_ssm_fft_fwd_rec's comment for why
-// the classes stay disjoint across every stage in this range). One dispatch covers
-// the whole range, instead of one per stage.
+// Bytes one fused block may occupy. Wants to be L2: overshooting it costs the whole
+// gain, undershooting only fuses fewer stages per pass, and an n large enough that a
+// block spills to L3 still beats going to DRAM r times. Deliberately a constant
+// rather than a runtime cache query - this has to build and behave the same on
+// x86-64 and AArch64.
+constexpr uint64_t ssm_fft_block_bytes = 1024 * 1024;
+
+// How many stages one pass can fuse: as many as keep a block inside the budget,
+// never more than the stages actually left to run. An n so large that two elements
+// don't fit degrades to r = 1, which is one stage per pass - what this did before
+// fusing, so no size gets worse.
+static uint64_t ssm_fft_fuse_bits(uint64_t n, uint64_t stages_left)
+{
+    uint64_t fit = ssm_fft_block_bytes / (n * sizeof(uint64_t));
+    uint64_t r = fit < 2 ? 1 : (uint64_t)stdc_bit_width(fit) - 1;
+    return r < stages_left ? r : stages_left;
+}
+
+// The r stages with strides [gl, gl << (r-1)] over the single block (a, c), stages
+// descending the same way the unfused loop runs them.
+static void ssm_fft_fwd_block(
+    num_p num_aux,
+    num_p num_fft,
+    uint64_t pos,
+    uint64_t step,
+    uint64_t n,
+    uint64_t K,
+    uint64_t bits,
+    uint64_t gl,
+    uint64_t r,
+    uint64_t a,
+    uint64_t c
+)
+{
+    uint64_t width = U64(1) << r;
+    uint64_t base = a + ((gl << r) * c);
+
+    for(uint64_t k = r; k-- > 0;)
+    {
+        uint64_t stride = gl << k;
+        uint64_t bits_local = bits * stride;
+        uint64_t half = K / (2 * stride);
+        uint64_t reach = U64(1) << k;
+
+        for(uint64_t b_0 = 0; b_0 < width; b_0 += 2 * reach)
+        {
+            for(uint64_t b = b_0; b < b_0 + reach; b++)
+            {
+                uint64_t x_1 = base + (gl * b);
+                uint64_t pos_1 = (pos + (step * x_1)) * n;
+                uint64_t pos_2 = (pos + (step * (x_1 + stride))) * n;
+
+                uint64_t i = (b >> (k + 1)) | (c << ((r - k) - 1));
+                uint64_t shift = ssm_bit_inv(i, half) * bits_local;
+
+                num_ssm_shl_mod(num_aux, num_fft, pos_2, n, shift);
+
+                num_ssm_butterfly(num_aux, num_fft, pos_1, pos_2, n);
+            }
+        }
+    }
+}
+
+// Every pass from stride K/2 down to stride_end, run by one worker per residue class
+// a == worker (mod workers) with no synchronisation between them at all (see
+// num_ssm_fft_fwd_rec's comment for why the classes stay disjoint). One dispatch
+// covers the whole range. Also the serial path, as worker 0 of 1 down to stride 1.
 typedef struct
 {
     num_p num_aux;
@@ -2848,6 +2920,7 @@ typedef struct
     uint64_t n;
     uint64_t K;
     uint64_t bits;
+    uint64_t stride_end;
     uint64_t worker;
     uint64_t workers;
 } ssm_fft_fwd_split_worker_t;
@@ -2856,31 +2929,33 @@ static void * ssm_fft_fwd_split_worker(void * arg)
 {
     ssm_fft_fwd_split_worker_t * w = arg;
 
-    for(uint64_t group_step = w->K / 2; group_step >= w->workers; group_step /= 2)
+    uint64_t stages_left = (uint64_t)stdc_bit_width(w->K / w->stride_end) - 1;
+    uint64_t stride_hi = w->K / 2;
+
+    while(stages_left)
     {
-        uint64_t local_step = w->step * group_step;
-        uint64_t half = w->K / group_step / 2;
-        uint64_t bits_local = w->bits * group_step;
+        uint64_t r = ssm_fft_fuse_bits(w->n, stages_left);
+        uint64_t gl = stride_hi >> (r - 1);
+        uint64_t blocks = w->K / (gl << r);
 
-        for(uint64_t j = w->worker; j < group_step; j += w->workers)
+        for(uint64_t c = 0; c < blocks; c++)
         {
-            uint64_t pos_local = w->pos + (w->step * j);
-
-            for(uint64_t i = 0; i < half; i++)
+            for(uint64_t a = w->worker; a < gl; a += w->workers)
             {
-                uint64_t pos_1 = (pos_local + (local_step * 2 * i)) * w->n;
-                uint64_t pos_2 = (pos_local + (local_step * ((2 * i) + 1))) * w->n;
-
-                uint64_t shift = ssm_bit_inv(i, half) * bits_local;
-                num_ssm_shl_mod(w->num_aux, w->num_fft, pos_2, w->n, shift);
-
-                num_ssm_butterfly(w->num_aux, w->num_fft, pos_1, pos_2, w->n);
+                ssm_fft_fwd_block(
+                    w->num_aux, w->num_fft, w->pos, w->step,
+                    w->n, w->K, w->bits, gl, r, a, c
+                );
             }
         }
+
+        stages_left -= r;
+        stride_hi = gl / 2;
     }
     return nullptr;
 }
 
+// idx numbers the K >> r blocks of one pass as (c, a) flattened c*gl + a.
 typedef struct
 {
     num_p num_aux;
@@ -2888,57 +2963,41 @@ typedef struct
     uint64_t pos;
     uint64_t step;
     uint64_t n;
-    uint64_t local_step;
-    uint64_t K_local;
-    uint64_t bits_local;
+    uint64_t K;
+    uint64_t bits;
+    uint64_t gl;
+    uint64_t r;
     uint64_t idx_start;
     uint64_t idx_end;
-} ssm_fft_fwd_stage_worker_t;
+} ssm_fft_fwd_pass_worker_t;
 
-// idx numbers the K/2 butterflies of one stage as (j, i) flattened
-// j*half+i, half = K_local/2 - the same flat space every stage has, since
-// group_step * (K_local/2) == K/2 regardless of which stage.
-static void * ssm_fft_fwd_stage_worker(void * arg)
+static void * ssm_fft_fwd_pass_worker(void * arg)
 {
-    ssm_fft_fwd_stage_worker_t * w = arg;
-    uint64_t half = w->K_local / 2;
+    ssm_fft_fwd_pass_worker_t * w = arg;
 
     for(uint64_t idx = w->idx_start; idx < w->idx_end; idx++)
     {
-        uint64_t j = idx / half;
-        uint64_t i = idx % half;
-
-        uint64_t pos_local = w->pos + (w->step * j);
-        uint64_t pos_1 = (pos_local + (w->local_step * 2 * i)) * w->n;
-        uint64_t pos_2 = (pos_local + (w->local_step * ((2 * i) + 1))) * w->n;
-
-        uint64_t shift = ssm_bit_inv(i, half) * w->bits_local;
-        num_ssm_shl_mod(w->num_aux, w->num_fft, pos_2, w->n, shift);
-
-        num_ssm_butterfly(w->num_aux, w->num_fft, pos_1, pos_2, w->n);
+        ssm_fft_fwd_block(
+            w->num_aux, w->num_fft, w->pos, w->step,
+            w->n, w->K, w->bits, w->gl, w->r, idx % w->gl, idx / w->gl
+        );
     }
     return nullptr;
 }
 
-// Stages run from deepest (group_step = K/2) up to the top (group_step = 1). Each
-// stage's K/2 butterflies touch disjoint (pos_1, pos_2) pairs, so any stage is safe
-// to run as a flat threaded loop - but dispatching per stage means log2(K) rounds of
-// pthread_create/join per transform, which is what dominates the mid-sized multiplies
-// num_div_mod_bz_rec's recursion is full of. Most of those rounds are avoidable:
+// A stage with stride s pairs x with x + s, so for a power-of-two split count P every
+// stage with s >= P keeps x in its class x == a (mod P): worker w can own the whole
+// class a == w (mod P) and run every pass from stride K/2 down to stride P without
+// ever touching another worker's element. That is one dispatch for
+// log2(K) - log2(P) stages, with workers free to sit on different passes at once.
 //
-// A stage with group_step = g touches element indices e == j (mod g), and merges
-// group j with group j + g/2. So for a power-of-two split count P, while P divides g
-// every element a worker owning the residue class j == w (mod P) touches also lies in
-// e == w (mod P): the classes are disjoint and stay disjoint. Every stage from
-// group_step = K/2 down to group_step = P therefore runs under a single dispatch with
-// no synchronisation - workers may sit on different stages at the same time and still
-// never share an element (num_ssm_fft_fwd_split_worker).
+// Only the last log2(P) stages (stride < P) merge across classes. Those still need a
+// join between passes, but fusing means ceil(log2(P) / r) of them rather than
+// log2(P). Dispatches per transform: log2(K) -> 1 + ceil(log2(P) / r).
 //
-// Only the last log2(P) stages (group_step < P) merge across classes, and those keep
-// the per-stage dispatch. Rounds per transform: log2(K) -> 1 + log2(P).
-//
-// The split count is workers rounded down to a power of two (P | g needs it); the
-// tail stages keep the full worker count, since a flat idx split doesn't care.
+// The split count is workers rounded down to a power of two (the residue argument
+// needs P | s); the tail passes keep the full worker count, since splitting a pass's
+// block list doesn't care.
 // num_aux->size >= 2 * n
 static void num_ssm_fft_fwd_rec(
     num_p num_aux,
@@ -2960,28 +3019,20 @@ static void num_ssm_fft_fwd_rec(
 
     if(workers <= 1)
     {
-        for(uint64_t group_step = K / 2; group_step >= 1; group_step /= 2)
+        ssm_fft_fwd_split_worker_t serial =
         {
-            uint64_t local_step = step * group_step;
-            uint64_t K_local = K / group_step;
-            uint64_t bits_local = bits * group_step;
-
-            for(uint64_t j = 0; j < group_step; j++)
-            {
-                uint64_t pos_local = pos + (step * j);
-
-                for(uint64_t i = 0; i < K_local / 2; i++)
-                {
-                    uint64_t pos_1 = (pos_local + (local_step * 2 * i)) * n;
-                    uint64_t pos_2 = (pos_local + (local_step * ((2 * i) + 1))) * n;
-
-                    uint64_t shift = ssm_bit_inv(i, K_local / 2) * bits_local;
-                    num_ssm_shl_mod(num_aux, num_fft, pos_2, n, shift);
-
-                    num_ssm_butterfly(num_aux, num_fft, pos_1, pos_2, n);
-                }
-            }
-        }
+            .num_aux = num_aux,
+            .num_fft = num_fft,
+            .pos = pos,
+            .step = step,
+            .n = n,
+            .K = K,
+            .bits = bits,
+            .stride_end = 1,
+            .worker = 0,
+            .workers = 1,
+        };
+        ssm_fft_fwd_split_worker(&serial);
         return;
     }
 
@@ -3011,6 +3062,7 @@ static void num_ssm_fft_fwd_rec(
             .n = n,
             .K = K,
             .bits = bits,
+            .stride_end = split,
             .worker = w,
             .workers = split,
         };
@@ -3024,37 +3076,48 @@ static void num_ssm_fft_fwd_rec(
 
     free(split_args);
 
-    ssm_fft_fwd_stage_worker_t * worker_args = malloc(workers * sizeof(*worker_args));
+    ssm_fft_fwd_pass_worker_t * worker_args = malloc(workers * sizeof(*worker_args));
     assert(worker_args)
 
-    for(uint64_t group_step = split / 2; group_step >= 1; group_step /= 2)
-    {
-        uint64_t local_step = step * group_step;
-        uint64_t K_local = K / group_step;
-        uint64_t bits_local = bits * group_step;
+    uint64_t stages_left = (uint64_t)stdc_bit_width(split) - 1;
+    uint64_t stride_hi = split / 2;
 
-        for(uint64_t w=0; w<workers; w++)
+    while(stages_left)
+    {
+        uint64_t r = ssm_fft_fuse_bits(n, stages_left);
+        uint64_t gl = stride_hi >> (r - 1);
+        uint64_t blocks = K >> r;
+        uint64_t pass_workers = workers < blocks ? workers : blocks;
+
+        for(uint64_t w=0; w<pass_workers; w++)
         {
             uint64_t idx_start, idx_end;
-            ssm_worker_range(w, workers, K / 2, &idx_start, &idx_end);
+            ssm_worker_range(w, pass_workers, blocks, &idx_start, &idx_end);
 
-            worker_args[w].num_aux = worker_aux[w];
-            worker_args[w].num_fft = num_fft;
-            worker_args[w].pos = pos;
-            worker_args[w].step = step;
-            worker_args[w].n = n;
-            worker_args[w].local_step = local_step;
-            worker_args[w].K_local = K_local;
-            worker_args[w].bits_local = bits_local;
-            worker_args[w].idx_start = idx_start;
-            worker_args[w].idx_end = idx_end;
+            worker_args[w] = (ssm_fft_fwd_pass_worker_t)
+            {
+                .num_aux = worker_aux[w],
+                .num_fft = num_fft,
+                .pos = pos,
+                .step = step,
+                .n = n,
+                .K = K,
+                .bits = bits,
+                .gl = gl,
+                .r = r,
+                .idx_start = idx_start,
+                .idx_end = idx_end,
+            };
 
-            TREAT(pthread_create(&worker_ids[w], nullptr, ssm_fft_fwd_stage_worker, &worker_args[w]))
+            TREAT(pthread_create(&worker_ids[w], nullptr, ssm_fft_fwd_pass_worker, &worker_args[w]))
         }
-        for(uint64_t w=0; w<workers; w++)
+        for(uint64_t w=0; w<pass_workers; w++)
         {
             TREAT(pthread_join(worker_ids[w], nullptr))
         }
+
+        stages_left -= r;
+        stride_hi = gl / 2;
     }
 
     for(uint64_t w=0; w<workers; w++)
@@ -3140,9 +3203,59 @@ void num_ssm_fft_fwd(num_p num_aux, num_p num_fft, ssm_params_p p, uint64_t thre
     num_ssm_fft_fwd_rec(num_aux, num_fft, 0, 1, p->n, p->K, 2 * p->Q, threads);
 }
 
-// Stages with k_local <= k / workers, run by one worker per contiguous element
-// block with no synchronisation between them at all (see num_ssm_fft_inv_rec's
-// comment). One dispatch covers the whole range, instead of one per stage.
+// The inverse transform is the mirror: stage s pairs x with x + s whenever (x / s)
+// is even, twiddling by (x mod s) * bits * k / 2s, and stages ascend from s = 1 up
+// to s = k/2. The same index decomposition fuses it - x = a + gl*b + (gl << r)*c,
+// with the r stages of strides [gl, gl << (r-1)] closed over the b field - except
+// that here a block's 2^r elements are contiguous rather than strided, since the
+// pass fusing the deepest stages is the one with gl = 1.
+
+// The r stages with strides [gl, gl << (r-1)] over the single block (a, c), stages
+// ascending the same way the unfused loop runs them.
+static void ssm_fft_inv_block(
+    num_p num_aux,
+    num_p num,
+    uint64_t pos,
+    uint64_t n,
+    uint64_t k,
+    uint64_t bits,
+    uint64_t gl,
+    uint64_t r,
+    uint64_t a,
+    uint64_t c
+)
+{
+    uint64_t width = U64(1) << r;
+    uint64_t base = a + ((gl << r) * c);
+
+    for(uint64_t kk = 0; kk < r; kk++)
+    {
+        uint64_t stride = gl << kk;
+        uint64_t bits_local = (bits * k) / (2 * stride);
+        uint64_t reach = U64(1) << kk;
+
+        for(uint64_t b_0 = 0; b_0 < width; b_0 += 2 * reach)
+        {
+            for(uint64_t b = b_0; b < b_0 + reach; b++)
+            {
+                uint64_t x_1 = base + (gl * b);
+                uint64_t pos_1 = (pos + x_1) * n;
+                uint64_t pos_2 = (pos + x_1 + stride) * n;
+
+                uint64_t i = a + (gl * (b - b_0));
+
+                num_ssm_shr_mod(num_aux, num, pos_2, n, i * bits_local);
+
+                num_ssm_butterfly(num_aux, num, pos_1, pos_2, n);
+            }
+        }
+    }
+}
+
+// Every pass whose blocks fit inside one worker's contiguous chunk of k / workers
+// elements, run with no synchronisation between workers at all (see
+// num_ssm_fft_inv_rec's comment). One dispatch covers the whole range. Also the
+// serial path, as worker 0 of 1, whose chunk is the entire transform.
 typedef struct
 {
     num_p num_aux;
@@ -3160,85 +3273,74 @@ static void * ssm_fft_inv_split_worker(void * arg)
     ssm_fft_inv_split_worker_t * w = arg;
 
     uint64_t chunk = w->k / w->workers;
-    uint64_t pos_start = w->pos + (w->worker * chunk);
-    uint64_t pos_end = pos_start + chunk;
+    uint64_t stages_left = (uint64_t)stdc_bit_width(chunk) - 1;
+    uint64_t gl = 1;
 
-    for(uint64_t half = 1; half <= chunk / 2; half *= 2)
+    while(stages_left)
     {
-        uint64_t k_local = 2 * half;
-        uint64_t bits_local = (w->bits * w->k) / k_local;
+        uint64_t r = ssm_fft_fuse_bits(w->n, stages_left);
+        uint64_t span = gl << r;
+        uint64_t c_start = (w->worker * chunk) / span;
+        uint64_t c_end = c_start + (chunk / span);
 
-        for(uint64_t pos_base = pos_start; pos_base < pos_end; pos_base += k_local)
+        for(uint64_t c = c_start; c < c_end; c++)
         {
-            for(uint64_t i = 0; i < half; i++)
+            for(uint64_t a = 0; a < gl; a++)
             {
-                uint64_t pos_1 = (pos_base + i) * w->n;
-                uint64_t pos_2 = (pos_base + i + half) * w->n;
-
-                num_ssm_shr_mod(w->num_aux, w->num, pos_2, w->n, i * bits_local);
-
-                num_ssm_butterfly(w->num_aux, w->num, pos_1, pos_2, w->n);
+                ssm_fft_inv_block(
+                    w->num_aux, w->num, w->pos,
+                    w->n, w->k, w->bits, gl, r, a, c
+                );
             }
         }
+
+        stages_left -= r;
+        gl = span;
     }
     return nullptr;
 }
 
+// idx numbers the k >> r blocks of one pass as (c, a) flattened c*gl + a.
 typedef struct
 {
     num_p num_aux;
     num_p num;
     uint64_t pos;
     uint64_t n;
-    uint64_t half;
-    uint64_t k_local;
-    uint64_t bits_local;
+    uint64_t k;
+    uint64_t bits;
+    uint64_t gl;
+    uint64_t r;
     uint64_t idx_start;
     uint64_t idx_end;
-} ssm_fft_inv_stage_worker_t;
+} ssm_fft_inv_pass_worker_t;
 
-// idx numbers the k/2 butterflies of one stage as (group, i) flattened
-// group*half+i - same flat space every stage has, since (k/k_local)*half
-// == k/2 regardless of which stage.
-static void * ssm_fft_inv_stage_worker(void * arg)
+static void * ssm_fft_inv_pass_worker(void * arg)
 {
-    ssm_fft_inv_stage_worker_t * w = arg;
+    ssm_fft_inv_pass_worker_t * w = arg;
 
     for(uint64_t idx = w->idx_start; idx < w->idx_end; idx++)
     {
-        uint64_t group = idx / w->half;
-        uint64_t i = idx % w->half;
-
-        uint64_t pos_base = w->pos + (group * w->k_local);
-        uint64_t pos_1 = (pos_base + i) * w->n;
-        uint64_t pos_2 = (pos_base + i + w->half) * w->n;
-
-        num_ssm_shr_mod(w->num_aux, w->num, pos_2, w->n, i * w->bits_local);
-
-        num_ssm_butterfly(w->num_aux, w->num, pos_1, pos_2, w->n);
+        ssm_fft_inv_block(
+            w->num_aux, w->num, w->pos,
+            w->n, w->k, w->bits, w->gl, w->r, idx % w->gl, idx / w->gl
+        );
     }
     return nullptr;
 }
 
-// Stages run from deepest (half = 1) up to the top (half = k/2). Each stage's k/2
-// butterflies touch disjoint (pos_1, pos_2) pairs, so any stage is safe to run as a
-// flat threaded loop - but dispatching per stage means log2(k) rounds of
-// pthread_create/join per transform. The mirror image of num_ssm_fft_fwd_rec's split
-// avoids most of them:
+// A stage with stride s keeps every butterfly inside a contiguous aligned run of 2s
+// elements, so for a power-of-two split count P every pass whose blocks span at most
+// k / P elements stays inside the chunk [w * k/P, (w+1) * k/P) that worker w owns:
+// worker w runs all of them - log2(k) - log2(P) stages - under a single dispatch
+// with no synchronisation, free to sit on a different pass than its neighbours.
 //
-// A stage with block size k_local keeps its butterflies strictly inside each contiguous
-// [group * k_local, (group + 1) * k_local) block, and blocks merge pairwise as half
-// grows. So for a power-of-two split count P, every stage with k_local <= k / P
-// stays inside the contiguous chunk [w * k/P, (w + 1) * k/P) that worker w owns:
-// those stages all run under a single dispatch with no synchronisation - workers may
-// sit on different stages at the same time and still never share an element
-// (ssm_fft_inv_split_worker).
+// Only the last log2(P) stages span across chunks. Those still need a join between
+// passes, but fusing means ceil(log2(P) / r) of them rather than log2(P).
+// Dispatches per transform: log2(k) -> 1 + ceil(log2(P) / r).
 //
-// Only the last log2(P) stages (k_local > k / P) merge across chunks, and those keep
-// the per-stage dispatch. Rounds per transform: log2(k) -> 1 + log2(P).
-//
-// bits_local, which the serial path carries down the stages by halving, is written
-// out here as (bits * k) / k_local so a worker starting mid-way can compute it.
+// bits_local, which the unfused loop carried down the stages by halving, is written
+// out as (bits * k) / 2s so a worker starting mid-way can compute it.
 // num_aux->size >= 2 * n
 static void num_ssm_fft_inv_rec(
     num_p num_aux,
@@ -3260,27 +3362,18 @@ static void num_ssm_fft_inv_rec(
 
     if(workers <= 1)
     {
-        uint64_t bits_local = bits * (k / 2);
-
-        for(uint64_t half = 1; half <= k / 2; half *= 2)
+        ssm_fft_inv_split_worker_t serial =
         {
-            uint64_t k_local = 2 * half;
-
-            for(uint64_t pos_base = pos; pos_base < pos + k; pos_base += k_local)
-            {
-                for(uint64_t i = 0; i < half; i++)
-                {
-                    uint64_t pos_1 = (pos_base + i) * n;
-                    uint64_t pos_2 = (pos_base + i + half) * n;
-
-                    num_ssm_shr_mod(num_aux, num, pos_2, n, i * bits_local);
-
-                    num_ssm_butterfly(num_aux, num, pos_1, pos_2, n);
-                }
-            }
-
-            bits_local /= 2;
-        }
+            .num_aux = num_aux,
+            .num = num,
+            .pos = pos,
+            .n = n,
+            .k = k,
+            .bits = bits,
+            .worker = 0,
+            .workers = 1,
+        };
+        ssm_fft_inv_split_worker(&serial);
         return;
     }
 
@@ -3322,35 +3415,46 @@ static void num_ssm_fft_inv_rec(
 
     free(split_args);
 
-    ssm_fft_inv_stage_worker_t * worker_args = malloc(workers * sizeof(*worker_args));
+    ssm_fft_inv_pass_worker_t * worker_args = malloc(workers * sizeof(*worker_args));
     assert(worker_args)
 
-    for(uint64_t half = k / split; half <= k / 2; half *= 2)
-    {
-        uint64_t k_local = 2 * half;
-        uint64_t bits_local = (bits * k) / k_local;
+    uint64_t stages_left = (uint64_t)stdc_bit_width(split) - 1;
+    uint64_t gl = k / split;
 
-        for(uint64_t w=0; w<workers; w++)
+    while(stages_left)
+    {
+        uint64_t r = ssm_fft_fuse_bits(n, stages_left);
+        uint64_t blocks = k >> r;
+        uint64_t pass_workers = workers < blocks ? workers : blocks;
+
+        for(uint64_t w=0; w<pass_workers; w++)
         {
             uint64_t idx_start, idx_end;
-            ssm_worker_range(w, workers, k / 2, &idx_start, &idx_end);
+            ssm_worker_range(w, pass_workers, blocks, &idx_start, &idx_end);
 
-            worker_args[w].num_aux = worker_aux[w];
-            worker_args[w].num = num;
-            worker_args[w].pos = pos;
-            worker_args[w].n = n;
-            worker_args[w].half = half;
-            worker_args[w].k_local = k_local;
-            worker_args[w].bits_local = bits_local;
-            worker_args[w].idx_start = idx_start;
-            worker_args[w].idx_end = idx_end;
+            worker_args[w] = (ssm_fft_inv_pass_worker_t)
+            {
+                .num_aux = worker_aux[w],
+                .num = num,
+                .pos = pos,
+                .n = n,
+                .k = k,
+                .bits = bits,
+                .gl = gl,
+                .r = r,
+                .idx_start = idx_start,
+                .idx_end = idx_end,
+            };
 
-            TREAT(pthread_create(&worker_ids[w], nullptr, ssm_fft_inv_stage_worker, &worker_args[w]))
+            TREAT(pthread_create(&worker_ids[w], nullptr, ssm_fft_inv_pass_worker, &worker_args[w]))
         }
-        for(uint64_t w=0; w<workers; w++)
+        for(uint64_t w=0; w<pass_workers; w++)
         {
             TREAT(pthread_join(worker_ids[w], nullptr))
         }
+
+        stages_left -= r;
+        gl <<= r;
     }
 
     for(uint64_t w=0; w<workers; w++)

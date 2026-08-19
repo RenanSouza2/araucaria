@@ -3000,6 +3000,16 @@ static void test_fuzz_num_ssm_fft(bool show)
     TEST_FUZZ_NUM_SSM_FFT_THREADS(10, 25, 128, 100, 6)
     TEST_FUZZ_NUM_SSM_FFT_THREADS(11, 25, 128, 100, 7)
 
+    // n large enough that ssm_fft_block_bytes caps how many stages a pass fuses, and
+    // K large enough that the cap forces more than one pass. Every case above has a
+    // small enough n to fuse a whole phase in a single pass, which never exercises
+    // the pass loop or the stride arithmetic carried across a pass boundary. These
+    // fuse 4, 2 and 1 stages per pass respectively - the last being the degenerate
+    // "two elements don't fit, so fuse nothing" path, which is one stage per pass.
+    TEST_FUZZ_NUM_SSM_FFT_THREADS(12, 4097, 256, 3, 4)
+    TEST_FUZZ_NUM_SSM_FFT_THREADS(13, 16385, 64, 3, 4)
+    TEST_FUZZ_NUM_SSM_FFT_THREADS(14, 65537, 16, 2, 4)
+
     #undef TEST_FUZZ_NUM_SSM_FFT_THREADS
 
     TEST_FN_CLOSE
