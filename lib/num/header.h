@@ -14,6 +14,7 @@ bool araucaria_disk_config_is_set();
 uint64_t araucaria_disk_config_get_threshold_bytes();
 
 void num_display_dec(num_p num);
+void num_display_dec_threads(num_p num, uint64_t threads);
 void num_display(num_p num);
 void num_display_tag(const char tag[], num_p num);
 void num_display_full(const char tag[], num_p num);
@@ -50,6 +51,7 @@ uint64_t num_mul_estimate_memory(
     uint64_t threads
 );
 num_p num_pow(num_p num, uint64_t value);
+num_p num_pow_threads(num_p num, uint64_t value, uint64_t threads);
 num_p num_sqr(num_p num);
 num_p num_sqr_threads(num_p num, uint64_t threads);
 void num_div_mod(
@@ -72,6 +74,7 @@ num_p num_mod_threads(num_p num_1, num_p num_2, uint64_t threads);
 num_p num_gcd(num_p num_1, num_p num_2);
 
 num_p num_base_to(num_p num, uint64_t base);
+num_p num_base_to_threads(num_p num, uint64_t base, uint64_t threads);
 num_p num_base_from(num_p num, uint64_t base);
 
 #endif
