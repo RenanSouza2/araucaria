@@ -4805,39 +4805,46 @@ static bool mul_is_classic(uint64_t count_1, uint64_t count_2)
 // plus a 2n-limb scratch buffer (see num_ssm_fft_fwd_split), measured at roughly
 // 0.1 ms per worker on top of a ~0.3 ms fixed cost. A small multiply is therefore
 // slower threaded than not, and how much threading a given size can carry has to be
-// read off the size itself. Measured solo on an i7-10700 (8 cores / 16 SMT), num_mul
-// speedup against a single thread:
+// read off the size itself. Measured solo on an Apple M2 (8 performance cores, no
+// SMT), num_mul speedup against a single thread:
 //
-//     limbs      1x     2x     4x     8x    16x     best
-//      4275    1.00   0.93   0.95   0.57   0.31        1
-//      8550    1.00   1.20   1.44   1.08   0.65        4
-//     17099    1.00   1.45   2.25   2.32   1.55        4-8
-//     34197    1.00   1.58   2.61   3.49   2.73        8
-//     68393    1.00   1.71   2.94   4.48   3.81        8
-//    136786    1.00   1.82   3.29   5.31   5.31        8-16
-//    273572    1.00   1.86   3.44   5.72   6.01       16
-//   1094287    1.00   1.82   3.37   4.54   5.53       16
-//   8754291    1.00   1.85   2.96   4.16   4.89       16
+//     limbs      1x     2x     4x     8x     best
+//       256    1.00   0.35   0.37   0.17        1
+//       512    1.00   0.57   0.46   0.27        1
+//      1024    1.00   0.77   0.66   0.44        1
+//      2048    1.00   1.14   0.90   0.89        1-2
+//      4096    1.00   1.25   1.53   1.34        4
+//      8192    1.00   1.70   2.59   2.62        4-8
+//     16384    1.00   1.76   2.92   3.08        8
+//     32768    1.00   1.83   3.40   3.70        8
+//    131072    1.00   1.93   3.62   4.33        8
+//    524288    1.00   2.01   3.77   5.04        8
 //
 // Three things follow, and the rule below is exactly those three:
 //
-//   - Below ~8k limbs nothing beats one thread, so gate on that outright.
+//   - Below ~4k limbs nothing beats one thread, so gate on that outright.
 //   - Above it the affordable thread count grows like sqrt(count), not linearly.
 //     Each added worker saves a shrinking slice of work against a fixed cost, so the
-//     8th thread starts paying at ~34k limbs while the 16th only pays from ~131k. A
-//     linear limbs-per-thread rule cannot express both ends: the previous constant
-//     (16384 limbs per thread) was fitted to the 16-thread end, and consequently
-//     allowed a single thread at 17k limbs where four ran 2.25x faster.
+//     4th thread starts paying at ~4k limbs while the 8th only pays from ~16k -- this
+//     machine has no more physical cores to show where the next doubling would land.
+//     A linear limbs-per-thread rule cannot express both ends: a flat divisor fitted
+//     to the low end (e.g. 2048 limbs/thread) would over-thread the low-to-mid range
+//     just as readily as one fitted to the high end under-threads it.
 //   - Only powers of two divide the transform. num_ssm_fft_fwd_split hands its
 //     recursive phase B(stdc_bit_width(workers) - 1) workers -- the power-of-two
 //     floor -- while still allocating scratch for every worker asked for, so 3
 //     threads time like 2 and 6 like 4 while paying the extra buffers. Rounding the
 //     ceiling down means a caller asking for more can never land on one of those.
 //
-// Both constants are fitted to the table above on one machine, not derived. Re-run
+// Both constants are fitted to the table above on one machine, not derived, and
+// don't carry over even between two 8-core machines: an earlier pass at these two
+// constants (8192 limbs-to-thread, 512 limbs-per-thread-sq) was fitted on an
+// i7-10700 (8 cores / 16 SMT) and, measured here, forced single-threading all the
+// way through the ~4k-8k range where this machine's 4 threads run 53% faster, and
+// under-allocated at 16k (capped at 4 threads against an 8-thread optimum). Re-run
 // src/main.c's time_threads_mul_sweep on new hardware before trusting them there.
-constexpr uint64_t mul_min_limbs_to_thread = 8192;
-constexpr uint64_t mul_limbs_per_thread_sq = 512;
+constexpr uint64_t mul_min_limbs_to_thread = 4096;
+constexpr uint64_t mul_limbs_per_thread_sq = 256;
 
 // Public so a caller scheduling whole multiplications can size a thread request
 // against the same limit num_mul_core would silently clamp it to, instead of
@@ -5959,7 +5966,7 @@ static void * num_base_to_worker(void * arg)
 // division's internal multiply funnels through) re-derives its own ceiling from
 // operand size on every call regardless of what's requested, the same reason
 // num_div_mod_bz_rec's per-level calls don't over-thread either (see
-// mul_threads_ceiling's comment).
+// num_mul_threads_ceiling's comment).
 static num_p num_base_to_rec(num_p num, num_p num_bases[], uint64_t i, uint64_t threads)
 {
     CLU_HANDLER_IS_SAFE(num);
