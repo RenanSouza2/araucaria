@@ -1,8 +1,3 @@
-<<<<<<< HEAD
-=======
-#define _GNU_SOURCE
-
->>>>>>> d55857ce0e364116f85f5e8e9420b12e4af1ea0a
 #include <stdlib.h>
 #include <unistd.h>
 #include <sys/mman.h>

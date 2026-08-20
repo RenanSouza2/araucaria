@@ -6045,7 +6045,7 @@ num_p num_base_to_threads(num_p num, uint64_t base, uint64_t threads)
         return num;
     }
 
-    uint64_t ceiling = mul_threads_ceiling(num->count, num->count);
+    uint64_t ceiling = num_mul_threads_ceiling(num->count, num->count);
     if(threads > ceiling)
     {
         threads = ceiling;
