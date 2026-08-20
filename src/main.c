@@ -1,8 +1,3 @@
-// sched_setaffinity and cpu_set_t are GNU extensions that -D_POSIX_C_SOURCE alone
-// hides, and time_procs_mul needs them to pin one child per processor. Kept to this
-// translation unit rather than added to the library's flags, and harmless elsewhere.
-#define _GNU_SOURCE
-
 #include <stdlib.h>
 #include <unistd.h>
 #include <sys/mman.h>
