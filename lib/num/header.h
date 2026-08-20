@@ -43,6 +43,7 @@ num_p num_add(num_p num_1, num_p num_2);
 num_p num_sub(num_p num_1, num_p num_2);
 num_p num_mul(num_p num_1, num_p num_2);
 num_p num_mul_threads(num_p num_1, num_p num_2, uint64_t threads);
+uint64_t num_mul_threads_ceiling(uint64_t count_1, uint64_t count_2);
 uint64_t num_mul_estimate_memory(
     uint64_t count_1,
     uint64_t count_2,

@@ -4785,13 +4785,58 @@ static bool mul_is_classic(uint64_t count_1, uint64_t count_2)
     return (bool)((count_1 < threshold) || (count_2 < threshold));
 }
 
-constexpr uint64_t mul_min_limbs_per_thread = 16384;
+// Threading a multiplication is not free: every worker costs a pthread_create/join
+// plus a 2n-limb scratch buffer (see num_ssm_fft_fwd_split), measured at roughly
+// 0.1 ms per worker on top of a ~0.3 ms fixed cost. A small multiply is therefore
+// slower threaded than not, and how much threading a given size can carry has to be
+// read off the size itself. Measured solo on an i7-10700 (8 cores / 16 SMT), num_mul
+// speedup against a single thread:
+//
+//     limbs      1x     2x     4x     8x    16x     best
+//      4275    1.00   0.93   0.95   0.57   0.31        1
+//      8550    1.00   1.20   1.44   1.08   0.65        4
+//     17099    1.00   1.45   2.25   2.32   1.55        4-8
+//     34197    1.00   1.58   2.61   3.49   2.73        8
+//     68393    1.00   1.71   2.94   4.48   3.81        8
+//    136786    1.00   1.82   3.29   5.31   5.31        8-16
+//    273572    1.00   1.86   3.44   5.72   6.01       16
+//   1094287    1.00   1.82   3.37   4.54   5.53       16
+//   8754291    1.00   1.85   2.96   4.16   4.89       16
+//
+// Three things follow, and the rule below is exactly those three:
+//
+//   - Below ~8k limbs nothing beats one thread, so gate on that outright.
+//   - Above it the affordable thread count grows like sqrt(count), not linearly.
+//     Each added worker saves a shrinking slice of work against a fixed cost, so the
+//     8th thread starts paying at ~34k limbs while the 16th only pays from ~131k. A
+//     linear limbs-per-thread rule cannot express both ends: the previous constant
+//     (16384 limbs per thread) was fitted to the 16-thread end, and consequently
+//     allowed a single thread at 17k limbs where four ran 2.25x faster.
+//   - Only powers of two divide the transform. num_ssm_fft_fwd_split hands its
+//     recursive phase B(stdc_bit_width(workers) - 1) workers -- the power-of-two
+//     floor -- while still allocating scratch for every worker asked for, so 3
+//     threads time like 2 and 6 like 4 while paying the extra buffers. Rounding the
+//     ceiling down means a caller asking for more can never land on one of those.
+//
+// Both constants are fitted to the table above on one machine, not derived. Re-run
+// src/main.c's time_threads_mul_sweep on new hardware before trusting them there.
+constexpr uint64_t mul_min_limbs_to_thread = 8192;
+constexpr uint64_t mul_limbs_per_thread_sq = 512;
 
-static uint64_t mul_threads_ceiling(uint64_t count_1, uint64_t count_2)
+// Public so a caller scheduling whole multiplications can size a thread request
+// against the same limit num_mul_core would silently clamp it to, instead of
+// duplicating the constants above on its side.
+uint64_t num_mul_threads_ceiling(uint64_t count_1, uint64_t count_2)
 {
     uint64_t count = count_1 < count_2 ? count_1 : count_2;
-    uint64_t ceiling = count / mul_min_limbs_per_thread;
-    return ceiling ? ceiling : 1;
+    if(count < mul_min_limbs_to_thread)
+    {
+        return 1;
+    }
+
+    // Largest power of two t with mul_limbs_per_thread_sq * t * t <= count.
+    uint64_t squares = count / mul_limbs_per_thread_sq;
+    return B(((uint64_t)stdc_bit_width(squares) - 1) / 2);
 }
 
 num_p num_mul_core(num_p num_1, num_p num_2, bool free_inputs, uint64_t threads)
@@ -4822,7 +4867,7 @@ num_p num_mul_core(num_p num_1, num_p num_2, bool free_inputs, uint64_t threads)
         return num_res;
     }
 
-    uint64_t ceiling = mul_threads_ceiling(num_1->count, num_2->count);
+    uint64_t ceiling = num_mul_threads_ceiling(num_1->count, num_2->count);
     if(threads > ceiling)
     {
         threads = ceiling;
@@ -5680,7 +5725,7 @@ static num_p num_sqr_core(num_p num, uint64_t threads)
         return num_sqr_classic(num);
     }
 
-    uint64_t ceiling = mul_threads_ceiling(num->count, num->count);
+    uint64_t ceiling = num_mul_threads_ceiling(num->count, num->count);
     if(threads > ceiling)
     {
         threads = ceiling;
