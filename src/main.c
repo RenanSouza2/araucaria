@@ -1,3 +1,8 @@
+<<<<<<< HEAD
+=======
+#define _GNU_SOURCE
+
+>>>>>>> d55857ce0e364116f85f5e8e9420b12e4af1ea0a
 #include <stdlib.h>
 #include <unistd.h>
 #include <sys/mman.h>
@@ -875,7 +880,6 @@ static void time_assembly_div()
 
     tprintf("base: " U64P() "", base);
 
-    // Generate a massive dividend (num_1) and a divisor roughly half its size (num_2)
     num_p num_2 = num_generate_1(base, 2);
     num_p num_1 = num_generate_1(base + 1, 3);
 
@@ -919,9 +923,6 @@ static void time_threads_div()
 
     tprintf("base: " U64P() "", base);
 
-    // Divisor roughly half the dividend's size (num_1 is one generation ahead of
-    // num_2 in num_generate_1's doubling growth), large enough to hit the
-    // Burnikel-Ziegler recursion's SSM-sized multiply.
     num_p num_2 = num_generate_1(base, 2);
     num_p num_1 = num_generate_1(base + 1, 3);
 
@@ -968,15 +969,8 @@ static void time_threads_div()
 }
 
 
-// Logical processors per physical core. The logical processors of one core are
-// adjacent here -- core c owns CPUs 2c and 2c+1, per
-// /sys/devices/system/cpu/cpuN/topology/thread_siblings_list -- so a naive "worker i
-// on CPU i" doubles workers onto half the cores before touching the other half.
 constexpr uint64_t processor_siblings = 2;
 
-// Processor for the INDEX-th worker, taking one logical processor per physical core
-// before doubling up on siblings. Beyond the core count it wraps onto the siblings,
-// so the first half of the workers get a core each and the second half share.
 static uint64_t processor_of(uint64_t index)
 {
     uint64_t cores = (uint64_t)sysconf(_SC_NPROCESSORS_ONLN) / processor_siblings;
@@ -987,11 +981,6 @@ static uint64_t processor_of(uint64_t index)
     return (processor_siblings * (index - cores)) + 1;
 }
 
-// Pin the calling process to one processor. pinhao's forked workers do this through
-// fork_lock_processor in its own copy of mods/macros; araucaria's vendored copy of
-// that submodule predates the function, so it lives here rather than diverging the
-// two copies. Note this repo's assert always evaluates its condition (mods/macros/
-// assert.h undefines the standard one), so the call is not compiled out of release.
 static void lock_processor([[maybe_unused]] uint64_t index)
 {
 #if defined(__linux__)
@@ -1015,17 +1004,6 @@ static void lock_processor([[maybe_unused]] uint64_t index)
 }
 
 
-// How much a single-threaded multiply slows down when other processes are doing the
-// same thing at the same time. This is the shape pinhao runs in -- lib/big and
-// lib/tree fork one process per core and each works on its own numbers -- so the
-// per-process cost under concurrency matters more there than the solo cost measured
-// by time_threads_mul.
-//
-// Children are forked from a parent that already holds the operands, so they inherit
-// them copy-on-write exactly as pinhao's children do, and each is pinned to its own
-// processor. Every child re-checks its product against a reference the parent built
-// before forking, so a run that is fast because it computed the wrong thing fails
-// instead of reporting a number.
 [[maybe_unused]]
 static void time_procs_mul()
 {
@@ -1048,8 +1026,6 @@ static void time_procs_mul()
     constexpr uint64_t procs_max = 16;
     uint64_t proc_counts[] = {1, 2, 4, 8, 16};
 
-    // A child's heap is its own after the fork, so timings come back through a shared
-    // anonymous mapping rather than a plain array.
     double * times = mmap(
         nullptr,
         procs_max * sizeof(double),
@@ -1129,11 +1105,6 @@ static void time_procs_mul()
 
 
 
-// Restricts the calling process -- and so every thread it creates afterwards -- to
-// THREADS logical processors, either packed (both siblings of a core before moving
-// on) or spread (one sibling per core). Linux only: macOS has no process-wide
-// affinity mask, and its per-thread affinity is only a hint, so time_smt_mul reports
-// the same placement twice there rather than pretending to measure something.
 [[maybe_unused]]
 static void affinity_span([[maybe_unused]] uint64_t threads, [[maybe_unused]] bool spread)
 {
@@ -1166,25 +1137,6 @@ static void affinity_all()
 #endif
 }
 
-// The same multiply at the same thread count, placed two ways: packed onto the
-// fewest physical cores (both siblings of each) or spread one thread per core. The
-// thread count and the work are identical, so the difference is what a second thread
-// on the same core costs -- issue slots, L1 and L2 -- against what a second core
-// buys.
-//
-// The two thread counts answer different halves of the question. At 8 threads the
-// packed placement uses 4 cores and the spread one uses 8, which is the headline
-// effect but also changes how many cores are lit and therefore the clock. At 2
-// threads so few cores are active either way that the clock is nearly the same, so
-// that pair isolates the sibling-sharing cost on its own.
-//
-// This only measures anything where the affinity mask actually decides which
-// physical core a thread lands on. Under WSL2 it does not: the guest topology is
-// synthetic and the hypervisor floats vCPUs, so both placements return the same time
-// and the comparison is vacuous. Check before trusting a null result here -- pin two
-// copies of a small compute-bound loop to a CPU and to its listed sibling, and if
-// that pair is not roughly twice as slow as the pair on two listed cores, the
-// affinity mask is not controlling placement and this benchmark cannot see anything.
 [[maybe_unused]]
 static void time_smt_mul()
 {

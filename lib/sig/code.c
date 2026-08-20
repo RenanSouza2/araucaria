@@ -432,11 +432,16 @@ static uint64_t sig_signal_mul(uint64_t signal_1, uint64_t signal_2)
 
 sig_num_t sig_num_mul(sig_num_t sig_1, sig_num_t sig_2)
 {
+    return sig_num_mul_threads(sig_1, sig_2, 1);
+}
+
+sig_num_t sig_num_mul_threads(sig_num_t sig_1, sig_num_t sig_2, uint64_t threads)
+{
     CLU_SIG_IS_SAFE(sig_1);
     CLU_SIG_IS_SAFE(sig_2);
 
     uint64_t signal_res = sig_signal_mul(sig_1.signal, sig_2.signal);
-    num_p num_res = num_mul(sig_1.num, sig_2.num);
+    num_p num_res = num_mul_threads(sig_1.num, sig_2.num, threads);
     return sig_num_create(signal_res, num_res);
 }
 
@@ -450,11 +455,16 @@ sig_num_t sig_num_sqr(sig_num_t sig) // TODO test
 
 sig_num_t sig_num_div(sig_num_t sig_1, sig_num_t sig_2)
 {
+    return sig_num_div_threads(sig_1, sig_2, 1);
+}
+
+sig_num_t sig_num_div_threads(sig_num_t sig_1, sig_num_t sig_2, uint64_t threads)
+{
     CLU_SIG_IS_SAFE(sig_1);
     CLU_SIG_IS_SAFE(sig_2);
 
     uint64_t signal_res = sig_signal_mul(sig_1.signal, sig_2.signal);
-    num_p num_res = num_div(sig_1.num, sig_2.num);
+    num_p num_res = num_div_threads(sig_1.num, sig_2.num, threads);
     return sig_num_create(signal_res, num_res);
 }
 

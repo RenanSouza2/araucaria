@@ -24,9 +24,6 @@ sig_num_t sig_num_wrap_str(const char str[]);
 sig_num_t sig_num_copy(sig_num_t sig);
 sig_num_t sig_num_realloc_disk(sig_num_t sig);
 
-// sig_num_head_grow, sig_num_head_trim moved to internal.h - sibling
-// lib/* use only.
-
 bool sig_num_is_zero(sig_num_t sig);
 int64_t sig_num_cmp(sig_num_t sig_1, sig_num_t sig_2);
 
@@ -37,8 +34,10 @@ sig_num_t sig_num_opposite(sig_num_t sig);
 sig_num_t sig_num_add(sig_num_t sig_1, sig_num_t sig_2);
 sig_num_t sig_num_sub(sig_num_t sig_1, sig_num_t sig_2);
 sig_num_t sig_num_mul(sig_num_t sig_1, sig_num_t sig_2);
+sig_num_t sig_num_mul_threads(sig_num_t sig_1, sig_num_t sig_2, uint64_t threads);
 sig_num_t sig_num_sqr(sig_num_t sig);
 sig_num_t sig_num_div(sig_num_t sig_1, sig_num_t sig_2);
+sig_num_t sig_num_div_threads(sig_num_t sig_1, sig_num_t sig_2, uint64_t threads);
 
 sig_num_t sig_num_mul_int(sig_num_t sig, int64_t value);
 

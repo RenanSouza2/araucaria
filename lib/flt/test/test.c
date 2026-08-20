@@ -509,6 +509,265 @@ static void test_flt_num_div_sig(bool show)
 }
 
 
+constexpr uint64_t threads_mul_count = 65536;
+constexpr uint64_t threads_mul_n = 4;
+constexpr uint64_t threads_div_count = 32768;
+constexpr uint64_t threads_div_n = 2;
+
+static void test_flt_num_mul_threads(bool show)
+{
+    TEST_FN_OPEN
+
+    #define TEST_FLT_NUM_MUL_THREADS(TAG, FLT_1, FLT_2, THREADS, RES) \
+    {                                                                 \
+        TEST_CASE_OPEN(TAG)                                           \
+        {                                                             \
+            flt_num_t flt = flt_num_mul_threads(                      \
+                flt_num_create_immed(ARG_OPEN FLT_1),                 \
+                flt_num_create_immed(ARG_OPEN FLT_2),                 \
+                THREADS                                               \
+            );                                                        \
+            assert(flt_num_immed(flt, ARG_OPEN RES))                  \
+        }                                                             \
+        TEST_CASE_CLOSE                                               \
+    }
+
+    TEST_FLT_NUM_MUL_THREADS(1,
+        FLT_NUM_ZERO(2), FLT_NUM_ZERO(2), 4,
+        (0, 2, ZERO, 0)
+    );
+    TEST_FLT_NUM_MUL_THREADS(2,
+        FLT_NUM_ZERO(2), (-1, 2, POSITIVE, 2, 1, 0), 4,
+        (-1, 2, ZERO, 0)
+    );
+    TEST_FLT_NUM_MUL_THREADS(3,
+        (-1, 2, POSITIVE, 2, 1, 0), FLT_NUM_ZERO(2), 4,
+        (-1, 2, ZERO, 0)
+    );
+    TEST_FLT_NUM_MUL_THREADS(4,
+        (-1, 2, POSITIVE, 2, 1, 0), (-1, 2, POSITIVE, 2, 1, 0), 4,
+        (-1, 2, POSITIVE, 2, 1, 0)
+    );
+    TEST_FLT_NUM_MUL_THREADS(5,
+        (-1, 2, NEGATIVE, 2, 1, 0), (-1, 2, POSITIVE, 2, 1, 0), 4,
+        (-1, 2, NEGATIVE, 2, 1, 0)
+    );
+    TEST_FLT_NUM_MUL_THREADS(6,
+        (-1, 2, POSITIVE, 2, 1, 0), (-1, 2, POSITIVE, 2, 1, 0), 1,
+        (-1, 2, POSITIVE, 2, 1, 0)
+    );
+
+    #undef TEST_FLT_NUM_MUL_THREADS
+
+    TEST_CASE_OPEN_TIMEOUT(7, 0)
+    {
+        flt_num_t flt_1 = flt_num_create_rand(0, threads_mul_count);
+        flt_num_t flt_2 = flt_num_create_rand(0, threads_mul_count);
+
+        flt_num_t ref = flt_num_mul(flt_num_copy(flt_1), flt_num_copy(flt_2));
+        flt_num_t thr = flt_num_mul_threads(
+            flt_num_copy(flt_1),
+            flt_num_copy(flt_2),
+            threads_mul_n
+        );
+        assert(flt_num_eq_dbg(ref, thr));
+
+        flt_num_free(flt_1);
+        flt_num_free(flt_2);
+    }
+    TEST_CASE_CLOSE
+
+    TEST_FN_CLOSE
+}
+
+static void test_flt_num_div_threads(bool show)
+{
+    TEST_FN_OPEN
+
+    #define TEST_FLT_NUM_DIV_THREADS(TAG, FLT_1, FLT_2, THREADS, RES) \
+    {                                                                 \
+        TEST_CASE_OPEN(TAG)                                           \
+        {                                                             \
+            flt_num_t flt = flt_num_div_threads(                      \
+                flt_num_create_immed(ARG_OPEN FLT_1),                 \
+                flt_num_create_immed(ARG_OPEN FLT_2),                 \
+                THREADS                                               \
+            );                                                        \
+            assert(flt_num_immed(flt, ARG_OPEN RES))                  \
+        }                                                             \
+        TEST_CASE_CLOSE                                               \
+    }
+
+    TEST_FLT_NUM_DIV_THREADS(1,
+        (-1, 2, POSITIVE, 2, 6, 0), (-1, 2, POSITIVE, 2, 3, 0), 4,
+        (-1, 2, POSITIVE, 2, 2, 0)
+    );
+    TEST_FLT_NUM_DIV_THREADS(2,
+        (-1, 2, NEGATIVE, 2, 6, 0), (-1, 2, POSITIVE, 2, 3, 0), 4,
+        (-1, 2, NEGATIVE, 2, 2, 0)
+    );
+    TEST_FLT_NUM_DIV_THREADS(3,
+        (-1, 2, POSITIVE, 2, 6, 0), (-1, 2, POSITIVE, 2, 3, 0), 1,
+        (-1, 2, POSITIVE, 2, 2, 0)
+    );
+
+    #undef TEST_FLT_NUM_DIV_THREADS
+
+    TEST_CASE_OPEN_TIMEOUT(4, 0)
+    {
+        flt_num_t flt_1 = flt_num_create_rand(0, threads_div_count);
+        flt_num_t flt_2 = flt_num_create_rand(0, threads_div_count);
+
+        flt_num_t ref = flt_num_div(flt_num_copy(flt_1), flt_num_copy(flt_2));
+        flt_num_t thr = flt_num_div_threads(
+            flt_num_copy(flt_1),
+            flt_num_copy(flt_2),
+            threads_div_n
+        );
+        assert(flt_num_eq_dbg(ref, thr));
+
+        flt_num_free(flt_1);
+        flt_num_free(flt_2);
+    }
+    TEST_CASE_CLOSE
+
+    TEST_FN_CLOSE
+}
+
+static void test_flt_num_mul_sig_threads(bool show)
+{
+    TEST_FN_OPEN
+
+    #define TEST_FLT_NUM_MUL_SIG_THREADS(TAG, FLT, SIG, THREADS, RES) \
+    {                                                                 \
+        TEST_CASE_OPEN(TAG)                                           \
+        {                                                             \
+            flt_num_t flt = flt_num_mul_sig_threads(                  \
+                flt_num_create_immed(ARG_OPEN FLT),                   \
+                sig_num_create_immed(ARG_OPEN SIG),                   \
+                THREADS                                               \
+            );                                                        \
+            assert(flt_num_immed(flt, ARG_OPEN RES))                  \
+        }                                                             \
+        TEST_CASE_CLOSE                                               \
+    }
+
+    TEST_FLT_NUM_MUL_SIG_THREADS(1,
+        (0, 2, POSITIVE, 2, 6, 0), (POSITIVE, 1, 3), 4,
+        (0, 2, POSITIVE, 2, 18, 0)
+    );
+    TEST_FLT_NUM_MUL_SIG_THREADS(2,
+        (0, 2, POSITIVE, 2, 6, 0), (NEGATIVE, 1, 3), 4,
+        (0, 2, NEGATIVE, 2, 18, 0)
+    );
+    TEST_FLT_NUM_MUL_SIG_THREADS(3,
+        (0, 2, POSITIVE, 2, 6, 0), (ZERO, 0), 4,
+        (0, 2, ZERO, 0)
+    );
+    TEST_FLT_NUM_MUL_SIG_THREADS(4,
+        FLT_NUM_ZERO(2), (POSITIVE, 1, 3), 4,
+        (0, 2, ZERO, 0)
+    );
+    TEST_FLT_NUM_MUL_SIG_THREADS(5,
+        (0, 2, POSITIVE, 2, 6, 0), (POSITIVE, 1, 3), 1,
+        (0, 2, POSITIVE, 2, 18, 0)
+    );
+
+    TEST_FLT_NUM_MUL_SIG_THREADS(6,
+        (0, 2, POSITIVE, 2, 6, 0), (POSITIVE, 2, 5, 0), 4,
+        (1, 2, POSITIVE, 2, 30, 0)
+    );
+    TEST_FLT_NUM_MUL_SIG_THREADS(7,
+        (0, 2, NEGATIVE, 2, 6, 0), (POSITIVE, 2, 5, 0), 4,
+        (1, 2, NEGATIVE, 2, 30, 0)
+    );
+
+    #undef TEST_FLT_NUM_MUL_SIG_THREADS
+
+    TEST_CASE_OPEN_TIMEOUT(8, 0)
+    {
+        flt_num_t flt = flt_num_create_rand(0, threads_mul_count);
+        sig_num_t sig = sig_num_create_rand(threads_mul_count);
+
+        flt_num_t ref = flt_num_mul_sig(flt_num_copy(flt), sig_num_copy(sig));
+        flt_num_t thr = flt_num_mul_sig_threads(
+            flt_num_copy(flt),
+            sig_num_copy(sig),
+            threads_mul_n
+        );
+        assert(flt_num_eq_dbg(ref, thr));
+
+        flt_num_free(flt);
+        sig_num_free(sig);
+    }
+    TEST_CASE_CLOSE
+
+    TEST_FN_CLOSE
+}
+
+static void test_flt_num_div_sig_threads(bool show)
+{
+    TEST_FN_OPEN
+
+    #define TEST_FLT_NUM_DIV_SIG_THREADS(TAG, FLT, SIG, THREADS, RES) \
+    {                                                                 \
+        TEST_CASE_OPEN(TAG)                                           \
+        {                                                             \
+            flt_num_t flt = flt_num_div_sig_threads(                  \
+                flt_num_create_immed(ARG_OPEN FLT),                   \
+                sig_num_create_immed(ARG_OPEN SIG),                   \
+                THREADS                                               \
+            );                                                        \
+            assert(flt_num_immed(flt, ARG_OPEN RES))                  \
+        }                                                             \
+        TEST_CASE_CLOSE                                               \
+    }
+
+    TEST_FLT_NUM_DIV_SIG_THREADS(1,
+        (0, 2, POSITIVE, 2, 6, 0), (POSITIVE, 1, 3), 4,
+        (0, 2, POSITIVE, 2, 2, 0)
+    );
+    TEST_FLT_NUM_DIV_SIG_THREADS(2,
+        (0, 2, POSITIVE, 2, 6, 0), (POSITIVE, 2, 3, 0), 4,
+        (-1, 2, POSITIVE, 2, 2, 0)
+    );
+    TEST_FLT_NUM_DIV_SIG_THREADS(3,
+        (0, 2, NEGATIVE, 2, 5, 0), (POSITIVE, 1, 3), 4,
+        (0, 2, NEGATIVE, 2, 1, 0xAAAAAAAAAAAAAAAA)
+    );
+    TEST_FLT_NUM_DIV_SIG_THREADS(4,
+        (0, 2, POSITIVE, 2, 6, 0), (POSITIVE, 1, 3), 1,
+        (0, 2, POSITIVE, 2, 2, 0)
+    );
+
+    TEST_FLT_NUM_DIV_SIG_THREADS(5,
+        (0, 2, POSITIVE, 2, 6, 0), (POSITIVE, 2, 5, 0), 4,
+        (-1, 2, POSITIVE, 2, 1, 0x3333333333333333)
+    );
+
+    #undef TEST_FLT_NUM_DIV_SIG_THREADS
+
+    TEST_CASE_OPEN_TIMEOUT(6, 0)
+    {
+        flt_num_t flt = flt_num_create_rand(0, threads_div_count);
+        sig_num_t sig = sig_num_create_rand(threads_div_count);
+
+        flt_num_t ref = flt_num_div_sig(flt_num_copy(flt), sig_num_copy(sig));
+        flt_num_t thr = flt_num_div_sig_threads(
+            flt_num_copy(flt),
+            sig_num_copy(sig),
+            threads_div_n
+        );
+        assert(flt_num_eq_dbg(ref, thr));
+
+        flt_num_free(flt);
+        sig_num_free(sig);
+    }
+    TEST_CASE_CLOSE
+
+    TEST_FN_CLOSE
+}
+
 
 static void test_flt()
 {
@@ -534,6 +793,11 @@ static void test_flt()
     test_flt_num_div(show);
 
     test_flt_num_div_sig(show);
+
+    test_flt_num_mul_threads(show);
+    test_flt_num_div_threads(show);
+    test_flt_num_mul_sig_threads(show);
+    test_flt_num_div_sig_threads(show);
 
     TEST_ASSERT_MEM_EMPTY
 }

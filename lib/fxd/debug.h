@@ -14,6 +14,7 @@ fxd_num_t fxd_num_create_immed(
     ...
 );
 
+bool fxd_num_eq_dbg(fxd_num_t fxd_1, fxd_num_t fxd_2);
 bool fxd_num_immed(
     fxd_num_t fxd,
     uint64_t pos,
