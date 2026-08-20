@@ -7,6 +7,7 @@
 #include "../file/struct.h"
 
 void fxd_num_display_dec(fxd_num_t fxd);
+void fxd_num_display_dec_threads(fxd_num_t fxd, uint64_t threads);
 void fxd_num_display(fxd_num_t fxd);
 void fxd_num_display_tag(const char tag[], fxd_num_t fxd);
 void fxd_num_display_full(fxd_num_t fxd);

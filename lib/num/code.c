@@ -261,11 +261,8 @@ uint64_t araucaria_disk_config_get_threshold_bytes()
 
 
 
-void num_display_dec(num_p num)
+static void num_display_dec_core(num_p num, uint64_t threads)
 {
-    CLU_HANDLER_IS_SAFE(num);
-    assert(num);
-
     if(num->count == 0)
     {
         printf("0");
@@ -273,7 +270,7 @@ void num_display_dec(num_p num)
     }
 
     constexpr uint64_t base = 1'000'000'000'000'000'000;
-    num = num_base_to(num_copy(num), base);
+    num = num_base_to_threads(num_copy(num), base, threads);
     printf(U64P(), num->chunk[num->count-1]);
     for(uint64_t i=num->count-2; i!=UINT64_MAX; i--)
     {
@@ -281,6 +278,25 @@ void num_display_dec(num_p num)
     }
 
     num_free(num);
+}
+
+void num_display_dec(num_p num)
+{
+    CLU_HANDLER_IS_SAFE(num);
+    assert(num);
+
+    num_display_dec_core(num, 1);
+}
+
+// Same as num_display_dec, but the caller picks how many threads the base
+// conversion (num_base_to_threads) may fan out across -- see its comment for how
+// the thread budget gets split across the conversion's recursion.
+void num_display_dec_threads(num_p num, uint64_t threads)
+{
+    CLU_HANDLER_IS_SAFE(num);
+    assert(num);
+
+    num_display_dec_core(num, threads);
 }
 
 void num_display_opts(num_p num, const char tag[], bool length, bool full)
@@ -4785,17 +4801,6 @@ static bool mul_is_classic(uint64_t count_1, uint64_t count_2)
     return (bool)((count_1 < threshold) || (count_2 < threshold));
 }
 
-// Threading a multiplication is not free: each worker costs a pthread_create/join
-// plus a 2n-limb scratch buffer (num_ssm_fft_fwd_split), so a small multiply is
-// slower threaded than not.
-//
-// Below mul_min_limbs_to_thread nothing beats one thread. Above it the affordable
-// count grows like sqrt(count). Only powers of two divide the transform --
-// num_ssm_fft_fwd_split uses the power-of-two floor of the workers asked for while
-// still allocating scratch for every one -- so the ceiling is rounded down.
-//
-// Both constants are fitted on one machine, not derived. Re-run src/main.c's
-// time_threads_mul_sweep on new hardware before trusting them there.
 constexpr uint64_t mul_min_limbs_to_thread = 8192;
 constexpr uint64_t mul_limbs_per_thread_sq = 512;
 
@@ -5725,11 +5730,8 @@ num_p num_sqr_threads(num_p num, uint64_t threads)
     return num_sqr_core(num, threads);
 }
 
-num_p num_pow(num_p num, uint64_t value) // TODO TEST
+static num_p num_pow_core(num_p num, uint64_t value, uint64_t threads)
 {
-    CLU_HANDLER_IS_SAFE(num);
-    assert(num);
-
     if(num->count == 0)
     {
         assert(value);
@@ -5739,14 +5741,32 @@ num_p num_pow(num_p num, uint64_t value) // TODO TEST
     num_p num_res = num_wrap(1);
     for(uint64_t mask = B(63); mask; mask >>= 1)
     {
-        num_res = num_sqr(num_res);
+        num_res = num_sqr_threads(num_res, threads);
         if(value & mask)
         {
-            num_res = num_mul(num_res, num_copy(num));
+            num_res = num_mul_threads(num_res, num_copy(num), threads);
         }
     }
     num_free(num);
     return num_res;
+}
+
+num_p num_pow(num_p num, uint64_t value) // TODO TEST
+{
+    CLU_HANDLER_IS_SAFE(num);
+    assert(num);
+
+    return num_pow_core(num, value, 1);
+}
+
+// Same as num_pow, but the caller picks how many threads each squaring/multiply
+// in the repeated-squaring loop may fan out across, same as num_mul_threads.
+num_p num_pow_threads(num_p num, uint64_t value, uint64_t threads) // TODO TEST
+{
+    CLU_HANDLER_IS_SAFE(num);
+    assert(num);
+
+    return num_pow_core(num, value, threads);
 }
 
 // out_num_q and out_num_r can be nullptr
@@ -5875,7 +5895,36 @@ num_p num_gcd(num_p num_1, num_p num_2)
 
 
 
-static num_p num_base_to_rec(num_p num, num_p num_bases[], uint64_t i)
+typedef struct
+{
+    num_p num;
+    num_p * num_bases;
+    uint64_t i;
+    uint64_t threads;
+    num_p result;
+} num_base_to_worker_t;
+
+static num_p num_base_to_rec(num_p num, num_p num_bases[], uint64_t i, uint64_t threads);
+
+static void * num_base_to_worker(void * arg)
+{
+    num_base_to_worker_t * w = arg;
+    w->result = num_base_to_rec(w->num, w->num_bases, w->i, w->threads);
+    return nullptr;
+}
+
+// Binary-splitting base conversion: each level divides num by base^(2^i), and the
+// resulting hi/lo halves (num_q, num_r) recurse independently of one another --
+// unlike num_div_mod_bz_rec's recursion, which stays on one call stack throughout,
+// this one can fork num_q's branch onto its own thread while num_r's runs on the
+// current one. threads is split in half per fork, on each branch's own share of
+// the recursion, and passed unsplit into num_div_mod_threads for the division at
+// this level -- safe to hand over in full because num_mul_core (the one place the
+// division's internal multiply funnels through) re-derives its own ceiling from
+// operand size on every call regardless of what's requested, the same reason
+// num_div_mod_bz_rec's per-level calls don't over-thread either (see
+// num_mul_threads_ceiling's comment).
+static num_p num_base_to_rec(num_p num, num_p num_bases[], uint64_t i, uint64_t threads)
 {
     CLU_HANDLER_IS_SAFE(num);
     assert(num);
@@ -5887,13 +5936,38 @@ static num_p num_base_to_rec(num_p num, num_p num_bases[], uint64_t i)
 
     if(num_cmp(num, num_bases[i]) < 0)
     {
-        return num_base_to_rec(num, num_bases, i - 1);
+        return num_base_to_rec(num, num_bases, i - 1, threads);
     }
 
     num_p num_q, num_r;
-    num_div_mod(&num_q, &num_r, num, num_copy(num_bases[i]));
-    num_q = num_base_to_rec(num_q, num_bases, i - 1);
-    num_r = num_base_to_rec(num_r, num_bases, i - 1);
+    num_div_mod_threads(&num_q, &num_r, num, num_copy(num_bases[i]), threads);
+
+    if(threads <= 1 || i == 0)
+    {
+        num_q = num_base_to_rec(num_q, num_bases, i - 1, threads);
+        num_r = num_base_to_rec(num_r, num_bases, i - 1, threads);
+    }
+    else
+    {
+        uint64_t threads_q = threads / 2;
+        uint64_t threads_r = threads - threads_q;
+
+        num_base_to_worker_t worker = (num_base_to_worker_t)
+        {
+            .num = num_q,
+            .num_bases = num_bases,
+            .i = i - 1,
+            .threads = threads_q,
+        };
+        pthread_t worker_id;
+        TREAT(pthread_create(&worker_id, nullptr, num_base_to_worker, &worker))
+
+        num_r = num_base_to_rec(num_r, num_bases, i - 1, threads_r);
+
+        TREAT(pthread_join(worker_id, nullptr))
+        num_q = worker.result;
+    }
+
     num_r = num_expand_to(num_r, B(i) + num_q->count);
     num_add_offset(num_r, B(i), num_q);
     num_free(num_q);
@@ -5901,6 +5975,17 @@ static num_p num_base_to_rec(num_p num, num_p num_bases[], uint64_t i)
 }
 
 num_p num_base_to(num_p num, uint64_t base)
+{
+    CLU_HANDLER_IS_SAFE(num);
+    assert(num);
+    assert(base > 1);
+
+    return num_base_to_threads(num, base, 1);
+}
+
+// Same as num_base_to, but the caller picks how many threads the conversion's
+// binary-splitting recursion may fan out across -- see num_base_to_rec's comment.
+num_p num_base_to_threads(num_p num, uint64_t base, uint64_t threads)
 {
     CLU_HANDLER_IS_SAFE(num);
     assert(num);
@@ -5924,7 +6009,13 @@ num_p num_base_to(num_p num, uint64_t base)
         return num;
     }
 
-    num_p num_res = num_base_to_rec(num, num_bases, max - 1);
+    uint64_t ceiling = num_mul_threads_ceiling(num->count, num->count);
+    if(threads > ceiling)
+    {
+        threads = ceiling;
+    }
+
+    num_p num_res = num_base_to_rec(num, num_bases, max - 1, threads);
 
     for(uint64_t i=0; i<max; i++)
     {

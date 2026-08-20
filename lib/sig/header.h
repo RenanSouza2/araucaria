@@ -11,6 +11,7 @@ void sig_num_display(sig_num_t sig, bool full);
 void sig_num_display_tag(const char tag[], sig_num_t sig);
 void sig_num_display_full(sig_num_t sig);
 void sig_num_display_dec(sig_num_t sig);
+void sig_num_display_dec_threads(sig_num_t sig, uint64_t threads);
 
 sig_num_t sig_num_create(uint64_t signal, num_p num);
 

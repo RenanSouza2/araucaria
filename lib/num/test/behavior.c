@@ -2777,6 +2777,43 @@ static void test_num_base_to(bool show)
     TEST_FN_CLOSE
 }
 
+static void test_fuzz_num_base_to_threads(bool show)
+{
+    TEST_FN_OPEN
+
+    // Same checks as test_num_base_to, but through the public num_base_to_threads
+    // entry point against the sequential num_base_to as oracle. COUNT needs to
+    // clear mul_threads_ceiling's per-thread limb floor (16384) for the fork in
+    // num_base_to_rec to actually trigger -- smaller sizes still exercise the
+    // threaded entry point, just via the threads<=1 fallback path.
+    //
+    // Kept well under test_fuzz_num_ssm_mul's 80000-limb case: base conversion
+    // does O(log n) divisions rather than one multiply, so at the same operand
+    // size it's a lot more work under ASan (confirmed separately with a plain
+    // -O3 build: correct and faster with threads out to 256000 limbs, but a
+    // debug/ASan run at 40000 limbs didn't finish in any reasonable time).
+    #define TEST_FUZZ_NUM_BASE_TO_THREADED(TAG, COUNT, RUNS, THREADS)          \
+    {                                                                          \
+        TEST_FUZZ_CASE_OPEN(TAG, RUNS)                                        \
+        {                                                                     \
+            fuzz_seed(_tag);                                                  \
+            num_p num = num_create_rand(COUNT);                              \
+            num_p num_res_1 = num_base_to_threads(num_copy(num), 10, THREADS); \
+            num_p num_res_2 = num_base_to(num, 10);                          \
+            assert(num_eq_dbg(num_res_1, num_res_2));                        \
+        }                                                                     \
+        TEST_FUZZ_CASE_CLOSE                                                  \
+    }
+
+    TEST_FUZZ_NUM_BASE_TO_THREADED(1, 2000, 5, 2)
+    TEST_FUZZ_NUM_BASE_TO_THREADED(2, 5000, 2, 4)
+    TEST_FUZZ_NUM_BASE_TO_THREADED(3, 5000, 1, 3)
+
+    #undef TEST_FUZZ_NUM_BASE_TO_THREADED
+
+    TEST_FN_CLOSE
+}
+
 static void test_num_base_from(bool show)
 {
     TEST_FN_OPEN
@@ -3263,6 +3300,7 @@ static void test_all(bool show)
     test_num_div_mod_uint(show);
 
     test_num_base_to(show);
+    test_fuzz_num_base_to_threads(show);
     test_num_base_from(show);
 
     test_fuzz_num_ssm_shift_round_trip(show);

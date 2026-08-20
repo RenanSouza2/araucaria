@@ -11,6 +11,7 @@
 void flt_num_display(flt_num_t flt);
 void flt_num_display_full(flt_num_t flt);
 void flt_num_display_dec(flt_num_t flt);
+void flt_num_display_dec_threads(flt_num_t flt, uint64_t threads);
 
 flt_num_t flt_num_wrap(int64_t value, uint64_t size);
 flt_num_t flt_num_wrap_num(num_p num, uint64_t size);

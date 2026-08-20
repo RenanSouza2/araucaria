@@ -144,6 +144,23 @@ void sig_num_display_dec(sig_num_t sig)
     num_display_dec(sig.num);
 }
 
+// Same as sig_num_display_dec, but the caller picks how many threads the
+// underlying num_display_dec_threads may fan out across.
+void sig_num_display_dec_threads(sig_num_t sig, uint64_t threads)
+{
+    CLU_SIG_IS_SAFE(sig);
+    assert(sig.num);
+
+    if(sig.signal == ZERO)
+    {
+        printf("  0");
+        return;
+    }
+
+    printf("%c ", sig.signal & POSITIVE ? '+': '-');
+    num_display_dec_threads(sig.num, threads);
+}
+
 
 
 sig_num_t sig_num_create(uint64_t signal, num_p num)
