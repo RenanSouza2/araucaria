@@ -51,6 +51,7 @@ uint64_t num_mul_estimate_memory(
     uint64_t disk_threshold_bytes,
     uint64_t threads
 );
+uint64_t num_estimate_ram_bytes(uint64_t count, uint64_t disk_threshold_bytes);
 num_p num_pow(num_p num, uint64_t value);
 num_p num_pow_threads(num_p num, uint64_t value, uint64_t threads);
 num_p num_sqr(num_p num);

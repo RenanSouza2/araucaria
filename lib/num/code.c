@@ -4947,17 +4947,27 @@ num_p num_mul_core(num_p num_1, num_p num_2, bool free_inputs, uint64_t threads)
 
 
 
-// 0 if disk_threshold_bytes would redirect this size to disk, matching
-// num_create's per-buffer check.
+// Fraction of the excess charged for a buffer num_create would mmap.
+constexpr double mem_disk_excess_fraction = 0.125;
+
+// Bytes past disk_threshold_bytes are reclaimable page cache: charged at a
+// fraction, never dropped, so this charge stays monotone in size.
 static double mem_estimate_ram_bytes(uint64_t size, uint64_t disk_threshold_bytes)
 {
     uint64_t bytes = sizeof(num_t) + (size * sizeof(uint64_t));
-    if(bytes > disk_threshold_bytes)
+    if(bytes <= disk_threshold_bytes)
     {
-        return 0.0;
+        return (double)bytes;
     }
 
-    return (double)bytes;
+    return (double)disk_threshold_bytes
+        + ((double)(bytes - disk_threshold_bytes) * mem_disk_excess_fraction);
+}
+
+// Bytes charged for one buffer of this limb count, on num_create's terms.
+uint64_t num_estimate_ram_bytes(uint64_t count, uint64_t disk_threshold_bytes)
+{
+    return (uint64_t)mem_estimate_ram_bytes(count, disk_threshold_bytes);
 }
 
 // Butterfly-count proxy for FFT cost; K is always a power of two here.
@@ -5022,10 +5032,10 @@ static mem_profile_t ssm_pointwise_mem_estimate(
     };
 }
 
-// Time-weighted average RAM (bytes) live during num_mul_threads, mirroring
-// num_mul_core's allocation sites. disk_threshold_bytes excludes buffers num_create
-// would put on disk; threads should match whatever will be passed to num_mul_threads.
-uint64_t num_mul_estimate_memory(
+// Integral and duration for one num_mul_threads, mirroring num_mul_core's
+// allocation sites. Returned unreduced so callers can compose a time-weighted
+// mean across sub products; averaging sub averages weights them all equally.
+static mem_profile_t mul_mem_profile(
     uint64_t count_1,
     uint64_t count_2,
     uint64_t disk_threshold_bytes,
@@ -5034,7 +5044,11 @@ uint64_t num_mul_estimate_memory(
 {
     if(count_1 == 0 || count_2 == 0)
     {
-        return sizeof(num_t) + sizeof(uint64_t);
+        return (mem_profile_t)
+        {
+            .integral = 0.0,
+            .duration = 0.0,
+        };
     }
 
     if(mul_is_classic(count_1, count_2))
@@ -5042,7 +5056,14 @@ uint64_t num_mul_estimate_memory(
         double bytes = mem_estimate_ram_bytes(count_1, disk_threshold_bytes)
             + mem_estimate_ram_bytes(count_2, disk_threshold_bytes)
             + mem_estimate_ram_bytes(count_1 + count_2, disk_threshold_bytes);
-        return (uint64_t)bytes;
+
+        // num_mul_classic is schoolbook: one word operation per limb pair
+        double dt = (double)count_1 * (double)count_2;
+        return (mem_profile_t)
+        {
+            .integral = bytes * dt,
+            .duration = dt,
+        };
     }
 
     // num_mul_karatsuba: the halves it is not currently multiplying, plus the
@@ -5060,17 +5081,25 @@ uint64_t num_mul_estimate_memory(
 
         double held = mem_estimate_ram_bytes(count_1 + count_2, disk_threshold_bytes);
 
-        double sub = (double)num_mul_estimate_memory(
-                split + 1, split + 1, disk_threshold_bytes, threads
-            )
-            + (double)num_mul_estimate_memory(
-                count_1_hi, count_2_hi, disk_threshold_bytes, threads
-            )
-            + (double)num_mul_estimate_memory(
-                count_1_lo, count_2_lo, disk_threshold_bytes, threads
-            );
+        mem_profile_t sub_mid = mul_mem_profile(
+            split + 1, split + 1, disk_threshold_bytes, threads
+        );
+        mem_profile_t sub_hi = mul_mem_profile(
+            count_1_hi, count_2_hi, disk_threshold_bytes, threads
+        );
+        mem_profile_t sub_lo = mul_mem_profile(
+            count_1_lo, count_2_lo, disk_threshold_bytes, threads
+        );
 
-        return (uint64_t)(held + (sub / 3.0));
+        // the three run in sequence with held live throughout, so a sub product
+        // that does no work carries no weight
+        double duration = sub_mid.duration + sub_hi.duration + sub_lo.duration;
+        return (mem_profile_t)
+        {
+            .integral = sub_mid.integral + sub_hi.integral + sub_lo.integral
+                + (held * duration),
+            .duration = duration,
+        };
     }
 
     double live = mem_estimate_ram_bytes(count_1, disk_threshold_bytes)
@@ -5120,7 +5149,30 @@ uint64_t num_mul_estimate_memory(
     integral += live * depad_dt;
     duration += depad_dt;
 
-    return duration > 0.0 ? (uint64_t)(integral / duration) : (uint64_t)live;
+    return (mem_profile_t)
+    {
+        .integral = integral,
+        .duration = duration,
+    };
+}
+
+// Time-weighted average RAM (bytes) live during num_mul_threads.
+// disk_threshold_bytes charges buffers num_create would mmap at a fraction;
+// threads should match whatever will be passed to num_mul_threads.
+uint64_t num_mul_estimate_memory(
+    uint64_t count_1,
+    uint64_t count_2,
+    uint64_t disk_threshold_bytes,
+    uint64_t threads
+)
+{
+    mem_profile_t profile = mul_mem_profile(count_1, count_2, disk_threshold_bytes, threads);
+    if(profile.duration <= 0.0)
+    {
+        return sizeof(num_t) + sizeof(uint64_t);
+    }
+
+    return (uint64_t)(profile.integral / profile.duration);
 }
 
 
