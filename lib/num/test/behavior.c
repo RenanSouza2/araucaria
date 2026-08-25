@@ -3105,6 +3105,40 @@ static void test_fuzz_num_ssm_mul(bool show)
     TEST_FN_CLOSE
 }
 
+static void test_fuzz_num_karatsuba_mul(bool show)
+{
+    TEST_FN_OPEN
+
+    #define TEST_FUZZ_NUM_KARATSUBA_MUL(TAG, COUNT_MIN, COUNT_MAX, RUNS)    \
+    {                                                                       \
+        TEST_FUZZ_CASE_OPEN(TAG, RUNS)                                      \
+        {                                                                   \
+            fuzz_seed(_tag);                                                \
+            uint64_t count_1 = rand_64_range(COUNT_MIN, COUNT_MAX);         \
+            uint64_t count_2 = rand_64_range(COUNT_MIN, COUNT_MAX);         \
+            num_p num_1 = num_create_rand(count_1);                         \
+            num_p num_2 = num_create_rand(count_2);                         \
+            num_p num_res_1 = num_mul_karatsuba(num_1, num_2, false, 1);    \
+            num_p num_res_2 = num_mul_classic(num_1, num_2);                \
+            assert(num_eq_dbg(num_res_1, num_res_2));                       \
+            num_free(num_1);                                                \
+            num_free(num_2);                                                \
+        }                                                                   \
+        TEST_FUZZ_CASE_CLOSE                                                \
+    }
+
+    TEST_FUZZ_NUM_KARATSUBA_MUL(1,    1,    8, 100)
+    TEST_FUZZ_NUM_KARATSUBA_MUL(2,  100,  300,  50)
+    TEST_FUZZ_NUM_KARATSUBA_MUL(3, 1000, 2000,  10)
+
+    // one operand under the split point, so its high half comes back empty
+    TEST_FUZZ_NUM_KARATSUBA_MUL(4,    1, 3000,  20)
+
+    #undef TEST_FUZZ_NUM_KARATSUBA_MUL
+
+    TEST_FN_CLOSE
+}
+
 static void test_fuzz_num_ssm_sqr(bool show)
 {
     TEST_FN_OPEN
@@ -3308,6 +3342,7 @@ static void test_all(bool show)
     test_fuzz_num_ssm_pad_wrap_round_trip(show);
     test_fuzz_num_ssm_fft(show);
     test_fuzz_num_ssm_mul(show);
+    test_fuzz_num_karatsuba_mul(show);
     test_fuzz_num_ssm_sqr(show);
     test_fuzz_num_bz_div(show);
 }

@@ -964,6 +964,71 @@ static void time_threads_div()
 }
 
 
+[[maybe_unused]]
+static num_p num_generate_size(uint64_t count, uint64_t salt)
+{
+    num_p num = num_wrap(2);
+    while(num->count < count)
+    {
+        num = num_generate_1_step(num, salt);
+    }
+
+    return num_shr(num, (num->count - count) * chunk_bits);
+}
+
+[[maybe_unused]]
+static void time_disk_mul_count(uint64_t count, uint64_t threads, uint64_t threshold)
+{
+    uint64_t thresholds[] = {UINT64_MAX, threshold};
+    const char * labels[] = {"ram", "disk"};
+
+    araucaria_disk_config_t config = { .disk_path = "./cache" };
+    config.disk_threshold_bytes = UINT64_MAX;
+    araucaria_disk_config_set(&config);
+
+    num_p num_1 = num_generate_size(count, 2);
+    num_p num_2 = num_add(num_copy(num_1), num_wrap(1));
+    num_p num_res_ref = nullptr;
+
+    tprintf(
+        "count: " U64P(9) "  threads: " U64P() "  threshold: " U64P() " MB",
+        num_1->count, threads, threshold >> 20
+    );
+
+    for(uint64_t j=0; j<sizeof(thresholds)/sizeof(thresholds[0]); j++)
+    {
+        num_p num_1_c = num_copy(num_1);
+        num_p num_2_c = num_copy(num_2);
+
+        config.disk_threshold_bytes = thresholds[j];
+        araucaria_disk_config_set(&config);
+
+        TIME_SETUP
+        num_p num_res = num_mul_threads(num_1_c, num_2_c, threads);
+        TIME_END(t1)
+
+        config.disk_threshold_bytes = UINT64_MAX;
+        araucaria_disk_config_set(&config);
+
+        tprintf("%-4s  time: %10.3f", labels[j], dtime(t1));
+
+        if(num_res_ref == nullptr)
+        {
+            num_res_ref = num_res;
+            continue;
+        }
+
+        assert(num_cmp(num_res, num_res_ref) == 0)
+        num_free(num_res);
+    }
+
+    num_free(num_res_ref);
+    num_free(num_1);
+    num_free(num_2);
+}
+
+
+
 constexpr uint64_t processor_siblings = 2;
 
 static uint64_t processor_of(uint64_t index)
@@ -1225,6 +1290,7 @@ int main()
     // mem_1(21);
     // time_assembly_mul();
     // time_threads_mul();
+    // time_disk_mul_count(132'000'000, 16, 3'000'000'000);
     time_threads_div();
     // time_procs_mul();
     // time_smt_mul();

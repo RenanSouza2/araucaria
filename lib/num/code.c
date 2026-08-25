@@ -3759,7 +3759,6 @@ static ssm_params_t ssm_finish_params(uint64_t count, uint64_t K, uint64_t M)
 }
 // NOLINTEND(readability-magic-numbers)
 
-// NOLINTBEGIN(readability-magic-numbers)
 ssm_params_t ssm_get_params(uint64_t count)
 {
     uint64_t M = B(stdc_bit_width(count) / 2);
@@ -3768,9 +3767,7 @@ ssm_params_t ssm_get_params(uint64_t count)
 
     return ssm_finish_params(count, K, M);
 }
-// NOLINTEND(readability-magic-numbers)
 
-// NOLINTBEGIN(readability-magic-numbers)
 ssm_params_t ssm_get_params_wrap(uint64_t n)
 {
     uint64_t K1 = 2 * B(stdc_bit_width(n-1) / 2);
@@ -3781,7 +3778,6 @@ ssm_params_t ssm_get_params_wrap(uint64_t n)
     assert(n == (M * K) + 1);
     return ssm_finish_params(n, K, M);
 }
-// NOLINTEND(readability-magic-numbers)
 
 // num_aux->size >= 2 * n
 static void num_ssm_mul_mod_span(
@@ -4795,6 +4791,90 @@ num_p num_mul_ssm(num_p num_1, num_p num_2, bool free_inputs, uint64_t threads)
 
 
 
+// bytes num_create hands each of num_mul_ssm's two transform arrays
+static uint64_t mul_ssm_array_bytes(uint64_t count_1, uint64_t count_2)
+{
+    ssm_params_t p = ssm_get_params(count_1 + count_2);
+    return sizeof(num_t) + (p.n * p.K * sizeof(uint64_t));
+}
+
+// floor on splitting: under it a disk backed transform costs less than the extra
+// product, and it is what bounds the recursion when the threshold is very low
+constexpr uint64_t mul_karatsuba_min_bytes = U64(256) * 1024 * 1024;
+
+// Split while a transform array would land on disk. Halving both operands halves
+// the array, so the recursion ends once it fits under the threshold or the floor.
+static bool mul_is_karatsuba(
+    uint64_t count_1,
+    uint64_t count_2,
+    uint64_t disk_threshold_bytes
+)
+{
+    uint64_t bytes = mul_ssm_array_bytes(count_1, count_2);
+    if(bytes <= mul_karatsuba_min_bytes)
+    {
+        return false;
+    }
+
+    return bytes > disk_threshold_bytes;
+}
+
+// KEEPS NUM_1 NUM_2 unless FREE_INPUTS
+// split at half the larger operand, so num_mid's operands stay one limb over it
+STATIC num_p num_mul_karatsuba(
+    num_p num_1,
+    num_p num_2,
+    bool free_inputs,
+    uint64_t threads
+)
+{
+    CLU_HANDLER_IS_SAFE(num_1)
+    CLU_HANDLER_IS_SAFE(num_2)
+    assert(num_1)
+    assert(num_2)
+
+    uint64_t count_res = num_1->count + num_2->count;
+    uint64_t count_max = num_1->count < num_2->count ? num_2->count : num_1->count;
+    uint64_t split = (count_max + 1) / 2;
+
+    num_p num_1_hi;
+    num_p num_1_lo;
+    num_break(&num_1_hi, &num_1_lo, free_inputs ? num_1 : num_copy(num_1), split);
+
+    num_p num_2_hi;
+    num_p num_2_lo;
+    num_break(&num_2_hi, &num_2_lo, free_inputs ? num_2 : num_copy(num_2), split);
+
+    // num_create, not num_copy plus num_add: a half can be empty, and num_copy
+    // leaves an empty num's single limb uninitialised for num_add_offset to read
+    num_p num_sum_1 = num_create(CLU_ARGS(split + 1, 0));
+    num_add_offset(num_sum_1, 0, num_1_hi);
+    num_add_offset(num_sum_1, 0, num_1_lo);
+
+    num_p num_sum_2 = num_create(CLU_ARGS(split + 1, 0));
+    num_add_offset(num_sum_2, 0, num_2_hi);
+    num_add_offset(num_sum_2, 0, num_2_lo);
+
+    num_p num_mid = num_mul_core(num_sum_1, num_sum_2, true, threads);
+    num_p num_hi = num_mul_core(num_1_hi, num_2_hi, true, threads);
+    num_p num_lo = num_mul_core(num_1_lo, num_2_lo, true, threads);
+
+    // num_mid holds a_hi * b_lo + a_lo * b_hi once both halves come back out
+    num_sub_offset(num_mid, 0, num_hi);
+    num_sub_offset(num_mid, 0, num_lo);
+
+    num_p num_res = num_create(CLU_ARGS(count_res, 0));
+    num_add_offset(num_res, 0, num_lo);
+    num_add_offset(num_res, split, num_mid);
+    num_add_offset(num_res, 2 * split, num_hi);
+
+    num_free(num_lo);
+    num_free(num_mid);
+    num_free(num_hi);
+
+    return num_normalize(num_res);
+}
+
 static bool mul_is_classic(uint64_t count_1, uint64_t count_2)
 {
     constexpr uint64_t threshold = 256;
@@ -4845,6 +4925,15 @@ num_p num_mul_core(num_p num_1, num_p num_2, bool free_inputs, uint64_t threads)
             num_free(num_2);
         }
         return num_res;
+    }
+
+    if(mul_is_karatsuba(
+        num_1->count,
+        num_2->count,
+        araucaria_disk_config_get_threshold_bytes()
+    ))
+    {
+        return num_mul_karatsuba(num_1, num_2, free_inputs, threads);
     }
 
     uint64_t ceiling = num_mul_threads_ceiling(num_1->count, num_2->count);
@@ -4954,6 +5043,34 @@ uint64_t num_mul_estimate_memory(
             + mem_estimate_ram_bytes(count_2, disk_threshold_bytes)
             + mem_estimate_ram_bytes(count_1 + count_2, disk_threshold_bytes);
         return (uint64_t)bytes;
+    }
+
+    // num_mul_karatsuba: the halves it is not currently multiplying, plus the
+    // products already folded back, stay live across all three sub products and
+    // come to about one operand pair either way
+    if(mul_is_karatsuba(count_1, count_2, disk_threshold_bytes))
+    {
+        uint64_t count_max = count_1 < count_2 ? count_2 : count_1;
+        uint64_t split = (count_max + 1) / 2;
+
+        uint64_t count_1_hi = count_1 > split ? count_1 - split : 0;
+        uint64_t count_1_lo = count_1 < split ? count_1 : split;
+        uint64_t count_2_hi = count_2 > split ? count_2 - split : 0;
+        uint64_t count_2_lo = count_2 < split ? count_2 : split;
+
+        double held = mem_estimate_ram_bytes(count_1 + count_2, disk_threshold_bytes);
+
+        double sub = (double)num_mul_estimate_memory(
+                split + 1, split + 1, disk_threshold_bytes, threads
+            )
+            + (double)num_mul_estimate_memory(
+                count_1_hi, count_2_hi, disk_threshold_bytes, threads
+            )
+            + (double)num_mul_estimate_memory(
+                count_1_lo, count_2_lo, disk_threshold_bytes, threads
+            );
+
+        return (uint64_t)(held + (sub / 3.0));
     }
 
     double live = mem_estimate_ram_bytes(count_1, disk_threshold_bytes)
