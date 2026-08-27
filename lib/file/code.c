@@ -12,6 +12,24 @@
 
 
 
+// A file is [amount][end_0..end_{amount-1}][entry_0]..[entry_n][MAGIC_FILE]. A slot
+// holds the offset one past its entry, 0 while the entry is not committed, so
+// entry i spans [i ? end_{i-1} : header, end_i). Each entry ends in
+// MAGIC_ENTRY, written after its payload: that, not the slot, is what certifies
+// the entry, so an interrupted write leaves no valid-looking partial result.
+static constexpr uint64_t MAGIC_FILE = 0xd0bbe;
+static constexpr uint64_t MAGIC_ENTRY = 0xe10be;
+
+static uint64_t file_header_size(uint64_t amount)
+{
+    return (amount + 1) * sizeof(uint64_t);
+}
+
+static uint64_t file_slot_pos(uint64_t index)
+{
+    return (index + 1) * sizeof(uint64_t);
+}
+
 static void fseek_safe(FILE *fp, long pos, int whence)
 {
     if (fseek(fp, pos, whence) != 0)
@@ -25,6 +43,12 @@ static uint64_t ftell_safe(FILE *fp)
     int64_t res = ftell(fp);
     assert(res >= 0);
     return (uint64_t)res;
+}
+
+static uint64_t file_size(FILE *fp)
+{
+    fseek_safe(fp, 0, SEEK_END);
+    return ftell_safe(fp);
 }
 
 void file_write_uint64(file_p fp, uint64_t value)
@@ -48,19 +72,22 @@ file_t file_write_open(const char file_path[], uint64_t amount)
         .fp = fp,
         .amount = amount,
         .count = 0,
-        .pos = (amount + 1) * sizeof(uint64_t)
+        .pos = file_header_size(amount)
     };
     file_write_uint64(&res, amount);
+    for(uint64_t i=0; i<amount; i++)
+    {
+        file_write_uint64(&res, 0);
+    }
     return res;
 }
-
-static constexpr uint64_t MAGIC = 0xd0bbe;
 
 void file_write_close(file_p fp)
 {
     assert(fp->amount == fp->count);
 
-    file_write_uint64(fp, MAGIC);
+    fseek_safe(fp->fp, (long)fp->pos, SEEK_SET);
+    file_write_uint64(fp, MAGIC_FILE);
     fclose(fp->fp);
 }
 
@@ -68,15 +95,95 @@ void file_write_start(file_p fp)
 {
     assert(fp->count < fp->amount);
 
-    fseek_safe(fp->fp, (long)((fp->count + 1) * sizeof(uint64_t)), SEEK_SET);
-    file_write_uint64(fp, fp->pos);
     fseek_safe(fp->fp, (long)fp->pos, SEEK_SET);
 }
 
+// The seek to the slot flushes the payload, so it reaches the kernel before
+// the offset that certifies it. The offset itself has to be flushed here too:
+// left in the stream buffer it would die with the process, and a run killed
+// mid-join would come back to an entry it had already written.
 void file_write_end(file_p fp)
 {
-    fp->pos = ftell_safe(fp->fp);
+    file_write_uint64(fp, MAGIC_ENTRY);
+
+    uint64_t end = ftell_safe(fp->fp);
+    fseek_safe(fp->fp, (long)file_slot_pos(fp->count), SEEK_SET);
+    file_write_uint64(fp, end);
+    fflush(fp->fp);
+
+    fp->pos = end;
     fp->count++;
+}
+
+
+
+// Entries already committed, stopping at the first slot that is unset, points
+// outside the file, or does not end in MAGIC_ENTRY. Entries are written in
+// order, so the first gap ends the run.
+static uint64_t file_read_count(FILE *fp, uint64_t amount, uint64_t size)
+{
+    uint64_t pos = file_header_size(amount);
+    for(uint64_t i=0; i<amount; i++)
+    {
+        fseek_safe(fp, (long)file_slot_pos(i), SEEK_SET);
+        uint64_t end = file_read_uint64(fp);
+        if(end < pos + sizeof(uint64_t) || end > size)
+        {
+            return i;
+        }
+
+        fseek_safe(fp, (long)(end - sizeof(uint64_t)), SEEK_SET);
+        if(file_read_uint64(fp) != MAGIC_ENTRY)
+        {
+            return i;
+        }
+
+        pos = end;
+    }
+
+    return amount;
+}
+
+// Resumes an interrupted write: entries already committed are kept and
+// fp->count reports how many. Truncates and starts over when the file is
+// missing, unreadable, or was written for a different amount.
+file_t file_write_open_resume(const char file_path[], uint64_t amount)
+{
+    FILE *fp = fopen(file_path, "r+b");
+    if(fp == nullptr)
+    {
+        return file_write_open(file_path, amount);
+    }
+
+    uint64_t size = file_size(fp);
+    if(size < file_header_size(amount))
+    {
+        fclose(fp);
+        return file_write_open(file_path, amount);
+    }
+
+    fseek_safe(fp, 0, SEEK_SET);
+    if(file_read_uint64(fp) != amount)
+    {
+        fclose(fp);
+        return file_write_open(file_path, amount);
+    }
+
+    uint64_t count = file_read_count(fp, amount, size);
+    uint64_t pos = file_header_size(amount);
+    if(count > 0)
+    {
+        fseek_safe(fp, (long)file_slot_pos(count - 1), SEEK_SET);
+        pos = file_read_uint64(fp);
+    }
+
+    return (file_t)
+    {
+        .fp = fp,
+        .amount = amount,
+        .count = count,
+        .pos = pos
+    };
 }
 
 
@@ -89,9 +196,8 @@ FILE* file_read_open(const char file_path[])
         return nullptr;
     }
 
-    fseek_safe(fp, 0, SEEK_END);
-    uint64_t size = ftell_safe(fp);
-    if(size < sizeof(uint64_t))
+    uint64_t size = file_size(fp);
+    if(size < 2 * sizeof(uint64_t))
     {
         fclose(fp);
         return nullptr;
@@ -100,7 +206,24 @@ FILE* file_read_open(const char file_path[])
     fseek_safe(fp, -(long)sizeof(uint64_t), SEEK_END);
     uint64_t code = file_read_uint64(fp);
 
-    if(code != MAGIC)
+    if(code != MAGIC_FILE)
+    {
+        fclose(fp);
+        return nullptr;
+    }
+
+    fseek_safe(fp, 0, SEEK_SET);
+    uint64_t amount = file_read_uint64(fp);
+    if(amount == 0 || amount > size / sizeof(uint64_t))
+    {
+        fclose(fp);
+        return nullptr;
+    }
+
+    // The last entry has to end where MAGIC_FILE begins: a payload word that
+    // happens to equal it does not on its own make a file complete.
+    fseek_safe(fp, (long)file_slot_pos(amount - 1), SEEK_SET);
+    if(file_read_uint64(fp) != size - sizeof(uint64_t))
     {
         fclose(fp);
         return nullptr;
@@ -115,8 +238,12 @@ void file_read_move_to_index(FILE *fp, uint64_t index)
     uint64_t amount = file_read_uint64(fp);
     assert(index < amount);
 
-    fseek_safe(fp, (long)((index + 1) * sizeof(uint64_t)), SEEK_SET);
-    uint64_t pos = file_read_uint64(fp);
+    uint64_t pos = file_header_size(amount);
+    if(index > 0)
+    {
+        fseek_safe(fp, (long)file_slot_pos(index - 1), SEEK_SET);
+        pos = file_read_uint64(fp);
+    }
 
     fseek_safe(fp, (long)pos, SEEK_SET);
 }
