@@ -289,8 +289,7 @@ void num_display_dec(num_p num)
 }
 
 // Same as num_display_dec, but the caller picks how many threads the base
-// conversion (num_base_to_threads) may fan out across -- see its comment for how
-// the thread budget gets split across the conversion's recursion.
+// conversion (num_base_to_threads) may fan out across -- see its comment.
 void num_display_dec_threads(num_p num, uint64_t threads)
 {
     CLU_HANDLER_IS_SAFE(num);
@@ -6075,39 +6074,11 @@ num_p num_gcd(num_p num_1, num_p num_2)
 
 
 
-typedef struct
-{
-    num_p num;
-    num_p * num_bases;
-    num_p * num_recips;
-    uint64_t i;
-    uint64_t threads;
-    num_p result;
-} num_base_to_worker_t;
-
-static num_p num_base_to_rec(
-    num_p num,
-    num_p num_bases[],
-    num_p num_recips[],
-    uint64_t i,
-    uint64_t threads
-);
-
-static void * num_base_to_worker(void * arg)
-{
-    num_base_to_worker_t * w = arg;
-    w->result = num_base_to_rec(
-        w->num,
-        w->num_bases,
-        w->num_recips,
-        w->i,
-        w->threads
-    );
-    return nullptr;
-}
-
 // Levels with a divisor below this keep the generic division
 constexpr uint64_t base_to_barrett_min_limbs = 32;
+
+// Pieces the level loop splits down to before the leaf pass takes over
+constexpr uint64_t base_to_pieces_per_thread = 4;
 
 // num_recips[i] underestimates 2^(64 * (2n + g)) / num_bases[i], with
 // n = num_bases[i]->count and g = base_to_recip_guard. The guard limb holds the
@@ -6166,6 +6137,7 @@ static num_p num_base_to_recip_refine(num_p num_y, num_p num_base, uint64_t thre
 
 // num_base is the square of the divisor num_recip_prev inverts, so squaring it
 // seeds this level at half precision; one Newton step recovers the rest.
+// Keeps NUM_RECIP_PREV
 static num_p num_base_to_recip_next(
     num_p num_recip_prev,
     uint64_t count_prev,
@@ -6219,77 +6191,134 @@ static void num_base_to_div(
     *out_num_r = num_x;
 }
 
-// Binary-splitting base conversion: each level divides num by base^(2^i), and the
-// resulting hi/lo halves (num_q, num_r) recurse independently of one another --
-// unlike num_div_mod_bz_rec's recursion, which stays on one call stack throughout,
-// this one can fork num_q's branch onto its own thread while num_r's runs on the
-// current one. threads is split in half per fork, on each branch's own share of
-// the recursion, and passed unsplit into the division at this level -- safe to
-// hand over in full because num_mul_core, the one place the division's multiplies
-// funnel through, re-derives its own ceiling from operand size on every call
-// regardless of what's requested (see num_mul_threads_ceiling's comment).
-static num_p num_base_to_rec(
+// Requires num_x < num_base ^ 2
+// Consumes NUM_X, keeps NUM_BASE and NUM_RECIP
+// num_recip is null on the levels the reciprocal isn't built for
+static void num_base_to_split(
+    num_p *out_num_q,
+    num_p *out_num_r,
+    num_p num_x,
+    num_p num_base,
+    num_p num_recip,
+    uint64_t threads
+)
+{
+    if(num_cmp(num_x, num_base) < 0)
+    {
+        *out_num_q = num_create(CLU_ARGS(0, 0));
+        *out_num_r = num_x;
+        return;
+    }
+
+    if(num_recip)
+    {
+        num_base_to_div(out_num_q, out_num_r, num_x, num_base, num_recip, threads);
+        return;
+    }
+
+    num_div_mod_threads(out_num_q, out_num_r, num_x, num_copy(num_base), threads);
+}
+
+// Writes the digits of NUM into num_res from limb POS up; consumes NUM.
+// The slot at level i is B(i) limbs wide and num_res comes out zeroed, so a
+// value that runs short of its slot needs nothing written.
+static void num_base_to_rec(
+    num_p num_res,
+    uint64_t pos,
     num_p num,
     num_p num_bases[],
     num_p num_recips[],
-    uint64_t i,
-    uint64_t threads
+    uint64_t i
 )
 {
     CLU_HANDLER_IS_SAFE(num);
     assert(num);
 
+    if(num->count == 0)
+    {
+        num_free(num);
+        return;
+    }
+
     if(i == UINT64_MAX)
     {
-        return num;
+        assert(num->count == 1);
+        assert(pos < num_res->size);
+        num_res->chunk[pos] = num->chunk[0];
+        num_free(num);
+        return;
     }
 
     if(num_cmp(num, num_bases[i]) < 0)
     {
-        return num_base_to_rec(num, num_bases, num_recips, i - 1, threads);
+        num_base_to_rec(num_res, pos, num, num_bases, num_recips, i - 1);
+        return;
     }
 
     num_p num_q, num_r;
-    if(num_bases[i]->count < base_to_barrett_min_limbs)
+    num_base_to_split(&num_q, &num_r, num, num_bases[i], num_recips[i], 1);
+    num_base_to_rec(num_res, pos, num_r, num_bases, num_recips, i - 1);
+    num_base_to_rec(num_res, pos + B(i), num_q, num_bases, num_recips, i - 1);
+}
+
+// One level of the split: piece j becomes the low half at 2j and the high half
+// at 2j + 1, all against the one divisor num_base
+typedef struct
+{
+    num_p * num_src;
+    num_p * num_dst;
+    num_p num_base;
+    num_p num_recip;
+    uint64_t idx_start;
+    uint64_t idx_end;
+    uint64_t threads;
+} num_base_to_level_worker_t;
+
+static void * num_base_to_level_worker(void * arg)
+{
+    num_base_to_level_worker_t * w = arg;
+    for(uint64_t j=w->idx_start; j<w->idx_end; j++)
     {
-        num_div_mod_threads(&num_q, &num_r, num, num_copy(num_bases[i]), threads);
+        num_base_to_split(
+            &w->num_dst[(2 * j) + 1],
+            &w->num_dst[2 * j],
+            w->num_src[j],
+            w->num_base,
+            w->num_recip,
+            w->threads
+        );
     }
-    else
+    return nullptr;
+}
+
+// Piece j is below num_bases[level], so its digits occupy num_res from
+// j * B(level) up
+typedef struct
+{
+    num_p num_res;
+    num_p * num_pieces;
+    num_p * num_bases;
+    num_p * num_recips;
+    uint64_t level;
+    uint64_t idx_start;
+    uint64_t idx_end;
+} num_base_to_leaf_worker_t;
+
+static void * num_base_to_leaf_worker(void * arg)
+{
+    num_base_to_leaf_worker_t * w = arg;
+    for(uint64_t j=w->idx_start; j<w->idx_end; j++)
     {
-        num_base_to_div(&num_q, &num_r, num, num_bases[i], num_recips[i], threads);
+        num_base_to_rec(
+            w->num_res,
+            j << w->level,
+            w->num_pieces[j],
+            w->num_bases,
+            w->num_recips,
+            w->level - 1
+        );
     }
-
-    if(threads <= 1 || i == 0)
-    {
-        num_q = num_base_to_rec(num_q, num_bases, num_recips, i - 1, threads);
-        num_r = num_base_to_rec(num_r, num_bases, num_recips, i - 1, threads);
-    }
-    else
-    {
-        uint64_t threads_q = threads / 2;
-        uint64_t threads_r = threads - threads_q;
-
-        num_base_to_worker_t worker = (num_base_to_worker_t)
-        {
-            .num = num_q,
-            .num_bases = num_bases,
-            .num_recips = num_recips,
-            .i = i - 1,
-            .threads = threads_q,
-        };
-        pthread_t worker_id;
-        TREAT(pthread_create(&worker_id, nullptr, num_base_to_worker, &worker))
-
-        num_r = num_base_to_rec(num_r, num_bases, num_recips, i - 1, threads_r);
-
-        TREAT(pthread_join(worker_id, nullptr))
-        num_q = worker.result;
-    }
-
-    num_r = num_expand_to(num_r, B(i) + num_q->count);
-    num_add_offset(num_r, B(i), num_q);
-    num_free(num_q);
-    return num_r;
+    return nullptr;
 }
 
 num_p num_base_to(num_p num, uint64_t base)
@@ -6301,13 +6330,19 @@ num_p num_base_to(num_p num, uint64_t base)
     return num_base_to_threads(num, base, 1);
 }
 
-// Same as num_base_to, but the caller picks how many threads the conversion's
-// binary-splitting recursion may fan out across -- see num_base_to_rec's comment.
+// Binary-splitting base conversion: at level i every piece is divided by
+// base ^ (2 ^ i), the remainder taking the low half of the piece's digits and the
+// quotient the high half. Levels run top down until there is a piece per worker,
+// then each piece is converted on one thread by num_base_to_rec. A piece's digit
+// offset follows from its index, so every worker writes into the one result
+// buffer and nothing is spliced afterwards. The reciprocals are built bottom up
+// by Newton doubling and freed as the loop descends past the level that uses one.
 num_p num_base_to_threads(num_p num, uint64_t base, uint64_t threads)
 {
     CLU_HANDLER_IS_SAFE(num);
     assert(num);
     assert(base > 1);
+    assert(threads);
 
     constexpr uint64_t len = 100;
     num_p num_base = num_wrap(base);
@@ -6316,46 +6351,176 @@ num_p num_base_to_threads(num_p num, uint64_t base, uint64_t threads)
     uint64_t max;
     for(max=0; num_cmp(num_base, num) <= 0; max++)
     {
+        assert(max < len);
         num_bases[max] = num_copy(num_base);
         num_base = num_sqr(num_base);
     }
     num_free(num_base);
-
 
     if(max == 0)
     {
         return num;
     }
 
-    uint64_t ceiling = num_mul_threads_ceiling(num->count, num->count);
-    if(threads > ceiling)
+    uint64_t leaf = max;
+    for(uint64_t pieces=1; leaf && pieces<threads*base_to_pieces_per_thread; pieces*=2)
     {
-        threads = ceiling;
+        leaf--;
     }
 
-    // One reciprocal per level; every node at level i divides by num_bases[i]
+    // The chain has to be walked all the way up whatever the top level needs, so
+    // the levels the leaf pass runs concurrently are kept from that same pass;
+    // the ones the level loop uses are freed as it descends past them
     num_p num_recips[len];
     for(uint64_t i=0; i<max; i++)
     {
-        num_recips[i] = i
-            ? num_base_to_recip_next(
-                num_recips[i-1],
-                num_bases[i-1]->count,
-                num_bases[i],
-                threads
-            )
-            : num_base_to_recip_seed(base);
+        num_recips[i] = nullptr;
     }
 
-    num_p num_res = num_base_to_rec(num, num_bases, num_recips, max - 1, threads);
+    if(num_bases[max-1]->count >= base_to_barrett_min_limbs)
+    {
+        num_p num_recip = nullptr;
+        for(uint64_t i=0; i<max; i++)
+        {
+            num_p num_recip_next = i
+                ? num_base_to_recip_next(
+                    num_recip,
+                    num_bases[i-1]->count,
+                    num_bases[i],
+                    threads
+                )
+                : num_base_to_recip_seed(base);
+
+            // the link is either handed to num_recips or dropped here
+            if(i && num_recips[i-1] == nullptr)
+            {
+                num_free(num_recip);
+            }
+
+            num_recip = num_recip_next;
+            if(num_bases[i]->count >= base_to_barrett_min_limbs)
+            {
+                num_recips[i] = num_recip;
+            }
+        }
+    }
+
+    pthread_t * worker_ids = malloc(threads * sizeof(pthread_t));
+    assert(worker_ids);
+    num_base_to_level_worker_t * level_args = malloc(threads * sizeof(*level_args));
+    assert(level_args);
+
+    num_p * num_pieces = malloc(sizeof(num_p));
+    assert(num_pieces);
+    num_pieces[0] = num;
+    uint64_t size = 1;
+
+    for(uint64_t level=max-1; level!=leaf-1; level--)
+    {
+        num_p * num_pieces_next = malloc(2 * size * sizeof(num_p));
+        assert(num_pieces_next);
+
+        uint64_t workers = threads < size ? threads : size;
+        for(uint64_t w=0; w<workers; w++)
+        {
+            uint64_t idx_start, idx_end;
+            ssm_worker_range(w, workers, size, &idx_start, &idx_end);
+
+            level_args[w] = (num_base_to_level_worker_t)
+            {
+                .num_src = num_pieces,
+                .num_dst = num_pieces_next,
+                .num_base = num_bases[level],
+                .num_recip = num_recips[level],
+                .idx_start = idx_start,
+                .idx_end = idx_end,
+                .threads = threads / workers,
+            };
+        }
+
+        for(uint64_t w=1; w<workers; w++)
+        {
+            TREAT(pthread_create(&worker_ids[w], nullptr, num_base_to_level_worker, &level_args[w]))
+        }
+        num_base_to_level_worker(&level_args[0]);
+        for(uint64_t w=1; w<workers; w++)
+        {
+            TREAT(pthread_join(worker_ids[w], nullptr))
+        }
+
+        free(num_pieces);
+        num_pieces = num_pieces_next;
+        size *= 2;
+
+        if(num_recips[level])
+        {
+            num_free(num_recips[level]);
+            num_recips[level] = nullptr;
+        }
+    }
+
+    // The top pieces are empty whenever num needs less than B(max) digits
+    uint64_t count = size;
+    while(count && num_pieces[count-1]->count == 0)
+    {
+        count--;
+        num_free(num_pieces[count]);
+    }
+
+    num_p num_res = num_create(CLU_ARGS(count << leaf, count << leaf));
+
+    num_base_to_leaf_worker_t * leaf_args = malloc(threads * sizeof(*leaf_args));
+    assert(leaf_args);
+
+    uint64_t workers = threads < count ? threads : count;
+    for(uint64_t w=0; w<workers; w++)
+    {
+        uint64_t idx_start, idx_end;
+        ssm_worker_range(w, workers, count, &idx_start, &idx_end);
+
+        leaf_args[w] = (num_base_to_leaf_worker_t)
+        {
+            .num_res = num_res,
+            .num_pieces = num_pieces,
+            .num_bases = num_bases,
+            .num_recips = num_recips,
+            .level = leaf,
+            .idx_start = idx_start,
+            .idx_end = idx_end,
+        };
+    }
+
+    for(uint64_t w=1; w<workers; w++)
+    {
+        TREAT(pthread_create(&worker_ids[w], nullptr, num_base_to_leaf_worker, &leaf_args[w]))
+    }
+    if(workers)
+    {
+        num_base_to_leaf_worker(&leaf_args[0]);
+    }
+    for(uint64_t w=1; w<workers; w++)
+    {
+        TREAT(pthread_join(worker_ids[w], nullptr))
+    }
+
+    free(leaf_args);
+    free(level_args);
+    free(worker_ids);
+    free(num_pieces);
 
     for(uint64_t i=0; i<max; i++)
     {
         num_free(num_bases[i]);
-        num_free(num_recips[i]);
+    }
+    for(uint64_t i=0; i<max; i++)
+    {
+        if(num_recips[i])
+        {
+            num_free(num_recips[i]);
+        }
     }
 
-    return num_res;
+    return num_normalize(num_res);
 }
 
 num_p num_base_from(num_p num, uint64_t base)
