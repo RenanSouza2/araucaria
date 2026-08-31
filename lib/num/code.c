@@ -908,6 +908,12 @@ int64_t num_cmp_offset(num_p num_1, uint64_t pos_1, num_p num_2) // TODO TEST
     uint64_t count_1 = num_1->count;
     uint64_t count_2 = num_2->count;
 
+    // NUM_2 is zero, so it offsets to zero: NUM_1 is never below it
+    if(count_2 == 0)
+    {
+        return count_1 ? 1 : 0;
+    }
+
     if(count_1 > count_2 + pos_1)
     {
         return 1;
@@ -990,6 +996,11 @@ void num_sub_offset(num_p num_1, uint64_t pos_1, num_p num_2)
     assert(num_2)
 
     uint64_t count_src = num_2->count;
+    if(count_src == 0)
+    {
+        return;
+    }
+
     assert(num_1->count >= count_src + pos_1);
 
     uint64_t * restrict dest = num_1->chunk;
@@ -6068,18 +6079,144 @@ typedef struct
 {
     num_p num;
     num_p * num_bases;
+    num_p * num_recips;
     uint64_t i;
     uint64_t threads;
     num_p result;
 } num_base_to_worker_t;
 
-static num_p num_base_to_rec(num_p num, num_p num_bases[], uint64_t i, uint64_t threads);
+static num_p num_base_to_rec(
+    num_p num,
+    num_p num_bases[],
+    num_p num_recips[],
+    uint64_t i,
+    uint64_t threads
+);
 
 static void * num_base_to_worker(void * arg)
 {
     num_base_to_worker_t * w = arg;
-    w->result = num_base_to_rec(w->num, w->num_bases, w->i, w->threads);
+    w->result = num_base_to_rec(
+        w->num,
+        w->num_bases,
+        w->num_recips,
+        w->i,
+        w->threads
+    );
     return nullptr;
+}
+
+// Levels with a divisor below this keep the generic division
+constexpr uint64_t base_to_barrett_min_limbs = 32;
+
+// num_recips[i] underestimates 2^(64 * (2n + g)) / num_bases[i], with
+// n = num_bases[i]->count and g = base_to_recip_guard. The guard limb holds the
+// quotient estimate within 2 of the true quotient.
+constexpr uint64_t base_to_recip_guard = 1;
+
+// Exact; seeds the chain at level 0, whose divisor is the single-limb base
+static num_p num_base_to_recip_seed(uint64_t base)
+{
+    constexpr uint64_t count = 3 + base_to_recip_guard;
+    num_p num_pow = num_create(CLU_ARGS(count, count));
+    num_pow->chunk[count-1] = 1;
+
+    num_p num_recip = num_div_mod_uint(num_pow, base);
+    num_free(num_pow);
+    return num_recip;
+}
+
+// One Newton step, y += y * (2^(64k) - y * num_base) / 2^(64k), k = 2n + g.
+// Each factor keeps only the limbs the correction reaches; both are truncated
+// downwards, which keeps y an underestimate.
+static num_p num_base_to_recip_refine(num_p num_y, num_p num_base, uint64_t threads)
+{
+    uint64_t k = (2 * num_base->count) + base_to_recip_guard;
+
+    num_p num_w = num_create(CLU_ARGS(k + 1, k + 1));
+    num_w->chunk[k] = 1;
+    num_p num_aux = num_mul_core(num_y, num_base, false, threads);
+    num_sub_offset(num_w, 0, num_aux);
+    num_free(num_aux);
+
+    uint64_t drop_w = num_y->count < k ? k - num_y->count : 0;
+    uint64_t drop_y = num_w->count < k ? k - num_w->count : 0;
+    if(drop_w >= num_w->count || drop_y >= num_y->count)
+    {
+        num_free(num_w);
+        return num_y;
+    }
+
+    num_t num_y_hi, num_w_hi;
+    num_span(&num_y_hi, num_y, drop_y, num_y->count);
+    num_span(&num_w_hi, num_w, drop_w, num_w->count);
+
+    num_p num_corr = num_mul_core(&num_y_hi, &num_w_hi, false, threads);
+    num_free(num_w);
+    num_head_trim(num_corr, k - drop_w - drop_y);
+
+    uint64_t count = num_y->count < num_corr->count
+        ? num_corr->count
+        : num_y->count;
+    num_y = num_expand_to(num_y, count + 1);
+    num_add_offset(num_y, 0, num_corr);
+    num_free(num_corr);
+    return num_y;
+}
+
+// num_base is the square of the divisor num_recip_prev inverts, so squaring it
+// seeds this level at half precision; one Newton step recovers the rest.
+static num_p num_base_to_recip_next(
+    num_p num_recip_prev,
+    uint64_t count_prev,
+    num_p num_base,
+    uint64_t threads
+)
+{
+    num_p num_y = num_sqr_threads(num_copy(num_recip_prev), threads);
+    uint64_t drop = (4 * count_prev) - (2 * num_base->count) + base_to_recip_guard;
+    num_head_trim(num_y, drop);
+    return num_base_to_recip_refine(num_y, num_base, threads);
+}
+
+// Requires num_base <= num_x < num_base ^ 2
+// Consumes NUM_X, keeps NUM_BASE and NUM_RECIP
+static void num_base_to_div(
+    num_p *out_num_q,
+    num_p *out_num_r,
+    num_p num_x,
+    num_p num_base,
+    num_p num_recip,
+    uint64_t threads
+)
+{
+    uint64_t n = num_base->count;
+
+    num_t num_x_hi;
+    num_span(&num_x_hi, num_x, n - 1, num_x->count);
+
+    num_p num_prod = num_mul_core(&num_x_hi, num_recip, false, threads);
+    num_p num_q, num_aux;
+    num_break(&num_q, &num_aux, num_prod, n + 1 + base_to_recip_guard);
+    num_free(num_aux);
+
+    if(num_q->count)
+    {
+        num_aux = num_mul_core(num_q, num_base, false, threads);
+        assert(num_cmp(num_x, num_aux) >= 0);
+        num_sub_offset(num_x, 0, num_aux);
+        num_free(num_aux);
+    }
+
+    // The estimate is short by at most 2
+    while(num_cmp(num_x, num_base) >= 0)
+    {
+        num_sub_offset(num_x, 0, num_base);
+        num_q = num_add_uint(num_q, 1);
+    }
+
+    *out_num_q = num_q;
+    *out_num_r = num_x;
 }
 
 // Binary-splitting base conversion: each level divides num by base^(2^i), and the
@@ -6087,13 +6224,17 @@ static void * num_base_to_worker(void * arg)
 // unlike num_div_mod_bz_rec's recursion, which stays on one call stack throughout,
 // this one can fork num_q's branch onto its own thread while num_r's runs on the
 // current one. threads is split in half per fork, on each branch's own share of
-// the recursion, and passed unsplit into num_div_mod_threads for the division at
-// this level -- safe to hand over in full because num_mul_core (the one place the
-// division's internal multiply funnels through) re-derives its own ceiling from
-// operand size on every call regardless of what's requested, the same reason
-// num_div_mod_bz_rec's per-level calls don't over-thread either (see
-// num_mul_threads_ceiling's comment).
-static num_p num_base_to_rec(num_p num, num_p num_bases[], uint64_t i, uint64_t threads)
+// the recursion, and passed unsplit into the division at this level -- safe to
+// hand over in full because num_mul_core, the one place the division's multiplies
+// funnel through, re-derives its own ceiling from operand size on every call
+// regardless of what's requested (see num_mul_threads_ceiling's comment).
+static num_p num_base_to_rec(
+    num_p num,
+    num_p num_bases[],
+    num_p num_recips[],
+    uint64_t i,
+    uint64_t threads
+)
 {
     CLU_HANDLER_IS_SAFE(num);
     assert(num);
@@ -6105,16 +6246,23 @@ static num_p num_base_to_rec(num_p num, num_p num_bases[], uint64_t i, uint64_t 
 
     if(num_cmp(num, num_bases[i]) < 0)
     {
-        return num_base_to_rec(num, num_bases, i - 1, threads);
+        return num_base_to_rec(num, num_bases, num_recips, i - 1, threads);
     }
 
     num_p num_q, num_r;
-    num_div_mod_threads(&num_q, &num_r, num, num_copy(num_bases[i]), threads);
+    if(num_bases[i]->count < base_to_barrett_min_limbs)
+    {
+        num_div_mod_threads(&num_q, &num_r, num, num_copy(num_bases[i]), threads);
+    }
+    else
+    {
+        num_base_to_div(&num_q, &num_r, num, num_bases[i], num_recips[i], threads);
+    }
 
     if(threads <= 1 || i == 0)
     {
-        num_q = num_base_to_rec(num_q, num_bases, i - 1, threads);
-        num_r = num_base_to_rec(num_r, num_bases, i - 1, threads);
+        num_q = num_base_to_rec(num_q, num_bases, num_recips, i - 1, threads);
+        num_r = num_base_to_rec(num_r, num_bases, num_recips, i - 1, threads);
     }
     else
     {
@@ -6125,13 +6273,14 @@ static num_p num_base_to_rec(num_p num, num_p num_bases[], uint64_t i, uint64_t 
         {
             .num = num_q,
             .num_bases = num_bases,
+            .num_recips = num_recips,
             .i = i - 1,
             .threads = threads_q,
         };
         pthread_t worker_id;
         TREAT(pthread_create(&worker_id, nullptr, num_base_to_worker, &worker))
 
-        num_r = num_base_to_rec(num_r, num_bases, i - 1, threads_r);
+        num_r = num_base_to_rec(num_r, num_bases, num_recips, i - 1, threads_r);
 
         TREAT(pthread_join(worker_id, nullptr))
         num_q = worker.result;
@@ -6184,11 +6333,26 @@ num_p num_base_to_threads(num_p num, uint64_t base, uint64_t threads)
         threads = ceiling;
     }
 
-    num_p num_res = num_base_to_rec(num, num_bases, max - 1, threads);
+    // One reciprocal per level; every node at level i divides by num_bases[i]
+    num_p num_recips[len];
+    for(uint64_t i=0; i<max; i++)
+    {
+        num_recips[i] = i
+            ? num_base_to_recip_next(
+                num_recips[i-1],
+                num_bases[i-1]->count,
+                num_bases[i],
+                threads
+            )
+            : num_base_to_recip_seed(base);
+    }
+
+    num_p num_res = num_base_to_rec(num, num_bases, num_recips, max - 1, threads);
 
     for(uint64_t i=0; i<max; i++)
     {
         num_free(num_bases[i]);
+        num_free(num_recips[i]);
     }
 
     return num_res;

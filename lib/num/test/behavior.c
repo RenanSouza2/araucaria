@@ -685,6 +685,9 @@ static void test_num_cmp_offset(bool show)
         <,
         (3, 0x8000000000000000, UINT64_MAX >> 1, 0x8000000000000000)
     )
+    TEST_NUM_CMP(12, (0), 3, ==, (0))
+    TEST_NUM_CMP(13, (1, 1), 3, >, (0))
+    TEST_NUM_CMP(14, (2, 1, 2), 5, >, (0))
 
     #undef TEST_NUM_CMP
 
@@ -2814,6 +2817,37 @@ static void test_fuzz_num_base_to_threads(bool show)
     TEST_FN_CLOSE
 }
 
+// num_base_from shares no code with num_base_to, so the round trip oracles the
+// conversion. COUNT has to put a level's divisor over base_to_barrett_min_limbs
+// for the reciprocal path to run; base 2 is the case whose divisors land on
+// exact powers of 2^64.
+static void test_fuzz_num_base_to_round_trip(bool show)
+{
+    TEST_FN_OPEN
+
+    #define TEST_FUZZ_NUM_BASE_TO_ROUND_TRIP(TAG, COUNT, BASE, RUNS)  \
+    {                                                                 \
+        TEST_FUZZ_CASE_OPEN(TAG, RUNS)                                \
+        {                                                             \
+            fuzz_seed(_tag);                                          \
+            num_p num = num_create_rand(COUNT);                       \
+            num_p num_res = num_base_to(num_copy(num), BASE);         \
+            num_res = num_base_from(num_res, BASE);                   \
+            assert(num_eq_dbg(num_res, num));                         \
+        }                                                             \
+        TEST_FUZZ_CASE_CLOSE                                          \
+    }
+
+    TEST_FUZZ_NUM_BASE_TO_ROUND_TRIP(1,  400,                   10, 3)
+    TEST_FUZZ_NUM_BASE_TO_ROUND_TRIP(2,  200,                    2, 3)
+    TEST_FUZZ_NUM_BASE_TO_ROUND_TRIP(3,  300,                65536, 3)
+    TEST_FUZZ_NUM_BASE_TO_ROUND_TRIP(4, 1500, 1000000000000000000, 2)
+
+    #undef TEST_FUZZ_NUM_BASE_TO_ROUND_TRIP
+
+    TEST_FN_CLOSE
+}
+
 static void test_num_base_from(bool show)
 {
     TEST_FN_OPEN
@@ -3273,6 +3307,44 @@ static void test_fuzz_num_bz_div(bool show)
 
     #undef TEST_FUZZ_NUM_BZ_DIV_THREADED
 
+    // ZEROS low limbs cleared: at ZEROS >= COUNT_2/2 the divisor's low half is
+    // zero, which is what num_div_mod_bz_rec multiplies its quotient estimate by
+    #define TEST_FUZZ_NUM_BZ_DIV_LOW_ZERO(TAG, COUNT_1, COUNT_2, ZEROS, RUNS)  \
+    {                                                                          \
+        TEST_FUZZ_CASE_OPEN(TAG, RUNS)                                         \
+        {                                                                      \
+            fuzz_seed(_tag);                                                   \
+            num_p num_1 = num_create_rand(COUNT_1);                            \
+            num_p num_2 = num_create_rand(COUNT_2);                            \
+            for(uint64_t i=0; i<(ZEROS); i++)                                  \
+            {                                                                  \
+                num_2->chunk[i] = 0;                                           \
+            }                                                                  \
+            num_p num_q, num_r;                                                \
+            num_div_mod(&num_q, &num_r, num_copy(num_1), num_copy(num_2));     \
+            assert(num_cmp(num_r, num_2) < 0)                                  \
+            num_p num_aux = num_mul(num_copy(num_q), num_copy(num_2));         \
+            num_aux = num_add(num_aux, num_copy(num_r));                       \
+            assert(num_eq_dbg(num_copy(num_aux), num_copy(num_1)))             \
+            num_free(num_1);                                                   \
+            num_free(num_2);                                                   \
+            num_free(num_aux);                                                 \
+            num_free(num_q);                                                   \
+            num_free(num_r);                                                   \
+        }                                                                      \
+        TEST_FUZZ_CASE_CLOSE                                                   \
+    }
+
+    TEST_FUZZ_NUM_BZ_DIV_LOW_ZERO(14, 11,  5,  2, 20)
+    TEST_FUZZ_NUM_BZ_DIV_LOW_ZERO(15, 20,  8,  4, 20)
+    TEST_FUZZ_NUM_BZ_DIV_LOW_ZERO(16, 40, 16,  8, 10)
+    TEST_FUZZ_NUM_BZ_DIV_LOW_ZERO(17, 67, 32, 16,  5)
+    TEST_FUZZ_NUM_BZ_DIV_LOW_ZERO(18, 20,  8,  7, 20)
+    TEST_FUZZ_NUM_BZ_DIV_LOW_ZERO(19, 40, 16, 15, 10)
+    TEST_FUZZ_NUM_BZ_DIV_LOW_ZERO(20, 67, 32, 31,  5)
+
+    #undef TEST_FUZZ_NUM_BZ_DIV_LOW_ZERO
+
     TEST_FN_CLOSE
 }
 
@@ -3335,6 +3407,7 @@ static void test_all(bool show)
 
     test_num_base_to(show);
     test_fuzz_num_base_to_threads(show);
+    test_fuzz_num_base_to_round_trip(show);
     test_num_base_from(show);
 
     test_fuzz_num_ssm_shift_round_trip(show);
