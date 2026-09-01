@@ -261,6 +261,137 @@ uint64_t araucaria_disk_config_get_threshold_bytes()
 
 
 
+static void ssm_worker_range(
+    uint64_t worker,
+    uint64_t workers,
+    uint64_t K,
+    uint64_t * out_start,
+    uint64_t * out_end
+);
+
+// Digits one base 1e18 limb holds; every field but a number's leading one is
+// padded to it
+constexpr uint64_t dec_digits_per_limb = 18;
+
+// Formatted text held at once, bounding the buffer over a dump of any length
+constexpr uint64_t dec_dump_chunk_bytes = U64(64) * 1024 * 1024;
+
+static const char dec_pair[201] =
+    "00010203040506070809101112131415161718192021222324"
+    "25262728293031323334353637383940414243444546474849"
+    "50515253545556575859606162636465666768697071727374"
+    "75767778798081828384858687888990919293949596979899";
+
+// VALUE < 1e18, written as exactly dec_digits_per_limb characters
+static void dec_format_limb(char out[], uint64_t value)
+{
+    for(uint64_t i=dec_digits_per_limb; i; i-=2)
+    {
+        uint64_t pair = 2 * (value % 100);
+        value /= 100;
+        out[i-2] = dec_pair[pair];
+        out[i-1] = dec_pair[pair+1];
+    }
+}
+
+// Field j of a chunk holds limb TOP - j, so the workers write disjoint slices
+typedef struct
+{
+    char * out;
+    const uint64_t * chunk;
+    uint64_t top;
+    uint64_t idx_start;
+    uint64_t idx_end;
+} num_dec_worker_t;
+
+static void * num_dec_worker(void * arg)
+{
+    num_dec_worker_t * w = arg;
+    for(uint64_t j=w->idx_start; j<w->idx_end; j++)
+    {
+        dec_format_limb(&w->out[j * dec_digits_per_limb], w->chunk[w->top - j]);
+    }
+    return nullptr;
+}
+
+// Writes COUNT base 1e18 limbs, highest index first, as zero padded fields, after
+// ZEROS all zero ones. One write per chunk rather than per limb, and the fields
+// of a chunk land at known offsets, so they are formatted in parallel
+void num_dec_dump(
+    const uint64_t chunk[],
+    uint64_t count,
+    uint64_t zeros,
+    uint64_t threads
+)
+{
+    assert(threads);
+
+    uint64_t total = zeros + count;
+    if(total == 0)
+    {
+        return;
+    }
+
+    uint64_t fields_max = dec_dump_chunk_bytes / dec_digits_per_limb;
+    if(fields_max > total)
+    {
+        fields_max = total;
+    }
+
+    char * out = malloc(fields_max * dec_digits_per_limb);
+    assert(out);
+
+    for(uint64_t left=zeros; left; )
+    {
+        uint64_t fields = left < fields_max ? left : fields_max;
+        memset(out, '0', fields * dec_digits_per_limb);
+        fwrite(out, 1, fields * dec_digits_per_limb, stdout);
+        left -= fields;
+    }
+
+    pthread_t * worker_ids = malloc(threads * sizeof(pthread_t));
+    assert(worker_ids);
+    num_dec_worker_t * worker_args = malloc(threads * sizeof(*worker_args));
+    assert(worker_args);
+
+    for(uint64_t pos=0; pos<count; pos+=fields_max)
+    {
+        uint64_t fields = count - pos < fields_max ? count - pos : fields_max;
+        uint64_t workers = threads < fields ? threads : fields;
+
+        for(uint64_t w=0; w<workers; w++)
+        {
+            uint64_t idx_start, idx_end;
+            ssm_worker_range(w, workers, fields, &idx_start, &idx_end);
+
+            worker_args[w] = (num_dec_worker_t)
+            {
+                .out = out,
+                .chunk = chunk,
+                .top = count - 1 - pos,
+                .idx_start = idx_start,
+                .idx_end = idx_end,
+            };
+        }
+
+        for(uint64_t w=1; w<workers; w++)
+        {
+            TREAT(pthread_create(&worker_ids[w], nullptr, num_dec_worker, &worker_args[w]))
+        }
+        num_dec_worker(&worker_args[0]);
+        for(uint64_t w=1; w<workers; w++)
+        {
+            TREAT(pthread_join(worker_ids[w], nullptr))
+        }
+
+        fwrite(out, 1, fields * dec_digits_per_limb, stdout);
+    }
+
+    free(worker_args);
+    free(worker_ids);
+    free(out);
+}
+
 static void num_display_dec_core(num_p num, uint64_t threads)
 {
     if(num->count == 0)
@@ -272,10 +403,7 @@ static void num_display_dec_core(num_p num, uint64_t threads)
     constexpr uint64_t base = 1'000'000'000'000'000'000;
     num = num_base_to_threads(num_copy(num), base, threads);
     printf(U64P(), num->chunk[num->count-1]);
-    for(uint64_t i=num->count-2; i!=UINT64_MAX; i--)
-    {
-        printf(U64P(018), num->chunk[i]);
-    }
+    num_dec_dump(num->chunk, num->count - 1, 0, threads);
 
     num_free(num);
 }
@@ -504,6 +632,21 @@ num_p num_normalize(num_p num)
     }
 
     return num;
+}
+
+// Bits in NUM, 0 when it is empty
+static uint64_t num_bit_count(num_p num)
+{
+    CLU_HANDLER_IS_SAFE(num);
+    assert(num);
+
+    if(num->count == 0)
+    {
+        return 0;
+    }
+
+    return ((num->count - 1) * chunk_bits)
+        + (uint64_t)stdc_bit_width(num->chunk[num->count-1]);
 }
 
 num_p num_head_grow(num_p num, uint64_t count) // TODO test
@@ -6080,6 +6223,12 @@ constexpr uint64_t base_to_barrett_min_limbs = 32;
 // Pieces the level loop splits down to before the leaf pass takes over
 constexpr uint64_t base_to_pieces_per_thread = 4;
 
+// The top level runs a single division, and its quotient is short whenever num's
+// digit count sits just past a power of two. Under this share of the divisor the
+// reciprocal costs more to build than its division saves, and the generic one --
+// whose cost follows the quotient, not the divisor -- takes the level instead
+constexpr uint64_t base_to_barrett_top_quotient_share = 2;
+
 // num_recips[i] underestimates 2^(64 * (2n + g)) / num_bases[i], with
 // n = num_bases[i]->count and g = base_to_recip_guard. The guard limb holds the
 // quotient estimate within 2 of the true quotient.
@@ -6193,7 +6342,7 @@ static void num_base_to_div(
 
 // Requires num_x < num_base ^ 2
 // Consumes NUM_X, keeps NUM_BASE and NUM_RECIP
-// num_recip is null on the levels the reciprocal isn't built for
+// num_recip is null on a level the reciprocal chain stops short of
 static void num_base_to_split(
     num_p *out_num_q,
     num_p *out_num_r,
@@ -6210,13 +6359,13 @@ static void num_base_to_split(
         return;
     }
 
-    if(num_recip)
+    if(num_recip == nullptr || num_base->count < base_to_barrett_min_limbs)
     {
-        num_base_to_div(out_num_q, out_num_r, num_x, num_base, num_recip, threads);
+        num_div_mod_threads(out_num_q, out_num_r, num_x, num_copy(num_base), threads);
         return;
     }
 
-    num_div_mod_threads(out_num_q, out_num_r, num_x, num_copy(num_base), threads);
+    num_base_to_div(out_num_q, out_num_r, num_x, num_base, num_recip, threads);
 }
 
 // Writes the digits of NUM into num_res from limb POS up; consumes NUM.
@@ -6348,14 +6497,29 @@ num_p num_base_to_threads(num_p num, uint64_t base, uint64_t threads)
     num_p num_base = num_wrap(base);
     num_p num_bases[len];
 
-    uint64_t max;
-    for(max=0; num_cmp(num_base, num) <= 0; max++)
+    // The square that ends the table is the most expensive one in the chain, so
+    // it is only taken when the bit counts leave the comparison undecided -- they
+    // do over the two lengths num_base ^ 2 can have. A null num_base past the
+    // loop means the table owns the last one
+    uint64_t max = 0;
+    while(num_cmp(num_base, num) <= 0)
     {
         assert(max < len);
-        num_bases[max] = num_copy(num_base);
-        num_base = num_sqr(num_base);
+        num_bases[max++] = num_base;
+
+        if((2 * num_bit_count(num_base)) - 1 > num_bit_count(num))
+        {
+            num_base = nullptr;
+            break;
+        }
+
+        num_base = num_sqr_threads(num_copy(num_base), threads);
     }
-    num_free(num_base);
+
+    if(num_base)
+    {
+        num_free(num_base);
+    }
 
     if(max == 0)
     {
@@ -6368,41 +6532,29 @@ num_p num_base_to_threads(num_p num, uint64_t base, uint64_t threads)
         leaf--;
     }
 
-    // The chain has to be walked all the way up whatever the top level needs, so
-    // the levels the leaf pass runs concurrently are kept from that same pass;
-    // the ones the level loop uses are freed as it descends past them
+    uint64_t top = num_bases[max-1]->count;
+    uint64_t levels = (num->count - top) * base_to_barrett_top_quotient_share < top
+        ? max - 1
+        : max;
+
+    // One per level, each Newton step doubling the precision of the one below.
+    // The level loop frees them as it descends; the levels the leaf pass runs
+    // concurrently are freed at the end
     num_p num_recips[len];
     for(uint64_t i=0; i<max; i++)
     {
         num_recips[i] = nullptr;
     }
-
-    if(num_bases[max-1]->count >= base_to_barrett_min_limbs)
+    for(uint64_t i=0; i<levels; i++)
     {
-        num_p num_recip = nullptr;
-        for(uint64_t i=0; i<max; i++)
-        {
-            num_p num_recip_next = i
-                ? num_base_to_recip_next(
-                    num_recip,
-                    num_bases[i-1]->count,
-                    num_bases[i],
-                    threads
-                )
-                : num_base_to_recip_seed(base);
-
-            // the link is either handed to num_recips or dropped here
-            if(i && num_recips[i-1] == nullptr)
-            {
-                num_free(num_recip);
-            }
-
-            num_recip = num_recip_next;
-            if(num_bases[i]->count >= base_to_barrett_min_limbs)
-            {
-                num_recips[i] = num_recip;
-            }
-        }
+        num_recips[i] = i
+            ? num_base_to_recip_next(
+                num_recips[i-1],
+                num_bases[i-1]->count,
+                num_bases[i],
+                threads
+            )
+            : num_base_to_recip_seed(base);
     }
 
     pthread_t * worker_ids = malloc(threads * sizeof(pthread_t));
@@ -6455,11 +6607,14 @@ num_p num_base_to_threads(num_p num, uint64_t base, uint64_t threads)
         if(num_recips[level])
         {
             num_free(num_recips[level]);
-            num_recips[level] = nullptr;
         }
     }
 
-    // The top pieces are empty whenever num needs less than B(max) digits
+    free(level_args);
+
+    // The top pieces are empty whenever num needs less than B(max) digits. They
+    // are dropped here rather than handed out: the worker ranges are contiguous,
+    // so an empty tail would leave whole workers with nothing to convert
     uint64_t count = size;
     while(count && num_pieces[count-1]->count == 0)
     {
@@ -6494,17 +6649,13 @@ num_p num_base_to_threads(num_p num, uint64_t base, uint64_t threads)
     {
         TREAT(pthread_create(&worker_ids[w], nullptr, num_base_to_leaf_worker, &leaf_args[w]))
     }
-    if(workers)
-    {
-        num_base_to_leaf_worker(&leaf_args[0]);
-    }
+    num_base_to_leaf_worker(&leaf_args[0]);
     for(uint64_t w=1; w<workers; w++)
     {
         TREAT(pthread_join(worker_ids[w], nullptr))
     }
 
     free(leaf_args);
-    free(level_args);
     free(worker_ids);
     free(num_pieces);
 
@@ -6512,12 +6663,9 @@ num_p num_base_to_threads(num_p num, uint64_t base, uint64_t threads)
     {
         num_free(num_bases[i]);
     }
-    for(uint64_t i=0; i<max; i++)
+    for(uint64_t i=0; i<leaf; i++)
     {
-        if(num_recips[i])
-        {
-            num_free(num_recips[i]);
-        }
+        num_free(num_recips[i]);
     }
 
     return num_normalize(num_res);

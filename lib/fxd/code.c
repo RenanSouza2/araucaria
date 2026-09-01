@@ -155,15 +155,7 @@ static void fxd_num_display_dec_core(fxd_num_t fxd, uint64_t threads)
     num_free(num);
 
     num_lo = num_base_to_threads(num_lo, FXD_DEC_BASE, threads);
-    for(uint64_t i=t-1; i!=num_lo->count-1; i--)
-    {
-        printf("" U64P(018) "", (uint64_t)0);
-    }
-
-    for(uint64_t i=num_lo->count-1; i!=UINT64_MAX; i--)
-    {
-        printf("" U64P(018) "", num_lo->chunk[i]);
-    }
+    num_dec_dump(num_lo->chunk, num_lo->count, t - num_lo->count, threads);
 
     num_free(num_lo);
 }
