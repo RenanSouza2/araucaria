@@ -6410,63 +6410,105 @@ static void num_base_to_rec(
     num_base_to_rec(num_res, pos + B(i), num_q, num_bases, num_recips, i - 1);
 }
 
-// One level of the split: piece j becomes the low half at 2j and the high half
-// at 2j + 1, all against the one divisor num_base
+// One subtree of the split: a piece below num_bases[level + 1], whose digits go
+// to num_res from limb POS up
 typedef struct
 {
-    num_p * num_src;
-    num_p * num_dst;
-    num_p num_base;
-    num_p num_recip;
-    uint64_t idx_start;
-    uint64_t idx_end;
-    uint64_t threads;
-} num_base_to_level_worker_t;
+    num_p num;
+    uint64_t level;
+    uint64_t pos;
+} num_base_to_task_t;
 
-static void * num_base_to_level_worker(void * arg)
-{
-    num_base_to_level_worker_t * w = arg;
-    for(uint64_t j=w->idx_start; j<w->idx_end; j++)
-    {
-        num_base_to_split(
-            &w->num_dst[(2 * j) + 1],
-            &w->num_dst[2 * j],
-            w->num_src[j],
-            w->num_base,
-            w->num_recip,
-            w->threads
-        );
-    }
-    return nullptr;
-}
-
-// Piece j is below num_bases[level], so its digits occupy num_res from
-// j * B(level) up
+// The levels are not run in lockstep. A piece is split as soon as any worker is
+// free and its halves join the stack immediately, so a worker that would have sat
+// out a level -- empty pieces are a whole half of the stack whenever num's digit
+// count falls short of B(max) -- takes whatever else is ready instead. THREADS is
+// shared out over the tasks outstanding, so the top of the split, where there is
+// only one, still hands its multiplies the whole pool
 typedef struct
 {
+    pthread_mutex_t lock;
+    pthread_cond_t cond;
+    num_base_to_task_t * task;
+    uint64_t count;
+    uint64_t active;
     num_p num_res;
-    num_p * num_pieces;
     num_p * num_bases;
     num_p * num_recips;
-    uint64_t level;
-    uint64_t idx_start;
-    uint64_t idx_end;
-} num_base_to_leaf_worker_t;
+    uint64_t leaf;
+    uint64_t threads;
+} num_base_to_pool_t;
 
-static void * num_base_to_leaf_worker(void * arg)
+static void * num_base_to_pool_worker(void * arg)
 {
-    num_base_to_leaf_worker_t * w = arg;
-    for(uint64_t j=w->idx_start; j<w->idx_end; j++)
+    num_base_to_pool_t * pool = arg;
+
+    TREAT(pthread_mutex_lock(&pool->lock))
+    while(true)
     {
-        num_base_to_rec(
-            w->num_res,
-            j << w->level,
-            w->num_pieces[j],
-            w->num_bases,
-            w->num_recips,
-            w->level - 1
-        );
+        while(pool->count == 0 && pool->active)
+        {
+            TREAT(pthread_cond_wait(&pool->cond, &pool->lock))
+        }
+
+        if(pool->count == 0)
+        {
+            break;
+        }
+
+        num_base_to_task_t task = pool->task[--pool->count];
+        pool->active++;
+        uint64_t share = pool->threads / (pool->count + pool->active);
+        TREAT(pthread_mutex_unlock(&pool->lock))
+
+        num_p num_q = nullptr;
+        num_p num_r = nullptr;
+        if(task.level != UINT64_MAX && task.level >= pool->leaf)
+        {
+            num_base_to_split(
+                &num_q,
+                &num_r,
+                task.num,
+                pool->num_bases[task.level],
+                pool->num_recips[task.level],
+                share ? share : 1
+            );
+        }
+        else
+        {
+            // below leaf the whole subtree is cheaper to convert on one thread
+            num_base_to_rec(
+                pool->num_res,
+                task.pos,
+                task.num,
+                pool->num_bases,
+                pool->num_recips,
+                task.level
+            );
+        }
+
+        TREAT(pthread_mutex_lock(&pool->lock))
+        pool->active--;
+        if(num_r)
+        {
+            pool->task[pool->count++] = (num_base_to_task_t)
+            {
+                .num = num_r,
+                .level = task.level - 1,
+                .pos = task.pos,
+            };
+            pool->task[pool->count++] = (num_base_to_task_t)
+            {
+                .num = num_q,
+                .level = task.level - 1,
+                .pos = task.pos + B(task.level),
+            };
+        }
+        TREAT(pthread_cond_broadcast(&pool->cond))
     }
+
+    TREAT(pthread_cond_broadcast(&pool->cond))
+    TREAT(pthread_mutex_unlock(&pool->lock))
     return nullptr;
 }
 
@@ -6557,115 +6599,57 @@ num_p num_base_to_threads(num_p num, uint64_t base, uint64_t threads)
             : num_base_to_recip_seed(base);
     }
 
+    // A task's digits land at an offset fixed by its place in the split, so every
+    // worker writes into one result buffer. B(max) is up to twice the digits num
+    // needs; the pages past them are never touched
+    num_p num_res = num_create(CLU_ARGS(B(max), B(max)));
+
+    // never more tasks than the pieces at the deepest level the pool splits to
+    num_base_to_pool_t pool =
+    {
+        .task = malloc((B(max - leaf) + threads) * sizeof(num_base_to_task_t)),
+        .count = 1,
+        .num_res = num_res,
+        .num_bases = num_bases,
+        .num_recips = num_recips,
+        .leaf = leaf,
+        .threads = threads,
+    };
+    assert(pool.task);
+    TREAT(pthread_mutex_init(&pool.lock, nullptr))
+    TREAT(pthread_cond_init(&pool.cond, nullptr))
+
+    pool.task[0] = (num_base_to_task_t)
+    {
+        .num = num,
+        .level = max - 1,
+        .pos = 0,
+    };
+
     pthread_t * worker_ids = malloc(threads * sizeof(pthread_t));
     assert(worker_ids);
-    num_base_to_level_worker_t * level_args = malloc(threads * sizeof(*level_args));
-    assert(level_args);
-
-    num_p * num_pieces = malloc(sizeof(num_p));
-    assert(num_pieces);
-    num_pieces[0] = num;
-    uint64_t size = 1;
-
-    for(uint64_t level=max-1; level!=leaf-1; level--)
+    for(uint64_t w=1; w<threads; w++)
     {
-        num_p * num_pieces_next = malloc(2 * size * sizeof(num_p));
-        assert(num_pieces_next);
-
-        uint64_t workers = threads < size ? threads : size;
-        for(uint64_t w=0; w<workers; w++)
-        {
-            uint64_t idx_start, idx_end;
-            ssm_worker_range(w, workers, size, &idx_start, &idx_end);
-
-            level_args[w] = (num_base_to_level_worker_t)
-            {
-                .num_src = num_pieces,
-                .num_dst = num_pieces_next,
-                .num_base = num_bases[level],
-                .num_recip = num_recips[level],
-                .idx_start = idx_start,
-                .idx_end = idx_end,
-                .threads = threads / workers,
-            };
-        }
-
-        for(uint64_t w=1; w<workers; w++)
-        {
-            TREAT(pthread_create(&worker_ids[w], nullptr, num_base_to_level_worker, &level_args[w]))
-        }
-        num_base_to_level_worker(&level_args[0]);
-        for(uint64_t w=1; w<workers; w++)
-        {
-            TREAT(pthread_join(worker_ids[w], nullptr))
-        }
-
-        free(num_pieces);
-        num_pieces = num_pieces_next;
-        size *= 2;
-
-        if(num_recips[level])
-        {
-            num_free(num_recips[level]);
-        }
+        TREAT(pthread_create(&worker_ids[w], nullptr, num_base_to_pool_worker, &pool))
     }
-
-    free(level_args);
-
-    // The top pieces are empty whenever num needs less than B(max) digits. They
-    // are dropped here rather than handed out: the worker ranges are contiguous,
-    // so an empty tail would leave whole workers with nothing to convert
-    uint64_t count = size;
-    while(count && num_pieces[count-1]->count == 0)
-    {
-        count--;
-        num_free(num_pieces[count]);
-    }
-
-    num_p num_res = num_create(CLU_ARGS(count << leaf, count << leaf));
-
-    num_base_to_leaf_worker_t * leaf_args = malloc(threads * sizeof(*leaf_args));
-    assert(leaf_args);
-
-    uint64_t workers = threads < count ? threads : count;
-    for(uint64_t w=0; w<workers; w++)
-    {
-        uint64_t idx_start, idx_end;
-        ssm_worker_range(w, workers, count, &idx_start, &idx_end);
-
-        leaf_args[w] = (num_base_to_leaf_worker_t)
-        {
-            .num_res = num_res,
-            .num_pieces = num_pieces,
-            .num_bases = num_bases,
-            .num_recips = num_recips,
-            .level = leaf,
-            .idx_start = idx_start,
-            .idx_end = idx_end,
-        };
-    }
-
-    for(uint64_t w=1; w<workers; w++)
-    {
-        TREAT(pthread_create(&worker_ids[w], nullptr, num_base_to_leaf_worker, &leaf_args[w]))
-    }
-    num_base_to_leaf_worker(&leaf_args[0]);
-    for(uint64_t w=1; w<workers; w++)
+    num_base_to_pool_worker(&pool);
+    for(uint64_t w=1; w<threads; w++)
     {
         TREAT(pthread_join(worker_ids[w], nullptr))
     }
 
-    free(leaf_args);
+    TREAT(pthread_cond_destroy(&pool.cond))
+    TREAT(pthread_mutex_destroy(&pool.lock))
     free(worker_ids);
-    free(num_pieces);
+    free(pool.task);
 
     for(uint64_t i=0; i<max; i++)
     {
         num_free(num_bases[i]);
-    }
-    for(uint64_t i=0; i<leaf; i++)
-    {
-        num_free(num_recips[i]);
+        if(num_recips[i])
+        {
+            num_free(num_recips[i]);
+        }
     }
 
     return num_normalize(num_res);
