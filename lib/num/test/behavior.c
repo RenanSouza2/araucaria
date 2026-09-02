@@ -2942,7 +2942,7 @@ static void test_fuzz_num_ssm_pad_no_wrap_round_trip(bool show)
             num_p num_in = num_create_rand(COUNT);                      \
             ssm_params_t p = ssm_get_params(COUNT);                     \
             num_p num_middle = num_ssm_pad_no_wrap(num_in, &p);         \
-            num_p num_out = num_ssm_depad_no_wrap(num_middle, &p);      \
+            num_p num_out = num_ssm_depad_no_wrap(num_middle, &p, 1);      \
             assert(num_eq_dbg(num_in, num_out));                        \
         }                                                               \
         TEST_FUZZ_CASE_CLOSE                                            \

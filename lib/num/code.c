@@ -4876,21 +4876,142 @@ num_p num_ssm_pad_no_wrap(num_p num, ssm_params_p p)
     return num_fft;
 }
 
-num_p num_ssm_depad_no_wrap(num_p num, ssm_params_p p)
+// Adds COUNT limbs of SRC into DEST, rippling the carry no further than LIMIT
+// limbs from DEST. Whatever leaves that window is returned rather than carried
+static uint64_t ssm_depad_add(
+    uint64_t * restrict dest,
+    const uint64_t * restrict src,
+    uint64_t count,
+    uint64_t limit
+)
+{
+    uint128_t carry = 0;
+
+    #pragma GCC unroll 32
+    for(uint64_t i = 0; i < count; i++)
+    {
+        carry += U128(src[i]) + dest[i];
+        dest[i] = LOW(carry);
+        carry = HIGH(carry);
+    }
+
+    for(uint64_t i = count; carry && i < limit; i++)
+    {
+        carry += dest[i];
+        dest[i] = LOW(carry);
+        carry = HIGH(carry);
+    }
+
+    return LOW(carry);
+}
+
+// A worker owns the result limbs [pos_init, pos_max) and adds into them every
+// block that reaches them -- blocks overlap, so the ones at either end are added
+// in part by two workers. Carries stop at pos_max and are handed back
+typedef struct
+{
+    num_p num_res;
+    num_p num_fft;
+    ssm_params_p p;
+    uint64_t pos_init;
+    uint64_t pos_max;
+    uint64_t carry;
+} ssm_depad_worker_t;
+
+static void * ssm_depad_worker(void * arg)
+{
+    ssm_depad_worker_t * w = arg;
+
+    uint64_t M = w->p->M;
+    uint64_t n = w->p->n;
+
+    uint64_t first = w->pos_init < n ? 0 : ((w->pos_init - n) / M) + 1;
+    uint64_t last = (w->pos_max - 1) / M;
+    if(last >= w->p->K)
+    {
+        last = w->p->K - 1;
+    }
+
+    uint64_t carry = 0;
+    for(uint64_t i = first; i <= last; i++)
+    {
+        uint64_t block = M * i;
+        uint64_t skip = w->pos_init > block ? w->pos_init - block : 0;
+        uint64_t pos = block + skip;
+        uint64_t end = block + n < w->pos_max ? block + n : w->pos_max;
+
+        carry += ssm_depad_add(
+            &w->num_res->chunk[pos],
+            &w->num_fft->chunk[(n * i) + skip],
+            end - pos,
+            w->pos_max - pos
+        );
+    }
+
+    w->carry = carry;
+    return nullptr;
+}
+
+// Blocks below this leave too little per worker to pay for the threads
+constexpr uint64_t ssm_depad_min_limbs_to_thread = 65536;
+
+num_p num_ssm_depad_no_wrap(num_p num, ssm_params_p p, uint64_t threads)
 {
     CLU_HANDLER_IS_SAFE(num)
     assert(num)
 
     uint64_t target_count = (p->M * (p->K - 1)) + p->n;
-    num_p num_res = num_create(CLU_ARGS(target_count, 0));
+    num_p num_res = num_create(CLU_ARGS(target_count, target_count));
 
-    for(uint64_t i = 0; i < p->K; i++)
+    uint64_t workers = target_count < ssm_depad_min_limbs_to_thread ? 1 : threads;
+    if(workers > p->K)
     {
-        num_t block;
-        num_span(&block, num, p->n * i, p->n * (i + 1));
-        num_add_offset(num_res, p->M * i, &block);
+        workers = p->K;
     }
 
+    pthread_t * worker_ids = malloc(workers * sizeof(pthread_t));
+    assert(worker_ids);
+    ssm_depad_worker_t * worker_args = malloc(workers * sizeof(*worker_args));
+    assert(worker_args);
+
+    for(uint64_t w=0; w<workers; w++)
+    {
+        uint64_t pos_init, pos_max;
+        ssm_worker_range(w, workers, target_count, &pos_init, &pos_max);
+
+        worker_args[w] = (ssm_depad_worker_t)
+        {
+            .num_res = num_res,
+            .num_fft = num,
+            .p = p,
+            .pos_init = pos_init,
+            .pos_max = pos_max,
+            .carry = 0,
+        };
+    }
+
+    for(uint64_t w=1; w<workers; w++)
+    {
+        TREAT(pthread_create(&worker_ids[w], nullptr, ssm_depad_worker, &worker_args[w]))
+    }
+    ssm_depad_worker(&worker_args[0]);
+    for(uint64_t w=1; w<workers; w++)
+    {
+        TREAT(pthread_join(worker_ids[w], nullptr))
+    }
+
+    // the result never overflows target_count, so the last range carries nothing
+    assert(worker_args[workers-1].carry == 0);
+    for(uint64_t w=0; w+1<workers; w++)
+    {
+        if(worker_args[w].carry)
+        {
+            num_add_uint_offset(num_res, worker_args[w].pos_max, worker_args[w].carry);
+        }
+    }
+
+    free(worker_args);
+    free(worker_ids);
     num_free(num);
     return num_normalize(num_res);
 }
@@ -4938,7 +5059,7 @@ num_p num_mul_ssm(num_p num_1, num_p num_2, bool free_inputs, uint64_t threads)
     num_free(num_fft_2);
     num_free(num_aux_2);
 
-    return num_ssm_depad_no_wrap(num_fft_1, &p);
+    return num_ssm_depad_no_wrap(num_fft_1, &p, threads);
 }
 
 
@@ -5572,7 +5693,7 @@ num_p num_sqr_ssm(num_p num, uint64_t threads)
     num_ssm_fft_inv(num_aux_2, num_fft, &p, threads);
     num_free(num_aux_2);
 
-    return num_ssm_depad_no_wrap(num_fft, &p);
+    return num_ssm_depad_no_wrap(num_fft, &p, threads);
 }
 
 // Returns quotient

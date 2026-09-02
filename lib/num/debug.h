@@ -103,7 +103,7 @@ STATIC void num_ssm_depad_wrap(
 );
 
 STATIC num_p num_ssm_pad_no_wrap(num_p num, ssm_params_p p);
-STATIC num_p num_ssm_depad_no_wrap(num_p num_fft, ssm_params_p p);
+STATIC num_p num_ssm_depad_no_wrap(num_p num_fft, ssm_params_p p, uint64_t threads);
 STATIC void num_ssm_mul_wrap(
     num_p num_aux_1,
     num_p num_aux_2,
