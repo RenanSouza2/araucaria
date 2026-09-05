@@ -12,11 +12,10 @@
 
 
 
-// A file is [amount][end_0..end_{amount-1}][entry_0]..[entry_n][MAGIC_FILE]. A slot
-// holds the offset one past its entry, 0 while the entry is not committed, so
-// entry i spans [i ? end_{i-1} : header, end_i). Each entry ends in
-// MAGIC_ENTRY, written after its payload: that, not the slot, is what certifies
-// the entry, so an interrupted write leaves no valid-looking partial result.
+// Layout: [amount][end_0..end_{amount-1}][entry_0]..[entry_n][MAGIC_FILE].
+// Slot i holds the offset one past entry i, 0 until committed, so entry i
+// spans [i ? end_{i-1} : header, end_i). MAGIC_ENTRY, written after the
+// payload, is what certifies an entry; the slot is not.
 static constexpr uint64_t MAGIC_FILE = 0xd0bbe;
 static constexpr uint64_t MAGIC_ENTRY = 0xe10be;
 
@@ -98,10 +97,8 @@ void file_write_start(file_p fp)
     fseek_safe(fp->fp, (long)fp->pos, SEEK_SET);
 }
 
-// The seek to the slot flushes the payload, so it reaches the kernel before
-// the offset that certifies it. The offset itself has to be flushed here too:
-// left in the stream buffer it would die with the process, and a run killed
-// mid-join would come back to an entry it had already written.
+// Ordering: the seek flushes the payload before the slot offset that certifies
+// it, and the offset must be flushed too, never left in the stream buffer.
 void file_write_end(file_p fp)
 {
     file_write_uint64(fp, MAGIC_ENTRY);
@@ -117,9 +114,7 @@ void file_write_end(file_p fp)
 
 
 
-// Entries already committed, stopping at the first slot that is unset, points
-// outside the file, or does not end in MAGIC_ENTRY. Entries are written in
-// order, so the first gap ends the run.
+// Entries are written in order, so the first invalid slot ends the run.
 static uint64_t file_read_count(FILE *fp, uint64_t amount, uint64_t size)
 {
     uint64_t pos = file_header_size(amount);
@@ -144,9 +139,8 @@ static uint64_t file_read_count(FILE *fp, uint64_t amount, uint64_t size)
     return amount;
 }
 
-// Resumes an interrupted write: entries already committed are kept and
-// fp->count reports how many. Truncates and starts over when the file is
-// missing, unreadable, or was written for a different amount.
+// Falls back to file_write_open when the file is missing, unreadable, or was
+// written for a different amount.
 file_t file_write_open_resume(const char file_path[], uint64_t amount)
 {
     FILE *fp = fopen(file_path, "r+b");
@@ -220,8 +214,8 @@ FILE* file_read_open(const char file_path[])
         return nullptr;
     }
 
-    // The last entry has to end where MAGIC_FILE begins: a payload word that
-    // happens to equal it does not on its own make a file complete.
+    // The last entry must end where MAGIC_FILE begins; a payload word equal
+    // to MAGIC_FILE is not on its own proof of completeness.
     fseek_safe(fp, (long)file_slot_pos(amount - 1), SEEK_SET);
     if(file_read_uint64(fp) != size - sizeof(uint64_t))
     {

@@ -275,11 +275,6 @@ void flt_num_display_dec(flt_num_t flt) // TODO TEST
     flt_num_display_dec_core(flt, 1);
 }
 
-// Same as flt_num_display_dec, but the caller picks how many threads the
-// underlying fxd_num_display_dec_threads may fan out across. The exponent
-// normalization above this stays single-threaded -- it works on a fixed
-// small size (flt_num_set_size(flt_1, 2)) regardless of flt's precision, so
-// there's nothing there worth threading.
 void flt_num_display_dec_threads(flt_num_t flt, uint64_t threads) // TODO TEST
 {
     CLU_FLT_IS_SAFE(flt);

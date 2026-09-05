@@ -167,8 +167,6 @@ void fxd_num_display_dec(fxd_num_t fxd)
     fxd_num_display_dec_core(fxd, 1);
 }
 
-// Same as fxd_num_display_dec, but the caller picks how many threads the
-// integer-part display and fractional-part conversion may each fan out across.
 void fxd_num_display_dec_threads(fxd_num_t fxd, uint64_t threads)
 {
     CLU_FXD_IS_SAFE(fxd)

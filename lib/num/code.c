@@ -314,9 +314,8 @@ static void * num_dec_worker(void * arg)
     return nullptr;
 }
 
-// Writes COUNT base 1e18 limbs, highest index first, as zero padded fields, after
-// ZEROS all zero ones. One write per chunk rather than per limb, and the fields
-// of a chunk land at known offsets, so they are formatted in parallel
+// Writes COUNT base 1e18 limbs, highest index first, as zero padded fields,
+// after ZEROS all zero ones. One write per chunk, its fields at fixed offsets
 void num_dec_dump(
     const uint64_t chunk[],
     uint64_t count,
@@ -416,8 +415,6 @@ void num_display_dec(num_p num)
     num_display_dec_core(num, 1);
 }
 
-// Same as num_display_dec, but the caller picks how many threads the base
-// conversion (num_base_to_threads) may fan out across -- see its comment.
 void num_display_dec_threads(num_p num, uint64_t threads)
 {
     CLU_HANDLER_IS_SAFE(num);
@@ -5307,8 +5304,8 @@ static mem_profile_t ssm_pointwise_mem_estimate(
 }
 
 // Integral and duration for one num_mul_threads, mirroring num_mul_core's
-// allocation sites. Returned unreduced so callers can compose a time-weighted
-// mean across sub products; averaging sub averages weights them all equally.
+// allocation sites. Unreduced, so callers can compose a time-weighted mean
+// across sub products.
 static mem_profile_t mul_mem_profile(
     uint64_t count_1,
     uint64_t count_2,
@@ -5340,9 +5337,8 @@ static mem_profile_t mul_mem_profile(
         };
     }
 
-    // num_mul_karatsuba: the halves it is not currently multiplying, plus the
-    // products already folded back, stay live across all three sub products and
-    // come to about one operand pair either way
+    // num_mul_karatsuba keeps about one operand pair live across all three
+    // sub products
     if(mul_is_karatsuba(count_1, count_2, disk_threshold_bytes))
     {
         uint64_t count_max = count_1 < count_2 ? count_2 : count_1;
@@ -6202,8 +6198,6 @@ num_p num_pow(num_p num, uint64_t value) // TODO TEST
     return num_pow_core(num, value, 1);
 }
 
-// Same as num_pow, but the caller picks how many threads each squaring/multiply
-// in the repeated-squaring loop may fan out across, same as num_mul_threads.
 num_p num_pow_threads(num_p num, uint64_t value, uint64_t threads) // TODO TEST
 {
     CLU_HANDLER_IS_SAFE(num);
@@ -6344,10 +6338,8 @@ constexpr uint64_t base_to_barrett_min_limbs = 32;
 // Pieces the level loop splits down to before the leaf pass takes over
 constexpr uint64_t base_to_pieces_per_thread = 4;
 
-// The top level runs a single division, and its quotient is short whenever num's
-// digit count sits just past a power of two. Under this share of the divisor the
-// reciprocal costs more to build than its division saves, and the generic one --
-// whose cost follows the quotient, not the divisor -- takes the level instead
+// The top level falls back to generic division when its quotient is under this
+// share of the divisor
 constexpr uint64_t base_to_barrett_top_quotient_share = 2;
 
 // num_recips[i] underestimates 2^(64 * (2n + g)) / num_bases[i], with
@@ -6405,8 +6397,7 @@ static num_p num_base_to_recip_refine(num_p num_y, num_p num_base, uint64_t thre
     return num_y;
 }
 
-// num_base is the square of the divisor num_recip_prev inverts, so squaring it
-// seeds this level at half precision; one Newton step recovers the rest.
+// num_base is the square of the divisor num_recip_prev inverts
 // Keeps NUM_RECIP_PREV
 static num_p num_base_to_recip_next(
     num_p num_recip_prev,
@@ -6540,12 +6531,9 @@ typedef struct
     uint64_t pos;
 } num_base_to_task_t;
 
-// The levels are not run in lockstep. A piece is split as soon as any worker is
-// free and its halves join the stack immediately, so a worker that would have sat
-// out a level -- empty pieces are a whole half of the stack whenever num's digit
-// count falls short of B(max) -- takes whatever else is ready instead. THREADS is
-// shared out over the tasks outstanding, so the top of the split, where there is
-// only one, still hands its multiplies the whole pool
+// Levels do not run in lockstep: a piece is split as soon as any worker is free
+// and its halves join the stack immediately. THREADS is shared out over the
+// tasks outstanding
 typedef struct
 {
     pthread_mutex_t lock;
@@ -6642,13 +6630,10 @@ num_p num_base_to(num_p num, uint64_t base)
     return num_base_to_threads(num, base, 1);
 }
 
-// Binary-splitting base conversion: at level i every piece is divided by
-// base ^ (2 ^ i), the remainder taking the low half of the piece's digits and the
-// quotient the high half. Levels run top down until there is a piece per worker,
-// then each piece is converted on one thread by num_base_to_rec. A piece's digit
-// offset follows from its index, so every worker writes into the one result
-// buffer and nothing is spliced afterwards. The reciprocals are built bottom up
-// by Newton doubling and freed as the loop descends past the level that uses one.
+// Binary splitting: at level i a piece is divided by base ^ (2 ^ i), remainder
+// low half, quotient high. A piece's digit offset follows from its index, so
+// every worker writes into the one result buffer and nothing is spliced. The
+// reciprocals are freed as the level loop descends past the level using each.
 num_p num_base_to_threads(num_p num, uint64_t base, uint64_t threads)
 {
     CLU_HANDLER_IS_SAFE(num);
@@ -6660,10 +6645,8 @@ num_p num_base_to_threads(num_p num, uint64_t base, uint64_t threads)
     num_p num_base = num_wrap(base);
     num_p num_bases[len];
 
-    // The square that ends the table is the most expensive one in the chain, so
-    // it is only taken when the bit counts leave the comparison undecided -- they
-    // do over the two lengths num_base ^ 2 can have. A null num_base past the
-    // loop means the table owns the last one
+    // The bit counts end the table without the final square; a null num_base
+    // past the loop means the table owns the last one
     uint64_t max = 0;
     while(num_cmp(num_base, num) <= 0)
     {

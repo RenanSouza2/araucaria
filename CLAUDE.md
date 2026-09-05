@@ -84,13 +84,16 @@ Values are little-endian arrays of 64-bit limbs.
 
 ### Multiplication dispatch (`lib/num/code.c`)
 
-`num_mul` picks the algorithm by operand size (threshold `256` limbs,
-`code.c:3899`):
+`num_mul_core` dispatches three ways, in this order:
 
-- Either operand below the threshold — classic schoolbook.
-- Both at or above it — `num_mul_ssm`: Schönhage–Strassen, splitting operands
-  into blocks, transforming with a negacyclic FFT modulo `2^(64·(n-1)) + 1`,
-  multiplying pointwise, transforming back.
+- `mul_is_classic` (`code.c:5149`) — either operand under `256` limbs: classic
+  schoolbook.
+- `mul_is_karatsuba` (`code.c:5078`) — the SSM arrays would exceed both
+  `mul_karatsuba_min_bytes` (256 MB) and `disk_threshold_bytes`: split
+  recursively rather than transform a working set that would land on disk.
+- Otherwise `num_mul_ssm`: Schönhage–Strassen, splitting operands into blocks,
+  transforming with a negacyclic FFT modulo `2^(64·(n-1)) + 1`, multiplying
+  pointwise, transforming back.
 
 The hot inner loops (classic add/sub/mul, SSM modular add/sub/negate) have
 hand-written assembly, selected at compile time via `NUM_ASM_X86_64` (GCC +
@@ -100,6 +103,29 @@ BMI2/ADX) or `NUM_ASM_AARCH64`, with a portable C fallback under
 refactors that add overhead (extra copies, indirection, allocations in inner
 loops) in the multiply/asm paths in particular. CI builds and tests both the
 assembly and portable paths on both x86-64 and AArch64.
+
+### Threading
+
+Every heavy operation has a `*_threads` variant taking a thread count last; the
+plain name calls it with `1`. Public API and the caller-facing rules are in
+README's *Threading*. Internally the split is:
+
+- `num_mul_ssm` threads the FFT passes, the pointwise multiply and the depad.
+  `num_mul_core` clamps the request to `num_mul_threads_ceiling`, so asking for
+  more than the operands can use is harmless.
+- `num_base_to_threads` runs a shared task pool over the binary split, workers
+  pulling pieces off one stack; the pool lives and dies inside the call.
+- Everything else (`sig`/`fxd`/`flt`, `pow`, `div`) threads only by forwarding
+  the count to the `num` multiply or division underneath.
+
+Threads are created and joined within a call — no pool outlives it, and there
+is no global state to initialise. `threads` must be non-zero; `num_dec_dump`
+and `num_base_to_threads` assert it, the arithmetic entry points do not. Every
+pthread call is wrapped in `TREAT`, so a failure aborts rather than passing
+unnoticed.
+
+The build passes `-pthread` (`makefiles/flags.mk`, in `FLAGS_CMP` and
+`FLAGS_EXE`) plus `-D_GNU_SOURCE` on Linux and `-D_DARWIN_C_SOURCE` on macOS.
 
 ### Disk-backed allocation
 
