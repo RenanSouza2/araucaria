@@ -7,6 +7,7 @@
 #include "struct.h"
 
 file_t file_write_open(const char file_path[], uint64_t amount);
+file_t file_write_open_resume(const char file_path[], uint64_t amount);
 void file_write_close(file_p fp);
 void file_write_uint64(file_p fp, uint64_t value);
 void file_write_int64(file_p fp, int64_t value);

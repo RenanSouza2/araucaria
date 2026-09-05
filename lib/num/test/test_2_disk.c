@@ -11,7 +11,7 @@ static void test_num_disk()
 
     araucaria_disk_config_t config = {
         .disk_path = "./cache",
-        .disk_threshold = 0
+        .disk_threshold_bytes = 0
     };
     araucaria_disk_config_set(&config);
 

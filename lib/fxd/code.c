@@ -76,7 +76,7 @@ static bool fxd_num_keep(fxd_num_t fxd_1, fxd_num_t fxd_2)
     return true;
 }
 
-static bool fxd_num_eq_dbg(fxd_num_t fxd_1, fxd_num_t fxd_2)
+bool fxd_num_eq_dbg(fxd_num_t fxd_1, fxd_num_t fxd_2)
 {
     CLU_FXD_IS_SAFE(fxd_1);
     CLU_FXD_IS_SAFE(fxd_2);
@@ -115,16 +115,14 @@ bool fxd_num_immed(
 #endif
 
 
-void fxd_num_display_dec(fxd_num_t fxd)
+static void fxd_num_display_dec_core(fxd_num_t fxd, uint64_t threads)
 {
-    CLU_FXD_IS_SAFE(fxd)
-
     printf("%c ", fxd.sig.signal == NEGATIVE ? '-' : '+');
 
     num_p num_hi, num_lo;
     num_break(&num_hi, &num_lo, num_copy(fxd.sig.num), fxd.pos);
 
-    num_display_dec(num_hi);
+    num_display_dec_threads(num_hi, threads);
     num_free(num_hi);
 
     printf(".");
@@ -151,23 +149,30 @@ void fxd_num_display_dec(fxd_num_t fxd)
     }
     num_free(num_u);
 
-    num_p num = num_pow(num_wrap(FXD_DEC_BASE), t);
-    num_lo = num_mul(num_lo, num);
+    num_p num = num_pow_threads(num_wrap(FXD_DEC_BASE), t, threads);
+    num_lo = num_mul_threads(num_lo, num, threads);
     num_break(&num_lo, &num, num_lo, fxd.pos);
     num_free(num);
 
-    num_lo = num_base_to(num_lo, FXD_DEC_BASE);
-    for(uint64_t i=t-1; i!=num_lo->count-1; i--)
-    {
-        printf("" U64P(018) "", (uint64_t)0);
-    }
-
-    for(uint64_t i=num_lo->count-1; i!=UINT64_MAX; i--)
-    {
-        printf("" U64P(018) "", num_lo->chunk[i]);
-    }
+    num_lo = num_base_to_threads(num_lo, FXD_DEC_BASE, threads);
+    num_dec_dump(num_lo->chunk, num_lo->count, t - num_lo->count, threads);
 
     num_free(num_lo);
+}
+
+void fxd_num_display_dec(fxd_num_t fxd)
+{
+    CLU_FXD_IS_SAFE(fxd)
+
+    fxd_num_display_dec_core(fxd, 1);
+}
+
+void fxd_num_display_dec_threads(fxd_num_t fxd, uint64_t threads)
+{
+    CLU_FXD_IS_SAFE(fxd)
+    assert(threads);
+
+    fxd_num_display_dec_core(fxd, threads);
 }
 
 void fxd_num_display(fxd_num_t fxd)
@@ -362,11 +367,17 @@ fxd_num_t fxd_num_sub(fxd_num_t fxd_1, fxd_num_t fxd_2) // TODO test
 
 fxd_num_t fxd_num_mul(fxd_num_t fxd_1, fxd_num_t fxd_2) // TODO test
 {
+    return fxd_num_mul_threads(fxd_1, fxd_2, 1);
+}
+
+fxd_num_t fxd_num_mul_threads(fxd_num_t fxd_1, fxd_num_t fxd_2, uint64_t threads)
+{
     CLU_FXD_IS_SAFE(fxd_1);
     CLU_FXD_IS_SAFE(fxd_2);
     assert(fxd_1.pos == fxd_2.pos);
+    assert(threads);
 
-    fxd_1.sig = sig_num_mul(fxd_1.sig, fxd_2.sig);
+    fxd_1.sig = sig_num_mul_threads(fxd_1.sig, fxd_2.sig, threads);
     fxd_1.sig = sig_num_head_trim(fxd_1.sig, fxd_1.pos);
     return fxd_1;
 }
@@ -382,12 +393,18 @@ fxd_num_t fxd_num_sqr(fxd_num_t fxd) // TODO test
 
 fxd_num_t fxd_num_div(fxd_num_t fxd_1, fxd_num_t fxd_2) // TODO test
 {
+    return fxd_num_div_threads(fxd_1, fxd_2, 1);
+}
+
+fxd_num_t fxd_num_div_threads(fxd_num_t fxd_1, fxd_num_t fxd_2, uint64_t threads)
+{
     CLU_FXD_IS_SAFE(fxd_1);
     CLU_FXD_IS_SAFE(fxd_2);
     assert(fxd_1.pos == fxd_2.pos);
+    assert(threads);
 
     sig_num_t sig = sig_num_head_grow(fxd_1.sig, fxd_1.pos);
-    fxd_1.sig = sig_num_div(sig, fxd_2.sig);
+    fxd_1.sig = sig_num_div_threads(sig, fxd_2.sig, threads);
     return fxd_1;
 }
 
@@ -395,19 +412,31 @@ fxd_num_t fxd_num_div(fxd_num_t fxd_1, fxd_num_t fxd_2) // TODO test
 
 fxd_num_t fxd_num_mul_sig(fxd_num_t fxd, sig_num_t sig) // TODO test
 {
+    return fxd_num_mul_sig_threads(fxd, sig, 1);
+}
+
+fxd_num_t fxd_num_mul_sig_threads(fxd_num_t fxd, sig_num_t sig, uint64_t threads)
+{
     CLU_FXD_IS_SAFE(fxd);
     CLU_HANDLER_IS_SAFE(sig.num);
+    assert(threads);
 
-    fxd.sig = sig_num_mul(fxd.sig, sig);
+    fxd.sig = sig_num_mul_threads(fxd.sig, sig, threads);
     return fxd;
 }
 
 fxd_num_t fxd_num_div_sig(fxd_num_t fxd, sig_num_t sig) // TODO test
 {
+    return fxd_num_div_sig_threads(fxd, sig, 1);
+}
+
+fxd_num_t fxd_num_div_sig_threads(fxd_num_t fxd, sig_num_t sig, uint64_t threads)
+{
     CLU_FXD_IS_SAFE(fxd);
     CLU_HANDLER_IS_SAFE(sig.num);
+    assert(threads);
 
-    fxd.sig = sig_num_div(fxd.sig, sig);
+    fxd.sig = sig_num_div_threads(fxd.sig, sig, threads);
     return fxd;
 }
 

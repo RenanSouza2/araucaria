@@ -9,6 +9,7 @@
 #include "internal.h"
 #include "../../mods/macros/assert.h" // IWYU pragma: keep
 #include "../../mods/macros/stdbit.h" // IWYU pragma: keep
+#include "../../mods/macros/threads.h"
 #include "../../mods/macros/uint.h"
 #include "../../mods/clu/header.h"
 #include "struct.h"
@@ -238,7 +239,7 @@ static uint64_t uint_read(FILE *fp, uint64_t size, uint64_t base)
 
 
 static araucaria_disk_config_t s_araucaria_disk_config = {
-    .disk_threshold = UINT64_MAX,
+    .disk_threshold_bytes = UINT64_MAX,
     .is_set = false
 };
 
@@ -253,18 +254,145 @@ bool araucaria_disk_config_is_set()
     return s_araucaria_disk_config.is_set;
 }
 
-uint64_t araucaria_disk_config_get_threshold()
+uint64_t araucaria_disk_config_get_threshold_bytes()
 {
-    return s_araucaria_disk_config.disk_threshold;
+    return s_araucaria_disk_config.disk_threshold_bytes;
 }
 
 
 
-void num_display_dec(num_p num)
-{
-    CLU_HANDLER_IS_SAFE(num);
-    assert(num);
+static void ssm_worker_range(
+    uint64_t worker,
+    uint64_t workers,
+    uint64_t K,
+    uint64_t * out_start,
+    uint64_t * out_end
+);
 
+// Digits one base 1e18 limb holds; every field but a number's leading one is
+// padded to it
+constexpr uint64_t dec_digits_per_limb = 18;
+
+// Formatted text held at once, bounding the buffer over a dump of any length
+constexpr uint64_t dec_dump_chunk_bytes = U64(64) * 1024 * 1024;
+
+static const char dec_pair[201] =
+    "00010203040506070809101112131415161718192021222324"
+    "25262728293031323334353637383940414243444546474849"
+    "50515253545556575859606162636465666768697071727374"
+    "75767778798081828384858687888990919293949596979899";
+
+// VALUE < 1e18, written as exactly dec_digits_per_limb characters
+static void dec_format_limb(char out[], uint64_t value)
+{
+    for(uint64_t i=dec_digits_per_limb; i; i-=2)
+    {
+        uint64_t pair = 2 * (value % 100);
+        value /= 100;
+        out[i-2] = dec_pair[pair];
+        out[i-1] = dec_pair[pair+1];
+    }
+}
+
+// Field j of a chunk holds limb TOP - j, so the workers write disjoint slices
+typedef struct
+{
+    char * out;
+    const uint64_t * chunk;
+    uint64_t top;
+    uint64_t idx_start;
+    uint64_t idx_end;
+} num_dec_worker_t;
+
+static void * num_dec_worker(void * arg)
+{
+    num_dec_worker_t * w = arg;
+    for(uint64_t j=w->idx_start; j<w->idx_end; j++)
+    {
+        dec_format_limb(&w->out[j * dec_digits_per_limb], w->chunk[w->top - j]);
+    }
+    return nullptr;
+}
+
+// Writes COUNT base 1e18 limbs, highest index first, as zero padded fields,
+// after ZEROS all zero ones. One write per chunk, its fields at fixed offsets
+void num_dec_dump(
+    const uint64_t chunk[],
+    uint64_t count,
+    uint64_t zeros,
+    uint64_t threads
+)
+{
+    assert(threads);
+
+    uint64_t total = zeros + count;
+    if(total == 0)
+    {
+        return;
+    }
+
+    uint64_t fields_max = dec_dump_chunk_bytes / dec_digits_per_limb;
+    if(fields_max > total)
+    {
+        fields_max = total;
+    }
+
+    char * out = malloc(fields_max * dec_digits_per_limb);
+    assert(out);
+
+    for(uint64_t left=zeros; left; )
+    {
+        uint64_t fields = left < fields_max ? left : fields_max;
+        memset(out, '0', fields * dec_digits_per_limb);
+        fwrite(out, 1, fields * dec_digits_per_limb, stdout);
+        left -= fields;
+    }
+
+    pthread_t * worker_ids = malloc(threads * sizeof(pthread_t));
+    assert(worker_ids);
+    num_dec_worker_t * worker_args = malloc(threads * sizeof(*worker_args));
+    assert(worker_args);
+
+    for(uint64_t pos=0; pos<count; pos+=fields_max)
+    {
+        uint64_t fields = count - pos < fields_max ? count - pos : fields_max;
+        uint64_t workers = threads < fields ? threads : fields;
+
+        for(uint64_t w=0; w<workers; w++)
+        {
+            uint64_t idx_start, idx_end;
+            ssm_worker_range(w, workers, fields, &idx_start, &idx_end);
+
+            worker_args[w] = (num_dec_worker_t)
+            {
+                .out = out,
+                .chunk = chunk,
+                .top = count - 1 - pos,
+                .idx_start = idx_start,
+                .idx_end = idx_end,
+            };
+        }
+
+        for(uint64_t w=1; w<workers; w++)
+        {
+            TREAT(pthread_create(&worker_ids[w], nullptr, num_dec_worker, &worker_args[w]))
+        }
+        num_dec_worker(&worker_args[0]);
+        for(uint64_t w=1; w<workers; w++)
+        {
+            TREAT(pthread_join(worker_ids[w], nullptr))
+        }
+
+        fwrite(out, 1, fields * dec_digits_per_limb, stdout);
+    }
+
+    free(worker_args);
+    free(worker_ids);
+    free(out);
+}
+
+static void num_display_dec_core(num_p num, uint64_t threads)
+{
     if(num->count == 0)
     {
         printf("0");
@@ -272,14 +400,28 @@ void num_display_dec(num_p num)
     }
 
     constexpr uint64_t base = 1'000'000'000'000'000'000;
-    num = num_base_to(num_copy(num), base);
+    num = num_base_to_threads(num_copy(num), base, threads);
     printf(U64P(), num->chunk[num->count-1]);
-    for(uint64_t i=num->count-2; i!=UINT64_MAX; i--)
-    {
-        printf(U64P(018), num->chunk[i]);
-    }
+    num_dec_dump(num->chunk, num->count - 1, 0, threads);
 
     num_free(num);
+}
+
+void num_display_dec(num_p num)
+{
+    CLU_HANDLER_IS_SAFE(num);
+    assert(num);
+
+    num_display_dec_core(num, 1);
+}
+
+void num_display_dec_threads(num_p num, uint64_t threads)
+{
+    CLU_HANDLER_IS_SAFE(num);
+    assert(num);
+    assert(threads);
+
+    num_display_dec_core(num, threads);
 }
 
 void num_display_opts(num_p num, const char tag[], bool length, bool full)
@@ -393,7 +535,7 @@ num_p num_create(CLU_PARAMS(uint64_t size, uint64_t count))
     size = size ? size : 1;
     uint64_t total_size = sizeof(num_t) + (size * sizeof(uint64_t));
 
-    if(size > s_araucaria_disk_config.disk_threshold)
+    if(total_size > s_araucaria_disk_config.disk_threshold_bytes)
     {
         return num_create_disk(CLU_ARGS_RELAY(size, count));
     }
@@ -416,7 +558,7 @@ num_p num_create_dirty(CLU_PARAMS(uint64_t size, uint64_t count))
     size = size ? size : 1;
     uint64_t total_size = sizeof(num_t) + (size * sizeof(uint64_t));
 
-    if(size > s_araucaria_disk_config.disk_threshold)
+    if(total_size > s_araucaria_disk_config.disk_threshold_bytes)
     {
         return num_create_disk(CLU_ARGS_RELAY(size, count));
     }
@@ -488,6 +630,21 @@ num_p num_normalize(num_p num)
     }
 
     return num;
+}
+
+// Bits in NUM, 0 when it is empty
+static uint64_t num_bit_count(num_p num)
+{
+    CLU_HANDLER_IS_SAFE(num);
+    assert(num);
+
+    if(num->count == 0)
+    {
+        return 0;
+    }
+
+    return ((num->count - 1) * chunk_bits)
+        + (uint64_t)stdc_bit_width(num->chunk[num->count-1]);
 }
 
 num_p num_head_grow(num_p num, uint64_t count) // TODO test
@@ -756,9 +913,9 @@ void num_free(num_p num)
     }
 
     uint64_t total_size = sizeof(num_t) + (num->size * sizeof(uint64_t));
+    CLU_HANDLER_UNREGISTER(num)
     int res = munmap(num, total_size);
     assert(res == 0);
-    CLU_HANDLER_UNREGISTER(num)
 }
 
 
@@ -891,6 +1048,12 @@ int64_t num_cmp_offset(num_p num_1, uint64_t pos_1, num_p num_2) // TODO TEST
     uint64_t count_1 = num_1->count;
     uint64_t count_2 = num_2->count;
 
+    // NUM_2 is zero, so it offsets to zero: NUM_1 is never below it
+    if(count_2 == 0)
+    {
+        return count_1 ? 1 : 0;
+    }
+
     if(count_1 > count_2 + pos_1)
     {
         return 1;
@@ -973,6 +1136,11 @@ void num_sub_offset(num_p num_1, uint64_t pos_1, num_p num_2)
     assert(num_2)
 
     uint64_t count_src = num_2->count;
+    if(count_src == 0)
+    {
+        return;
+    }
+
     assert(num_1->count >= count_src + pos_1);
 
     uint64_t * restrict dest = num_1->chunk;
@@ -1805,10 +1973,6 @@ static void num_ssm_normalize(num_p num_fft, uint64_t pos, uint64_t n)
 
     uint64_t * chunk = &num_fft->chunk[pos];
 
-    // The top word is the carry out of a 64 * (n - 1) bit add, so it is 0 or 1 about half
-    // the time each and testing it first costs a mispredict. Reducing it unconditionally
-    // is a load, a subtract and two stores, and the borrow out of word 0 needs word 0 to
-    // have been below the top word, which for a full width coefficient never happens.
     uint64_t value = chunk[n - 1];
     uint64_t word = chunk[0];
     chunk[n - 1] = 0;
@@ -1854,12 +2018,6 @@ static void num_ssm_denormalize(num_p num_fft, uint64_t pos, uint64_t n)
 
 #ifdef NUM_ASM_AARCH64
 
-// One limb per iteration costs a load, a load, an adcs, a store and the loop overhead,
-// so the carry chain sits idle behind five other instructions. These mirror the x86-64
-// blocks below: eight limbs per pass, paired loads and stores, so the same work takes
-// roughly a third of the instructions. ldp / stp / add / sub leave the carry flag alone,
-// which is what lets the adcs chain span the whole unrolled body.
-
 #define SUB_MOD_STEP_4(SRC_1, OFF_0, OFF_1)                                                                    \
     "ldp %[a_0], %[a_1], [%[" #SRC_1 "], #" #OFF_0 "]   \n\t" /* (a_0, a_1)  = *(SRC_1 + OFF_0)            */  \
     "ldp %[a_2], %[a_3], [%[" #SRC_1 "], #" #OFF_1 "]   \n\t" /* (a_2, a_3)  = *(SRC_1 + OFF_1)            */  \
@@ -1872,9 +2030,6 @@ static void num_ssm_denormalize(num_p num_fft, uint64_t pos, uint64_t n)
     "stp %[a_0], %[a_1], [%[dest], #" #OFF_0 "]         \n\t" /* *(dest + OFF_0) = (a_0, a_1)              */  \
     "stp %[a_2], %[a_3], [%[dest], #" #OFF_1 "]         \n\t" /* *(dest + OFF_1) = (a_2, a_3)              */
 
-// Eight words per pass. The four flag shuffling instructions are per pass, not per word,
-// so doubling the block halves them; stp leaves NZCV alone, which is what lets the sum
-// stores sit inside the adcs chain and keeps the sum registers down to four.
 #define BUTTERFLY_STEP_8                                                                                    \
     "ldp %[a_0], %[a_1], [%[dest_1]]                \n\t" /* (a_0, a_1)  = *dest_1                       */  \
     "ldp %[a_2], %[a_3], [%[dest_1], #16]           \n\t" /* (a_2, a_3)  = *(dest_1 + 16)                */  \
@@ -2353,12 +2508,6 @@ static void num_ssm_sub_span_mod(
     uint64_t n
 );
 
-// The negacyclic rotate below only needs the few words of the shifted operand that cross
-// the 2^(64 * (n - 1)) boundary, and it can shift the coefficient where it already lives
-// instead of building both halves in num_aux. These four helpers are what num_ssm_shl and
-// num_ssm_shr become once the destination is the source and the span is bounded: no
-// memset over the words that are known zero, and no second array to read back.
-
 // num_res[pos_res .. pos_res + len) = (num_fft[pos .. pos + n) >> bits), low words only.
 // Requires (bits / 64) + len == n - 1, which is what the callers below always pass.
 static void num_ssm_shr_low(
@@ -2499,10 +2648,6 @@ static void num_ssm_shr_self(num_p num_fft, uint64_t pos, uint64_t n, uint64_t b
     memset(&chunk[n - count], 0, count * sizeof(uint64_t));
 }
 
-// Words of the shifted coefficient that land at or above 2^(64 * (n - 1)). A normalized
-// coefficient is below 2^(64 * (n - 1)) unless it is exactly that power, which is the one
-// case where the top word is set and the wrap spans the whole span; the rotates fall back
-// to the two-buffer path for it rather than special-casing the count.
 static uint64_t ssm_wrap_len(uint64_t bits)
 {
     constexpr uint64_t mask = 0x3f;
@@ -2582,18 +2727,26 @@ void num_ssm_shr_mod(
     num_ssm_sub_span_mod(num_fft, pos, num_aux, off, off, len, n);
 }
 
-// fft[pos_1] = A + B and fft[pos_2] = A - B, reading each coefficient once. Splitting it
-// into num_ssm_sub_mod into num_aux, num_ssm_add_mod_immed and a copy back reads both
-// coefficients twice and writes n words of num_aux that exist only to be copied.
-//
-// The two chains cannot share the flags, so each block reseeds its own: subs against the
-// saved carry for adcs, cmp against the saved borrow for sbcs. Both are two instructions
-// per four words, which is what buys the second pass.
-//
-// A borrowing difference leaves A - B + 2^(64 * n) in the span where A - B + 2^(64 * (n
-// - 1)) + 1 is wanted, so the modulus is added back afterwards. That is what
-// num_ssm_denormalize does, except the carry out of the top word here is the 2^(64 * n)
-// being discarded rather than an overflow to assert on.
+static uint64_t ssm_worker_count(uint64_t threads, uint64_t K)
+{
+    uint64_t workers = threads < K ? threads : K;
+    return workers ? workers : 1;
+}
+
+static void ssm_worker_range(
+    uint64_t worker,
+    uint64_t workers,
+    uint64_t K,
+    uint64_t * out_start,
+    uint64_t * out_end
+)
+{
+    *out_start = (K * worker) / workers;
+    *out_end = (K * (worker + 1)) / workers;
+}
+
+
+
 static void num_ssm_butterfly(
     num_p num_aux,
     num_p num_fft,
@@ -2772,10 +2925,6 @@ static void num_ssm_butterfly(
 
 #if defined(NUM_ASM_X86_64) || defined(NUM_ASM_AARCH64)
 
-    // A - B is negative about half the time, so testing the borrow costs a coin flip the
-    // branch predictor cannot win. Adding it unconditionally is two loads and two stores,
-    // and leaves only the ripple out of word 0 behind a branch, which needs word 0 to have
-    // been all ones and so is never taken in practice.
     uint64_t * chunk = &num_fft->chunk[pos_2];
     uint64_t low = chunk[0] + borrow;
     bool ripple = low < borrow;
@@ -2800,14 +2949,242 @@ static void num_ssm_butterfly(
 #endif
 }
 
+constexpr uint64_t ssm_fft_block_bytes = 1024 * 1024;
+
+static uint64_t ssm_fft_fuse_bits(uint64_t n, uint64_t stages_left)
+{
+    uint64_t fit = ssm_fft_block_bytes / (n * sizeof(uint64_t));
+    uint64_t r = fit < 2 ? 1 : (uint64_t)stdc_bit_width(fit) - 1;
+    return r < stages_left ? r : stages_left;
+}
+
+static void ssm_fft_fwd_block(
+    num_p num_aux,
+    num_p num_fft,
+    uint64_t pos,
+    uint64_t step,
+    uint64_t n,
+    uint64_t K,
+    uint64_t bits,
+    uint64_t gl,
+    uint64_t r,
+    uint64_t a,
+    uint64_t c
+)
+{
+    uint64_t width = U64(1) << r;
+    uint64_t base = a + ((gl << r) * c);
+
+    for(uint64_t k = r; k-- > 0;)
+    {
+        uint64_t stride = gl << k;
+        uint64_t bits_local = bits * stride;
+        uint64_t half = K / (2 * stride);
+        uint64_t reach = U64(1) << k;
+
+        for(uint64_t b_0 = 0; b_0 < width; b_0 += 2 * reach)
+        {
+            for(uint64_t b = b_0; b < b_0 + reach; b++)
+            {
+                uint64_t x_1 = base + (gl * b);
+                uint64_t pos_1 = (pos + (step * x_1)) * n;
+                uint64_t pos_2 = (pos + (step * (x_1 + stride))) * n;
+
+                uint64_t i = (b >> (k + 1)) | (c << ((r - k) - 1));
+                uint64_t shift = ssm_bit_inv(i, half) * bits_local;
+
+                num_ssm_shl_mod(num_aux, num_fft, pos_2, n, shift);
+
+                num_ssm_butterfly(num_aux, num_fft, pos_1, pos_2, n);
+            }
+        }
+    }
+}
+
+typedef struct
+{
+    num_p num;
+    uint64_t M;
+    uint64_t full_chunks;
+    uint64_t tail;
+    bool extra;
+} ssm_fft_fwd_pad_t;
+
+static void ssm_fft_fwd_pad_block(
+    ssm_fft_fwd_pad_t * pad,
+    num_p num_fft,
+    uint64_t pos,
+    uint64_t step,
+    uint64_t n,
+    uint64_t K,
+    uint64_t gl,
+    uint64_t r,
+    uint64_t a,
+    uint64_t c
+)
+{
+    uint64_t width = U64(1) << r;
+    uint64_t base = a + ((gl << r) * c);
+    const uint64_t * restrict src = pad->num->chunk;
+
+    for(uint64_t b = 0; b < width; b++)
+    {
+        uint64_t x = base + (gl * b);
+        uint64_t * restrict dest = &num_fft->chunk[(pos + (step * x)) * n];
+
+        uint64_t copy = 0;
+        if(x < pad->full_chunks)
+        {
+            copy = pad->M;
+        }
+        else if(x == pad->full_chunks)
+        {
+            copy = pad->tail;
+        }
+
+        if(copy)
+        {
+            memcpy(dest, &src[pad->M * x], copy * sizeof(uint64_t));
+        }
+        memset(&dest[copy], 0, (n - copy) * sizeof(uint64_t));
+
+        if(pad->extra && (x == K - 1))
+        {
+            dest[pad->M] = src[pad->num->count - 1];
+        }
+    }
+}
+
+static void ssm_fft_fwd_preloop_block(
+    num_p num_aux,
+    num_p num_fft,
+    uint64_t pos,
+    uint64_t step,
+    uint64_t n,
+    uint64_t Q,
+    uint64_t gl,
+    uint64_t r,
+    uint64_t a,
+    uint64_t c
+)
+{
+    uint64_t width = U64(1) << r;
+    uint64_t base = a + ((gl << r) * c);
+
+    for(uint64_t b = 0; b < width; b++)
+    {
+        uint64_t x = base + (gl * b);
+        num_ssm_shl_mod(num_aux, num_fft, (pos + (step * x)) * n, n, Q * x);
+    }
+}
+
+typedef struct
+{
+    num_p num_aux;
+    num_p num_fft;
+    uint64_t pos;
+    uint64_t step;
+    uint64_t n;
+    uint64_t K;
+    uint64_t bits;
+    uint64_t Q;
+    ssm_fft_fwd_pad_t * pad;
+    uint64_t stride_end;
+    uint64_t worker;
+    uint64_t workers;
+} ssm_fft_fwd_split_worker_t;
+
+static void * ssm_fft_fwd_split_worker(void * arg)
+{
+    ssm_fft_fwd_split_worker_t * w = arg;
+
+    uint64_t stages_left = (uint64_t)stdc_bit_width(w->K / w->stride_end) - 1;
+    uint64_t stride_hi = w->K / 2;
+    bool first = true;
+
+    while(stages_left)
+    {
+        uint64_t r = ssm_fft_fuse_bits(w->n, stages_left);
+        uint64_t gl = stride_hi >> (r - 1);
+        uint64_t blocks = w->K / (gl << r);
+
+        for(uint64_t c = 0; c < blocks; c++)
+        {
+            for(uint64_t a = w->worker; a < gl; a += w->workers)
+            {
+                if(first && w->pad)
+                {
+                    ssm_fft_fwd_pad_block(
+                        w->pad, w->num_fft, w->pos, w->step,
+                        w->n, w->K, gl, r, a, c
+                    );
+                }
+
+                if(first)
+                {
+                    ssm_fft_fwd_preloop_block(
+                        w->num_aux, w->num_fft, w->pos, w->step,
+                        w->n, w->Q, gl, r, a, c
+                    );
+                }
+
+                ssm_fft_fwd_block(
+                    w->num_aux, w->num_fft, w->pos, w->step,
+                    w->n, w->K, w->bits, gl, r, a, c
+                );
+            }
+        }
+
+        first = false;
+        stages_left -= r;
+        stride_hi = gl / 2;
+    }
+    return nullptr;
+}
+
+// idx numbers the K >> r blocks of one pass as (c, a) flattened c*gl + a.
+typedef struct
+{
+    num_p num_aux;
+    num_p num_fft;
+    uint64_t pos;
+    uint64_t step;
+    uint64_t n;
+    uint64_t K;
+    uint64_t bits;
+    uint64_t gl;
+    uint64_t r;
+    uint64_t idx_start;
+    uint64_t idx_end;
+} ssm_fft_fwd_pass_worker_t;
+
+static void * ssm_fft_fwd_pass_worker(void * arg)
+{
+    ssm_fft_fwd_pass_worker_t * w = arg;
+
+    for(uint64_t idx = w->idx_start; idx < w->idx_end; idx++)
+    {
+        ssm_fft_fwd_block(
+            w->num_aux, w->num_fft, w->pos, w->step,
+            w->n, w->K, w->bits, w->gl, w->r, idx % w->gl, idx / w->gl
+        );
+    }
+    return nullptr;
+}
+
 // num_aux->size >= 2 * n
+// pad non-null builds the array from the operand inside the first pass instead of
+// expecting it already populated (see ssm_fft_fwd_pad_block).
 static void num_ssm_fft_fwd_rec(
     num_p num_aux,
     num_p num_fft, uint64_t pos,
     uint64_t step,
     uint64_t n,
     uint64_t K,
-    uint64_t bits
+    uint64_t bits,
+    uint64_t Q,
+    ssm_fft_fwd_pad_t * pad,
+    uint64_t threads
 )
 {
     CLU_HANDLER_IS_SAFE(num_aux)
@@ -2816,26 +3193,126 @@ static void num_ssm_fft_fwd_rec(
     assert(num_fft)
     assert(num_aux->size >= 2 * n)
 
-    if(K > 2)
+    uint64_t workers = ssm_worker_count(threads, K / 2);
+
+    if(workers <= 1)
     {
-        num_ssm_fft_fwd_rec(num_aux, num_fft, pos     , 2*step, n, K/2, 2*bits);
-        num_ssm_fft_fwd_rec(num_aux, num_fft, pos+step, 2*step, n, K/2, 2*bits);
+        ssm_fft_fwd_split_worker_t serial =
+        {
+            .num_aux = num_aux,
+            .num_fft = num_fft,
+            .pos = pos,
+            .step = step,
+            .n = n,
+            .K = K,
+            .bits = bits,
+            .Q = Q,
+            .pad = pad,
+            .stride_end = 1,
+            .worker = 0,
+            .workers = 1,
+        };
+        ssm_fft_fwd_split_worker(&serial);
+        return;
     }
 
-    for(uint64_t i=0; i<K/2; i++)
+    uint64_t split = B(stdc_bit_width(workers) - 1);
+
+    num_p * worker_aux = malloc(workers * sizeof(*worker_aux));
+    assert(worker_aux)
+    pthread_t * worker_ids = malloc(workers * sizeof(*worker_ids));
+    assert(worker_ids)
+
+    for(uint64_t w=0; w<workers; w++)
     {
-        uint64_t pos_1 = (pos + (step * (2 * i))) * n;
-        uint64_t pos_2 = (pos + (step * ((2 * i) + 1))) * n;
-
-        uint64_t shift = ssm_bit_inv(i, K / 2) * bits;
-        num_ssm_shl_mod(num_aux, num_fft, pos_2, n, shift);
-
-        num_ssm_butterfly(num_aux, num_fft, pos_1, pos_2, n);
+        worker_aux[w] = num_create_dirty(CLU_ARGS(2 * n, 0));
     }
+
+    ssm_fft_fwd_split_worker_t * split_args = malloc(split * sizeof(*split_args));
+    assert(split_args)
+
+    for(uint64_t w=0; w<split; w++)
+    {
+        split_args[w] = (ssm_fft_fwd_split_worker_t)
+        {
+            .num_aux = worker_aux[w],
+            .num_fft = num_fft,
+            .pos = pos,
+            .step = step,
+            .n = n,
+            .K = K,
+            .bits = bits,
+            .Q = Q,
+            .pad = pad,
+            .stride_end = split,
+            .worker = w,
+            .workers = split,
+        };
+
+        TREAT(pthread_create(&worker_ids[w], nullptr, ssm_fft_fwd_split_worker, &split_args[w]))
+    }
+    for(uint64_t w=0; w<split; w++)
+    {
+        TREAT(pthread_join(worker_ids[w], nullptr))
+    }
+
+    free(split_args);
+
+    ssm_fft_fwd_pass_worker_t * worker_args = malloc(workers * sizeof(*worker_args));
+    assert(worker_args)
+
+    uint64_t stages_left = (uint64_t)stdc_bit_width(split) - 1;
+    uint64_t stride_hi = split / 2;
+
+    while(stages_left)
+    {
+        uint64_t r = ssm_fft_fuse_bits(n, stages_left);
+        uint64_t gl = stride_hi >> (r - 1);
+        uint64_t blocks = K >> r;
+        uint64_t pass_workers = workers < blocks ? workers : blocks;
+
+        for(uint64_t w=0; w<pass_workers; w++)
+        {
+            uint64_t idx_start, idx_end;
+            ssm_worker_range(w, pass_workers, blocks, &idx_start, &idx_end);
+
+            worker_args[w] = (ssm_fft_fwd_pass_worker_t)
+            {
+                .num_aux = worker_aux[w],
+                .num_fft = num_fft,
+                .pos = pos,
+                .step = step,
+                .n = n,
+                .K = K,
+                .bits = bits,
+                .gl = gl,
+                .r = r,
+                .idx_start = idx_start,
+                .idx_end = idx_end,
+            };
+
+            TREAT(pthread_create(&worker_ids[w], nullptr, ssm_fft_fwd_pass_worker, &worker_args[w]))
+        }
+        for(uint64_t w=0; w<pass_workers; w++)
+        {
+            TREAT(pthread_join(worker_ids[w], nullptr))
+        }
+
+        stages_left -= r;
+        stride_hi = gl / 2;
+    }
+
+    for(uint64_t w=0; w<workers; w++)
+    {
+        num_free(worker_aux[w]);
+    }
+    free(worker_ids);
+    free(worker_args);
+    free(worker_aux);
 }
 
 // num_aux->size >= 2 * n
-void num_ssm_fft_fwd(num_p num_aux, num_p num_fft, ssm_params_p p)
+void num_ssm_fft_fwd(num_p num_aux, num_p num_fft, ssm_params_p p, uint64_t threads)
 {
     CLU_HANDLER_IS_SAFE(num_aux)
     CLU_HANDLER_IS_SAFE(num_fft)
@@ -2844,22 +3321,342 @@ void num_ssm_fft_fwd(num_p num_aux, num_p num_fft, ssm_params_p p)
     assert(num_aux->size >= 2 * p->n)
     assert(num_fft->size >= p->n * p->K)
 
-    for(uint64_t i=0; i<p->K; i++)
+    num_ssm_fft_fwd_rec(num_aux, num_fft, 0, 1, p->n, p->K, 2 * p->Q, p->Q, nullptr, threads);
+}
+
+// num_ssm_fft_fwd over an array that has not been populated yet: the padding of NUM
+// into n-limb blocks happens inside the transform's first pass. NUM is only read.
+// num_fft->size >= p->n * p->K, num_aux->size >= 2 * p->n
+static void num_ssm_fft_fwd_pad(
+    num_p num_aux,
+    num_p num_fft,
+    num_p num,
+    ssm_params_p p,
+    uint64_t threads
+)
+{
+    CLU_HANDLER_IS_SAFE(num_aux)
+    CLU_HANDLER_IS_SAFE(num_fft)
+    CLU_HANDLER_IS_SAFE(num)
+    assert(num_aux)
+    assert(num_fft)
+    assert(num)
+    assert(num_aux->size >= 2 * p->n)
+    assert(num_fft->size >= p->n * p->K)
+
+    uint64_t full_chunks = num->count / p->M;
+    if(full_chunks > p->K)
     {
-        num_ssm_shl_mod(num_aux, num_fft, p->n * i, p->n, p->Q * i);
+        full_chunks = p->K;
     }
 
-    num_ssm_fft_fwd_rec(num_aux, num_fft, 0, 1, p->n, p->K, 2 * p->Q);
+    ssm_fft_fwd_pad_t pad =
+    {
+        .num = num,
+        .M = p->M,
+        .full_chunks = full_chunks,
+        .tail = num->count % p->M,
+        .extra = (bool)(num->count == (p->M * p->K) + 1),
+    };
+
+    num_ssm_fft_fwd_rec(num_aux, num_fft, 0, 1, p->n, p->K, 2 * p->Q, p->Q, &pad, threads);
+}
+
+static void ssm_fft_inv_block(
+    num_p num_aux,
+    num_p num,
+    uint64_t pos,
+    uint64_t n,
+    uint64_t k,
+    uint64_t bits,
+    uint64_t gl,
+    uint64_t r,
+    uint64_t a,
+    uint64_t c
+)
+{
+    uint64_t width = U64(1) << r;
+    uint64_t base = a + ((gl << r) * c);
+
+    for(uint64_t kk = 0; kk < r; kk++)
+    {
+        uint64_t stride = gl << kk;
+        uint64_t bits_local = (bits * k) / (2 * stride);
+        uint64_t reach = U64(1) << kk;
+
+        for(uint64_t b_0 = 0; b_0 < width; b_0 += 2 * reach)
+        {
+            for(uint64_t b = b_0; b < b_0 + reach; b++)
+            {
+                uint64_t x_1 = base + (gl * b);
+                uint64_t pos_1 = (pos + x_1) * n;
+                uint64_t pos_2 = (pos + x_1 + stride) * n;
+
+                uint64_t i = a + (gl * (b - b_0));
+
+                num_ssm_shr_mod(num_aux, num, pos_2, n, i * bits_local);
+
+                num_ssm_butterfly(num_aux, num, pos_1, pos_2, n);
+            }
+        }
+    }
+}
+
+static void ssm_fft_inv_postloop_block(
+    num_p num_aux,
+    num_p num,
+    uint64_t pos,
+    uint64_t n,
+    uint64_t Q,
+    uint64_t k_,
+    uint64_t lim,
+    uint64_t gl,
+    uint64_t r,
+    uint64_t a,
+    uint64_t c
+)
+{
+    uint64_t width = U64(1) << r;
+    uint64_t base = a + ((gl << r) * c);
+
+    for(uint64_t b = 0; b < width; b++)
+    {
+        uint64_t x = base + (gl * b);
+        uint64_t pos_x = (pos + x) * n;
+
+        if(x < lim)
+        {
+            num_ssm_shr_mod(num_aux, num, pos_x, n, (Q * x) + k_);
+            continue;
+        }
+
+        num_ssm_shr_mod(num_aux, num, pos_x, n, Q * x);
+        num_ssm_shr_mod(num_aux, num, pos_x, n, k_);
+    }
+}
+
+static bool ssm_is_recursive(uint64_t n);
+
+static void num_ssm_mul_mod_span(
+    num_p num_aux,
+    num_p num_1,
+    num_p num_2,
+    uint64_t pos,
+    uint64_t n
+);
+
+typedef struct
+{
+    num_p num_fft_2;
+    ssm_params_p p_next;
+    num_p num_aux_1;
+    num_p num_fft_1_next;
+    num_p num_fft_2_next;
+} ssm_fft_inv_pointwise_t;
+
+static ssm_fft_inv_pointwise_t ssm_fft_inv_pointwise_create(
+    num_p num_fft_2,
+    ssm_params_p p_next,
+    uint64_t n
+)
+{
+    if(!num_fft_2)
+    {
+        return (ssm_fft_inv_pointwise_t){0};
+    }
+
+    if(!p_next)
+    {
+        return (ssm_fft_inv_pointwise_t){ .num_fft_2 = num_fft_2 };
+    }
+
+    return (ssm_fft_inv_pointwise_t)
+    {
+        .num_fft_2 = num_fft_2,
+        .p_next = p_next,
+        .num_aux_1 = num_create_dirty(CLU_ARGS(n, 0)),
+        .num_fft_1_next = num_create_dirty(CLU_ARGS(p_next->n * p_next->K, 0)),
+        .num_fft_2_next = num_create_dirty(CLU_ARGS(p_next->n * p_next->K, 0)),
+    };
+}
+
+static void ssm_fft_inv_pointwise_free(ssm_fft_inv_pointwise_t * pw)
+{
+    if(!pw->p_next)
+    {
+        return;
+    }
+
+    num_free(pw->num_aux_1);
+    num_free(pw->num_fft_1_next);
+    num_free(pw->num_fft_2_next);
+}
+
+static void ssm_fft_inv_pointwise_block(
+    ssm_fft_inv_pointwise_t * pw,
+    num_p num_aux,
+    num_p num,
+    uint64_t pos,
+    uint64_t n,
+    uint64_t gl,
+    uint64_t r,
+    uint64_t a,
+    uint64_t c
+)
+{
+    uint64_t width = U64(1) << r;
+    uint64_t base = a + ((gl << r) * c);
+
+    for(uint64_t b = 0; b < width; b++)
+    {
+        uint64_t x = base + (gl * b);
+        uint64_t pos_x = (pos + x) * n;
+
+        if(pw->p_next)
+        {
+            // NOLINTNEXTLINE(readability-suspicious-call-argument)
+            num_ssm_mul_wrap(
+                pw->num_aux_1,
+                num_aux,
+                pw->num_fft_1_next,
+                pw->num_fft_2_next,
+                num,
+                pw->num_fft_2,
+                pos_x,
+                pw->p_next
+            );
+            continue;
+        }
+
+        num_ssm_mul_mod_span(num_aux, num, pw->num_fft_2, pos_x, n);
+    }
+}
+
+typedef struct
+{
+    num_p num_aux;
+    num_p num;
+    uint64_t pos;
+    uint64_t n;
+    uint64_t k;
+    uint64_t bits;
+    uint64_t Q;
+    uint64_t k_;
+    uint64_t lim;
+    bool postloop;
+    ssm_fft_inv_pointwise_t * pw;
+    uint64_t worker;
+    uint64_t workers;
+} ssm_fft_inv_split_worker_t;
+
+static void * ssm_fft_inv_split_worker(void * arg)
+{
+    ssm_fft_inv_split_worker_t * w = arg;
+
+    uint64_t chunk = w->k / w->workers;
+    uint64_t stages_left = (uint64_t)stdc_bit_width(chunk) - 1;
+    uint64_t gl = 1;
+    bool first = true;
+
+    while(stages_left)
+    {
+        uint64_t r = ssm_fft_fuse_bits(w->n, stages_left);
+        uint64_t span = gl << r;
+        uint64_t c_start = (w->worker * chunk) / span;
+        uint64_t c_end = c_start + (chunk / span);
+
+        bool last = w->postloop && (stages_left == r);
+
+        for(uint64_t c = c_start; c < c_end; c++)
+        {
+            for(uint64_t a = 0; a < gl; a++)
+            {
+                if(first && w->pw)
+                {
+                    ssm_fft_inv_pointwise_block(
+                        w->pw, w->num_aux, w->num, w->pos, w->n, gl, r, a, c
+                    );
+                }
+
+                ssm_fft_inv_block(
+                    w->num_aux, w->num, w->pos,
+                    w->n, w->k, w->bits, gl, r, a, c
+                );
+
+                if(last)
+                {
+                    ssm_fft_inv_postloop_block(
+                        w->num_aux, w->num, w->pos,
+                        w->n, w->Q, w->k_, w->lim, gl, r, a, c
+                    );
+                }
+            }
+        }
+
+        first = false;
+        stages_left -= r;
+        gl = span;
+    }
+    return nullptr;
+}
+
+// idx numbers the k >> r blocks of one pass as (c, a) flattened c*gl + a.
+typedef struct
+{
+    num_p num_aux;
+    num_p num;
+    uint64_t pos;
+    uint64_t n;
+    uint64_t k;
+    uint64_t bits;
+    uint64_t gl;
+    uint64_t r;
+    uint64_t Q;
+    uint64_t k_;
+    uint64_t lim;
+    bool postloop;
+    uint64_t idx_start;
+    uint64_t idx_end;
+} ssm_fft_inv_pass_worker_t;
+
+static void * ssm_fft_inv_pass_worker(void * arg)
+{
+    ssm_fft_inv_pass_worker_t * w = arg;
+
+    for(uint64_t idx = w->idx_start; idx < w->idx_end; idx++)
+    {
+        uint64_t a = idx % w->gl;
+        uint64_t c = idx / w->gl;
+
+        ssm_fft_inv_block(
+            w->num_aux, w->num, w->pos,
+            w->n, w->k, w->bits, w->gl, w->r, a, c
+        );
+
+        if(w->postloop)
+        {
+            ssm_fft_inv_postloop_block(
+                w->num_aux, w->num, w->pos,
+                w->n, w->Q, w->k_, w->lim, w->gl, w->r, a, c
+            );
+        }
+    }
+    return nullptr;
 }
 
 // num_aux->size >= 2 * n
+// num_fft_2 non-null fuses the convolution's pointwise multiply into the first pass
+// (see ssm_fft_inv_pointwise_block).
 static void num_ssm_fft_inv_rec(
     num_p num_aux,
     num_p num,
     uint64_t pos,
     uint64_t n,
     uint64_t k,
-    uint64_t bits
+    uint64_t bits,
+    uint64_t Q,
+    num_p num_fft_2,
+    uint64_t threads
 )
 {
     CLU_HANDLER_IS_SAFE(num_aux)
@@ -2868,25 +3665,156 @@ static void num_ssm_fft_inv_rec(
     assert(num)
     assert(num_aux->size >= 2 * n)
 
-    if(k > 2)
+    uint64_t k_ = stdc_trailing_zeros(k);
+    uint64_t lim = ((chunk_bits * (n - 1)) - k_) / Q;
+
+    ssm_params_t p_next;
+    bool pw_recursive = false;
+    if(num_fft_2)
     {
-        num_ssm_fft_inv_rec(num_aux, num, pos      , n, k/2, 2*bits);
-        num_ssm_fft_inv_rec(num_aux, num, pos+(k/2), n, k/2, 2*bits);
+        pw_recursive = ssm_is_recursive(n);
+        if(pw_recursive)
+        {
+            p_next = ssm_get_params_wrap(n);
+        }
     }
 
-    for(uint64_t i=0; i<k/2; i++)
+    uint64_t workers = ssm_worker_count(threads, k / 2);
+
+    if(workers <= 1)
     {
-        uint64_t pos_1 = (pos + i) * n;
-        uint64_t pos_2 = (pos + i + (k/2)) * n;
+        ssm_fft_inv_pointwise_t pw = ssm_fft_inv_pointwise_create(num_fft_2, pw_recursive ? &p_next : nullptr, n);
 
-        num_ssm_shr_mod(num_aux, num, pos_2, n, i * bits);
-
-        num_ssm_butterfly(num_aux, num, pos_1, pos_2, n);
+        ssm_fft_inv_split_worker_t serial =
+        {
+            .num_aux = num_aux,
+            .num = num,
+            .pos = pos,
+            .n = n,
+            .k = k,
+            .bits = bits,
+            .Q = Q,
+            .k_ = k_,
+            .lim = lim,
+            .postloop = true,
+            .pw = num_fft_2 ? &pw : nullptr,
+            .worker = 0,
+            .workers = 1,
+        };
+        ssm_fft_inv_split_worker(&serial);
+        ssm_fft_inv_pointwise_free(&pw);
+        return;
     }
+
+    uint64_t split = B(stdc_bit_width(workers) - 1);
+
+    num_p * worker_aux = malloc(workers * sizeof(*worker_aux));
+    assert(worker_aux)
+    pthread_t * worker_ids = malloc(workers * sizeof(*worker_ids));
+    assert(worker_ids)
+
+    for(uint64_t w=0; w<workers; w++)
+    {
+        worker_aux[w] = num_create_dirty(CLU_ARGS(2 * n, 0));
+    }
+
+    ssm_fft_inv_split_worker_t * split_args = malloc(split * sizeof(*split_args));
+    assert(split_args)
+    ssm_fft_inv_pointwise_t * split_pw = malloc(split * sizeof(*split_pw));
+    assert(split_pw)
+
+    for(uint64_t w=0; w<split; w++)
+    {
+        split_pw[w] = ssm_fft_inv_pointwise_create(num_fft_2, pw_recursive ? &p_next : nullptr, n);
+
+        split_args[w] = (ssm_fft_inv_split_worker_t)
+        {
+            .num_aux = worker_aux[w],
+            .num = num,
+            .pos = pos,
+            .n = n,
+            .k = k,
+            .bits = bits,
+            .Q = Q,
+            .k_ = k_,
+            .lim = lim,
+            .postloop = false,
+            .pw = num_fft_2 ? &split_pw[w] : nullptr,
+            .worker = w,
+            .workers = split,
+        };
+
+        TREAT(pthread_create(&worker_ids[w], nullptr, ssm_fft_inv_split_worker, &split_args[w]))
+    }
+    for(uint64_t w=0; w<split; w++)
+    {
+        TREAT(pthread_join(worker_ids[w], nullptr))
+    }
+
+    for(uint64_t w=0; w<split; w++)
+    {
+        ssm_fft_inv_pointwise_free(&split_pw[w]);
+    }
+    free(split_pw);
+    free(split_args);
+
+    ssm_fft_inv_pass_worker_t * worker_args = malloc(workers * sizeof(*worker_args));
+    assert(worker_args)
+
+    uint64_t stages_left = (uint64_t)stdc_bit_width(split) - 1;
+    uint64_t gl = k / split;
+
+    while(stages_left)
+    {
+        uint64_t r = ssm_fft_fuse_bits(n, stages_left);
+        uint64_t blocks = k >> r;
+        uint64_t pass_workers = workers < blocks ? workers : blocks;
+
+        for(uint64_t w=0; w<pass_workers; w++)
+        {
+            uint64_t idx_start, idx_end;
+            ssm_worker_range(w, pass_workers, blocks, &idx_start, &idx_end);
+
+            worker_args[w] = (ssm_fft_inv_pass_worker_t)
+            {
+                .num_aux = worker_aux[w],
+                .num = num,
+                .pos = pos,
+                .n = n,
+                .k = k,
+                .bits = bits,
+                .gl = gl,
+                .r = r,
+                .Q = Q,
+                .k_ = k_,
+                .lim = lim,
+                .postloop = (stages_left == r),
+                .idx_start = idx_start,
+                .idx_end = idx_end,
+            };
+
+            TREAT(pthread_create(&worker_ids[w], nullptr, ssm_fft_inv_pass_worker, &worker_args[w]))
+        }
+        for(uint64_t w=0; w<pass_workers; w++)
+        {
+            TREAT(pthread_join(worker_ids[w], nullptr))
+        }
+
+        stages_left -= r;
+        gl <<= r;
+    }
+
+    for(uint64_t w=0; w<workers; w++)
+    {
+        num_free(worker_aux[w]);
+    }
+    free(worker_ids);
+    free(worker_args);
+    free(worker_aux);
 }
 
 // num_aux->size >= 2 * p->n
-void num_ssm_fft_inv(num_p num_aux, num_p num_fft, ssm_params_p p)
+void num_ssm_fft_inv(num_p num_aux, num_p num_fft, ssm_params_p p, uint64_t threads)
 {
     CLU_HANDLER_IS_SAFE(num_aux)
     CLU_HANDLER_IS_SAFE(num_fft)
@@ -2894,19 +3822,29 @@ void num_ssm_fft_inv(num_p num_aux, num_p num_fft, ssm_params_p p)
     assert(num_fft)
     assert(num_aux->size >= 2 * p->n)
 
-    num_ssm_fft_inv_rec(num_aux, num_fft, 0, p->n, p->K, 2 * p->Q);
+    num_ssm_fft_inv_rec(num_aux, num_fft, 0, p->n, p->K, 2 * p->Q, p->Q, nullptr, threads);
+}
 
-    uint64_t k_ = stdc_trailing_zeros(p->K);
-    uint64_t lim = ((chunk_bits * (p->n - 1)) - k_) / p->Q;
-    for(uint64_t i=0; i<lim; i++)
-    {
-        num_ssm_shr_mod(num_aux, num_fft, p->n * i, p->n, (p->Q * i) + k_);
-    }
-    for(uint64_t i=lim; i<p->K; i++)
-    {
-        num_ssm_shr_mod(num_aux, num_fft, p->n * i, p->n, p->Q * i);
-        num_ssm_shr_mod(num_aux, num_fft, p->n * i, p->n, k_);
-    }
+// num_ssm_fft_inv with the convolution's pointwise multiply against num_fft_2 folded
+// into its first pass. num_fft_2 is only read, and is left untouched.
+// num_aux->size >= 2 * p->n
+static void num_ssm_fft_inv_pointwise(
+    num_p num_aux,
+    num_p num_fft,
+    num_p num_fft_2,
+    ssm_params_p p,
+    uint64_t threads
+)
+{
+    CLU_HANDLER_IS_SAFE(num_aux)
+    CLU_HANDLER_IS_SAFE(num_fft)
+    CLU_HANDLER_IS_SAFE(num_fft_2)
+    assert(num_aux)
+    assert(num_fft)
+    assert(num_fft_2)
+    assert(num_aux->size >= 2 * p->n)
+
+    num_ssm_fft_inv_rec(num_aux, num_fft, 0, p->n, p->K, 2 * p->Q, p->Q, num_fft_2, threads);
 }
 
 constexpr uint64_t ssm_recursive_threshold = 129;
@@ -2923,18 +3861,12 @@ static bool ssm_pad_is_needed(uint64_t n, uint64_t moduli)
         return true;
     }
 
-    // Below one full block there is no 8 wide body to trim, only tail, so unpadding saves
-    // a word or two of width while the padded form still runs a single clean block.
     constexpr uint64_t unroll = 8;
     if(n - 1 < unroll)
     {
         return true;
     }
 
-    // For a leaf it is a straight trade: padding buys 8 - moduli words of extra width in
-    // every add, subtract, rotate and in the (n - 1)^2 pointwise multiply, and saves the
-    // moduli scalar steps that each kernel's tail loop would otherwise run. Below the
-    // midpoint the width is worth more than the tail, above it the tail wins.
     constexpr uint64_t tail_break_even = 4;
     return moduli > tail_break_even;
 }
@@ -2978,7 +3910,6 @@ static ssm_params_t ssm_finish_params(uint64_t count, uint64_t K, uint64_t M)
 }
 // NOLINTEND(readability-magic-numbers)
 
-// NOLINTBEGIN(readability-magic-numbers)
 ssm_params_t ssm_get_params(uint64_t count)
 {
     uint64_t M = B(stdc_bit_width(count) / 2);
@@ -2987,9 +3918,7 @@ ssm_params_t ssm_get_params(uint64_t count)
 
     return ssm_finish_params(count, K, M);
 }
-// NOLINTEND(readability-magic-numbers)
 
-// NOLINTBEGIN(readability-magic-numbers)
 ssm_params_t ssm_get_params_wrap(uint64_t n)
 {
     uint64_t K1 = 2 * B(stdc_bit_width(n-1) / 2);
@@ -3000,7 +3929,6 @@ ssm_params_t ssm_get_params_wrap(uint64_t n)
     assert(n == (M * K) + 1);
     return ssm_finish_params(n, K, M);
 }
-// NOLINTEND(readability-magic-numbers)
 
 // num_aux->size >= 2 * n
 static void num_ssm_mul_mod_span(
@@ -3186,9 +4114,6 @@ static void num_ssm_mul_mod_span(
     }
     dest[count] = LOW(carry);
 
-    // Two rows of src_1 per pass: one dest load/store per two multiplies instead of
-    // two. The two products plus dest plus carry exceed 128 bits, so the carry is kept
-    // as two words (c0 full width, c1 a single bit) rather than a uint128_t.
     uint64_t i = 1;
     for(; i + 3 < count; i += 4)
     {
@@ -3345,8 +4270,7 @@ void num_ssm_pad_wrap(num_p num_fft, num_p num, uint64_t pos, ssm_params_p p)
 
 // num_res[pos .. pos + n - 1] += num_src[src_pos .. src_pos + len - 1] << (64 * off)
 // modulo 2^(64 * (n - 1)) + 1. Requires off + len <= n - 1, so nothing crosses the
-// negacyclic boundary. Same arithmetic as num_ssm_add_mod_immed against a zero-padded
-// n word operand, but only touches the span plus however far the carry actually travels.
+// negacyclic boundary.
 static void num_ssm_add_span_mod(
     num_p num_res, uint64_t pos,
     num_p num_src, uint64_t src_pos,
@@ -3476,10 +4400,6 @@ static void num_ssm_sub_span_mod(
 
 #elif defined(NUM_ASM_AARCH64)
 
-    // Same 8 wide sbcs chain as num_ssm_sub_mod_immed, but over an arbitrary len rather
-    // than the 8k + 1 the full width kernels are guaranteed, so the tail loop earns its
-    // keep here. The borrow leaves in a register instead of being consumed by a
-    // normalize, because the caller still has to walk it up to the top word.
     {
         uint64_t a_0, a_1, a_2, a_3;
         uint64_t b_0, b_1, b_2, b_3;
@@ -3607,9 +4527,6 @@ void num_ssm_depad_wrap(
             num_ssm_opposite(num_fft, src_pos, src_len);
         }
 
-        // Common case: the whole coefficient sits below the negacyclic boundary, so it
-        // goes straight into the accumulator at its word offset. Only the last few
-        // coefficients (p->n > 2 * p->M, so at least the last one) need the wrap path.
         if(dest_pos + src_len <= wrap_boundary)
         {
             if(is_add)
@@ -3683,7 +4600,7 @@ static void num_ssm_prepare_wrap(
     assert(num_aux->size >= 2 * p->n)
 
     num_ssm_pad_wrap(num_fft, num, pos, p);
-    num_ssm_fft_fwd(num_aux, num_fft, p);
+    num_ssm_fft_fwd(num_aux, num_fft, p, 1);
 }
 
 static void num_ssm_mul_pointwise(
@@ -3691,7 +4608,8 @@ static void num_ssm_mul_pointwise(
     num_p num_aux_2,
     num_p num_fft_1,
     num_p num_fft_2,
-    ssm_params_p p
+    ssm_params_p p,
+    uint64_t threads
 );
 
 // KEEPS NUM_1 NUM_2
@@ -3719,10 +4637,11 @@ void num_ssm_mul_wrap(
         num_aux_2,
         num_fft_1,
         num_fft_2,
-        p
+        p,
+        1
     );
 
-    num_ssm_fft_inv(num_aux_2, num_fft_1, p);
+    num_ssm_fft_inv(num_aux_2, num_fft_1, p, 1);
     num_ssm_depad_wrap(
         num_aux_1,
         num_aux_2,
@@ -3735,6 +4654,60 @@ void num_ssm_mul_wrap(
 
 
 
+typedef struct
+{
+    num_p num_fft_1;
+    num_p num_fft_2;
+    ssm_params_p p;
+    num_p num_aux_2;
+    uint64_t i_start;
+    uint64_t i_end;
+} ssm_pointwise_base_worker_t;
+
+static void * ssm_pointwise_base_worker(void * arg)
+{
+    ssm_pointwise_base_worker_t * w = arg;
+    for(uint64_t i = w->i_start; i < w->i_end; i++)
+    {
+        num_ssm_mul_mod_span(w->num_aux_2, w->num_fft_1, w->num_fft_2, i * w->p->n, w->p->n);
+    }
+    return nullptr;
+}
+
+typedef struct
+{
+    num_p num_fft_1;
+    num_p num_fft_2;
+    ssm_params_p p;
+    ssm_params_p p_next;
+    num_p num_aux_1;
+    num_p num_aux_2;
+    num_p num_fft_1_next;
+    num_p num_fft_2_next;
+    uint64_t i_start;
+    uint64_t i_end;
+} ssm_pointwise_rec_worker_t;
+
+static void * ssm_pointwise_rec_worker(void * arg)
+{
+    ssm_pointwise_rec_worker_t * w = arg;
+    for(uint64_t i = w->i_start; i < w->i_end; i++)
+    {
+        // NOLINTNEXTLINE(readability-suspicious-call-argument)
+        num_ssm_mul_wrap(
+            w->num_aux_1,
+            w->num_aux_2,
+            w->num_fft_1_next,
+            w->num_fft_2_next,
+            w->num_fft_1,
+            w->num_fft_2,
+            i * w->p->n,
+            w->p_next
+        );
+    }
+    return nullptr;
+}
+
 // num_aux_1->size >= p->n
 // num_aux_2->size >= 2 * p->n
 static void num_ssm_mul_pointwise(
@@ -3742,7 +4715,8 @@ static void num_ssm_mul_pointwise(
     num_p num_aux_2,
     num_p num_fft_1,
     num_p num_fft_2,
-    ssm_params_p p
+    ssm_params_p p,
+    uint64_t threads
 )
 {
     CLU_HANDLER_IS_SAFE(num_aux_1)
@@ -3756,38 +4730,115 @@ static void num_ssm_mul_pointwise(
     assert(num_aux_1->size >= p->n)
     assert(num_aux_2->size >= 2 * p->n)
 
+    uint64_t workers = ssm_worker_count(threads, p->K);
+
     if(!ssm_is_recursive(p->n))
     {
-        for(uint64_t i=0; i<p->K; i++)
+        if(workers <= 1)
         {
-            num_ssm_mul_mod_span(num_aux_2, num_fft_1, num_fft_2, i * p->n, p->n);
+            for(uint64_t i=0; i<p->K; i++)
+            {
+                num_ssm_mul_mod_span(num_aux_2, num_fft_1, num_fft_2, i * p->n, p->n);
+            }
+            return;
         }
+
+        ssm_pointwise_base_worker_t * worker_args = malloc(workers * sizeof(*worker_args));
+        assert(worker_args)
+        pthread_t * worker_ids = malloc(workers * sizeof(*worker_ids));
+        assert(worker_ids)
+
+        for(uint64_t w=0; w<workers; w++)
+        {
+            uint64_t i_start, i_end;
+            ssm_worker_range(w, workers, p->K, &i_start, &i_end);
+            worker_args[w] = (ssm_pointwise_base_worker_t)
+            {
+                .num_fft_1 = num_fft_1,
+                .num_fft_2 = num_fft_2,
+                .p = p,
+                .num_aux_2 = num_create_dirty(CLU_ARGS(2 * p->n, 0)),
+                .i_start = i_start,
+                .i_end = i_end,
+            };
+            TREAT(pthread_create(&worker_ids[w], nullptr, ssm_pointwise_base_worker, &worker_args[w]))
+        }
+        for(uint64_t w=0; w<workers; w++)
+        {
+            TREAT(pthread_join(worker_ids[w], nullptr))
+            num_free(worker_args[w].num_aux_2);
+        }
+
+        free(worker_ids);
+        free(worker_args);
         return;
     }
 
     ssm_params_t p_next = ssm_get_params_wrap(p->n);
-    num_p num_fft_1_next = num_create_dirty(CLU_ARGS(p_next.n * p_next.K, 0));
-    num_p num_fft_2_next = num_create_dirty(CLU_ARGS(p_next.n * p_next.K, 0));
-    for(uint64_t i=0; i<p->K; i++)
+
+    if(workers <= 1)
     {
-        // NOLINTNEXTLINE(readability-suspicious-call-argument)
-        num_ssm_mul_wrap(
-            num_aux_1,
-            num_aux_2,
-            num_fft_1_next,
-            num_fft_2_next,
-            num_fft_1,
-            num_fft_2,
-            i * p->n,
-            &p_next
-        );
+        num_p num_fft_1_next = num_create_dirty(CLU_ARGS(p_next.n * p_next.K, 0));
+        num_p num_fft_2_next = num_create_dirty(CLU_ARGS(p_next.n * p_next.K, 0));
+        for(uint64_t i=0; i<p->K; i++)
+        {
+            // NOLINTNEXTLINE(readability-suspicious-call-argument)
+            num_ssm_mul_wrap(
+                num_aux_1,
+                num_aux_2,
+                num_fft_1_next,
+                num_fft_2_next,
+                num_fft_1,
+                num_fft_2,
+                i * p->n,
+                &p_next
+            );
+        }
+        num_free(num_fft_1_next);
+        num_free(num_fft_2_next);
+        return;
     }
-    num_free(num_fft_1_next);
-    num_free(num_fft_2_next);
+
+    ssm_pointwise_rec_worker_t * worker_args = malloc(workers * sizeof(*worker_args));
+    assert(worker_args)
+    pthread_t * worker_ids = malloc(workers * sizeof(*worker_ids));
+    assert(worker_ids)
+
+    for(uint64_t w=0; w<workers; w++)
+    {
+        uint64_t i_start, i_end;
+        ssm_worker_range(w, workers, p->K, &i_start, &i_end);
+        worker_args[w] = (ssm_pointwise_rec_worker_t)
+        {
+            .num_fft_1 = num_fft_1,
+            .num_fft_2 = num_fft_2,
+            .p = p,
+            .p_next = &p_next,
+            .num_aux_1 = num_create_dirty(CLU_ARGS(p->n, 0)),
+            .num_aux_2 = num_create_dirty(CLU_ARGS(2 * p->n, 0)),
+            .num_fft_1_next = num_create_dirty(CLU_ARGS(p_next.n * p_next.K, 0)),
+            .num_fft_2_next = num_create_dirty(CLU_ARGS(p_next.n * p_next.K, 0)),
+            .i_start = i_start,
+            .i_end = i_end,
+        };
+        TREAT(pthread_create(&worker_ids[w], nullptr, ssm_pointwise_rec_worker, &worker_args[w]))
+    }
+    for(uint64_t w=0; w<workers; w++)
+    {
+        TREAT(pthread_join(worker_ids[w], nullptr))
+        num_free(worker_args[w].num_aux_1);
+        num_free(worker_args[w].num_aux_2);
+        num_free(worker_args[w].num_fft_1_next);
+        num_free(worker_args[w].num_fft_2_next);
+    }
+
+    free(worker_ids);
+    free(worker_args);
 }
 
 
 
+[[maybe_unused]]
 num_p num_ssm_pad_no_wrap(num_p num, ssm_params_p p)
 {
     CLU_HANDLER_IS_SAFE(num)
@@ -3823,21 +4874,142 @@ num_p num_ssm_pad_no_wrap(num_p num, ssm_params_p p)
     return num_fft;
 }
 
-num_p num_ssm_depad_no_wrap(num_p num, ssm_params_p p)
+// Adds COUNT limbs of SRC into DEST, rippling the carry no further than LIMIT
+// limbs from DEST. Whatever leaves that window is returned rather than carried
+static uint64_t ssm_depad_add(
+    uint64_t * restrict dest,
+    const uint64_t * restrict src,
+    uint64_t count,
+    uint64_t limit
+)
+{
+    uint128_t carry = 0;
+
+    #pragma GCC unroll 32
+    for(uint64_t i = 0; i < count; i++)
+    {
+        carry += U128(src[i]) + dest[i];
+        dest[i] = LOW(carry);
+        carry = HIGH(carry);
+    }
+
+    for(uint64_t i = count; carry && i < limit; i++)
+    {
+        carry += dest[i];
+        dest[i] = LOW(carry);
+        carry = HIGH(carry);
+    }
+
+    return LOW(carry);
+}
+
+// A worker owns the result limbs [pos_init, pos_max) and adds into them every
+// block that reaches them -- blocks overlap, so the ones at either end are added
+// in part by two workers. Carries stop at pos_max and are handed back
+typedef struct
+{
+    num_p num_res;
+    num_p num_fft;
+    ssm_params_p p;
+    uint64_t pos_init;
+    uint64_t pos_max;
+    uint64_t carry;
+} ssm_depad_worker_t;
+
+static void * ssm_depad_worker(void * arg)
+{
+    ssm_depad_worker_t * w = arg;
+
+    uint64_t M = w->p->M;
+    uint64_t n = w->p->n;
+
+    uint64_t first = w->pos_init < n ? 0 : ((w->pos_init - n) / M) + 1;
+    uint64_t last = (w->pos_max - 1) / M;
+    if(last >= w->p->K)
+    {
+        last = w->p->K - 1;
+    }
+
+    uint64_t carry = 0;
+    for(uint64_t i = first; i <= last; i++)
+    {
+        uint64_t block = M * i;
+        uint64_t skip = w->pos_init > block ? w->pos_init - block : 0;
+        uint64_t pos = block + skip;
+        uint64_t end = block + n < w->pos_max ? block + n : w->pos_max;
+
+        carry += ssm_depad_add(
+            &w->num_res->chunk[pos],
+            &w->num_fft->chunk[(n * i) + skip],
+            end - pos,
+            w->pos_max - pos
+        );
+    }
+
+    w->carry = carry;
+    return nullptr;
+}
+
+// Blocks below this leave too little per worker to pay for the threads
+constexpr uint64_t ssm_depad_min_limbs_to_thread = 65536;
+
+num_p num_ssm_depad_no_wrap(num_p num, ssm_params_p p, uint64_t threads)
 {
     CLU_HANDLER_IS_SAFE(num)
     assert(num)
 
     uint64_t target_count = (p->M * (p->K - 1)) + p->n;
-    num_p num_res = num_create(CLU_ARGS(target_count, 0));
+    num_p num_res = num_create(CLU_ARGS(target_count, target_count));
 
-    for(uint64_t i = 0; i < p->K; i++)
+    uint64_t workers = target_count < ssm_depad_min_limbs_to_thread ? 1 : threads;
+    if(workers > p->K)
     {
-        num_t block;
-        num_span(&block, num, p->n * i, p->n * (i + 1));
-        num_add_offset(num_res, p->M * i, &block);
+        workers = p->K;
     }
 
+    pthread_t * worker_ids = malloc(workers * sizeof(pthread_t));
+    assert(worker_ids);
+    ssm_depad_worker_t * worker_args = malloc(workers * sizeof(*worker_args));
+    assert(worker_args);
+
+    for(uint64_t w=0; w<workers; w++)
+    {
+        uint64_t pos_init, pos_max;
+        ssm_worker_range(w, workers, target_count, &pos_init, &pos_max);
+
+        worker_args[w] = (ssm_depad_worker_t)
+        {
+            .num_res = num_res,
+            .num_fft = num,
+            .p = p,
+            .pos_init = pos_init,
+            .pos_max = pos_max,
+            .carry = 0,
+        };
+    }
+
+    for(uint64_t w=1; w<workers; w++)
+    {
+        TREAT(pthread_create(&worker_ids[w], nullptr, ssm_depad_worker, &worker_args[w]))
+    }
+    ssm_depad_worker(&worker_args[0]);
+    for(uint64_t w=1; w<workers; w++)
+    {
+        TREAT(pthread_join(worker_ids[w], nullptr))
+    }
+
+    // the result never overflows target_count, so the last range carries nothing
+    assert(worker_args[workers-1].carry == 0);
+    for(uint64_t w=0; w+1<workers; w++)
+    {
+        if(worker_args[w].carry)
+        {
+            num_add_uint_offset(num_res, worker_args[w].pos_max, worker_args[w].carry);
+        }
+    }
+
+    free(worker_args);
+    free(worker_ids);
     num_free(num);
     return num_normalize(num_res);
 }
@@ -3847,7 +5019,8 @@ static num_p num_ssm_prepare_no_wrap(
     num_p num_aux,
     num_p num,
     ssm_params_p p,
-    bool free_inputs
+    bool free_inputs,
+    uint64_t threads
 )
 {
     CLU_HANDLER_IS_SAFE(num_aux)
@@ -3856,18 +5029,19 @@ static num_p num_ssm_prepare_no_wrap(
     assert(num)
     assert(num_aux->size >= 2 * p->n)
 
-    num_p num_fft = num_ssm_pad_no_wrap(num, p);
+    num_p num_fft = num_create_dirty(CLU_ARGS(p->n * p->K, 0));
+
+    num_ssm_fft_fwd_pad(num_aux, num_fft, num, p, threads);
+
     if(free_inputs)
     {
         num_free(num);
     }
-
-    num_ssm_fft_fwd(num_aux, num_fft, p);
     return num_fft;
 }
 
 // KEEPS NUM_1 NUM_2
-num_p num_mul_ssm(num_p num_1, num_p num_2, bool free_inputs)
+num_p num_mul_ssm(num_p num_1, num_p num_2, bool free_inputs, uint64_t threads)
 {
     CLU_HANDLER_IS_SAFE(num_1)
     CLU_HANDLER_IS_SAFE(num_2)
@@ -3875,29 +5049,103 @@ num_p num_mul_ssm(num_p num_1, num_p num_2, bool free_inputs)
     assert(num_2)
 
     ssm_params_t p = ssm_get_params(num_1->count + num_2->count);
-    num_p num_aux_1 = num_create_dirty(CLU_ARGS(p.n, 0));
     num_p num_aux_2 = num_create_dirty(CLU_ARGS(2 * p.n, 0));
-    num_p num_fft_1 = num_ssm_prepare_no_wrap(num_aux_2, num_1, &p, free_inputs);
-    num_p num_fft_2 = num_ssm_prepare_no_wrap(num_aux_2, num_2, &p, free_inputs);
+    num_p num_fft_1 = num_ssm_prepare_no_wrap(num_aux_2, num_1, &p, free_inputs, threads);
+    num_p num_fft_2 = num_ssm_prepare_no_wrap(num_aux_2, num_2, &p, free_inputs, threads);
 
-    num_ssm_mul_pointwise(
-        num_aux_1,
-        num_aux_2,
-        num_fft_1,
-        num_fft_2,
-        &p
-    );
-    num_free(num_aux_1);
+    num_ssm_fft_inv_pointwise(num_aux_2, num_fft_1, num_fft_2, &p, threads);
     num_free(num_fft_2);
-
-    num_ssm_fft_inv(num_aux_2, num_fft_1, &p);
     num_free(num_aux_2);
 
-    return num_ssm_depad_no_wrap(num_fft_1, &p);
+    return num_ssm_depad_no_wrap(num_fft_1, &p, threads);
 }
 
 
 
+
+// bytes num_create hands each of num_mul_ssm's two transform arrays
+static uint64_t mul_ssm_array_bytes(uint64_t count_1, uint64_t count_2)
+{
+    ssm_params_t p = ssm_get_params(count_1 + count_2);
+    return sizeof(num_t) + (p.n * p.K * sizeof(uint64_t));
+}
+
+// floor on splitting: under it a disk backed transform costs less than the extra
+// product, and it is what bounds the recursion when the threshold is very low
+constexpr uint64_t mul_karatsuba_min_bytes = U64(256) * 1024 * 1024;
+
+// Split while a transform array would land on disk. Halving both operands halves
+// the array, so the recursion ends once it fits under the threshold or the floor.
+static bool mul_is_karatsuba(
+    uint64_t count_1,
+    uint64_t count_2,
+    uint64_t disk_threshold_bytes
+)
+{
+    uint64_t bytes = mul_ssm_array_bytes(count_1, count_2);
+    if(bytes <= mul_karatsuba_min_bytes)
+    {
+        return false;
+    }
+
+    return bytes > disk_threshold_bytes;
+}
+
+// KEEPS NUM_1 NUM_2 unless FREE_INPUTS
+// split at half the larger operand, so num_mid's operands stay one limb over it
+STATIC num_p num_mul_karatsuba(
+    num_p num_1,
+    num_p num_2,
+    bool free_inputs,
+    uint64_t threads
+)
+{
+    CLU_HANDLER_IS_SAFE(num_1)
+    CLU_HANDLER_IS_SAFE(num_2)
+    assert(num_1)
+    assert(num_2)
+
+    uint64_t count_res = num_1->count + num_2->count;
+    uint64_t count_max = num_1->count < num_2->count ? num_2->count : num_1->count;
+    uint64_t split = (count_max + 1) / 2;
+
+    num_p num_1_hi;
+    num_p num_1_lo;
+    num_break(&num_1_hi, &num_1_lo, free_inputs ? num_1 : num_copy(num_1), split);
+
+    num_p num_2_hi;
+    num_p num_2_lo;
+    num_break(&num_2_hi, &num_2_lo, free_inputs ? num_2 : num_copy(num_2), split);
+
+    // num_create, not num_copy plus num_add: a half can be empty, and num_copy
+    // leaves an empty num's single limb uninitialised for num_add_offset to read
+    num_p num_sum_1 = num_create(CLU_ARGS(split + 1, 0));
+    num_add_offset(num_sum_1, 0, num_1_hi);
+    num_add_offset(num_sum_1, 0, num_1_lo);
+
+    num_p num_sum_2 = num_create(CLU_ARGS(split + 1, 0));
+    num_add_offset(num_sum_2, 0, num_2_hi);
+    num_add_offset(num_sum_2, 0, num_2_lo);
+
+    num_p num_mid = num_mul_core(num_sum_1, num_sum_2, true, threads);
+    num_p num_hi = num_mul_core(num_1_hi, num_2_hi, true, threads);
+    num_p num_lo = num_mul_core(num_1_lo, num_2_lo, true, threads);
+
+    // num_mid holds a_hi * b_lo + a_lo * b_hi once both halves come back out
+    num_sub_offset(num_mid, 0, num_hi);
+    num_sub_offset(num_mid, 0, num_lo);
+
+    num_p num_res = num_create(CLU_ARGS(count_res, 0));
+    num_add_offset(num_res, 0, num_lo);
+    num_add_offset(num_res, split, num_mid);
+    num_add_offset(num_res, 2 * split, num_hi);
+
+    num_free(num_lo);
+    num_free(num_mid);
+    num_free(num_hi);
+
+    return num_normalize(num_res);
+}
 
 static bool mul_is_classic(uint64_t count_1, uint64_t count_2)
 {
@@ -3905,7 +5153,25 @@ static bool mul_is_classic(uint64_t count_1, uint64_t count_2)
     return (bool)((count_1 < threshold) || (count_2 < threshold));
 }
 
-num_p num_mul_core(num_p num_1, num_p num_2, bool free_inputs)
+constexpr uint64_t mul_min_limbs_to_thread = 8192;
+constexpr uint64_t mul_limbs_per_thread_sq = 512;
+
+// Public so a caller scheduling whole multiplications can size a thread request
+// against the same limit num_mul_core clamps to.
+uint64_t num_mul_threads_ceiling(uint64_t count_1, uint64_t count_2)
+{
+    uint64_t count = count_1 < count_2 ? count_1 : count_2;
+    if(count < mul_min_limbs_to_thread)
+    {
+        return 1;
+    }
+
+    // Largest power of two t with mul_limbs_per_thread_sq * t * t <= count.
+    uint64_t squares = count / mul_limbs_per_thread_sq;
+    return B(((uint64_t)stdc_bit_width(squares) - 1) / 2);
+}
+
+num_p num_mul_core(num_p num_1, num_p num_2, bool free_inputs, uint64_t threads)
 {
     CLU_HANDLER_IS_SAFE(num_1)
     CLU_HANDLER_IS_SAFE(num_2)
@@ -3933,21 +5199,47 @@ num_p num_mul_core(num_p num_1, num_p num_2, bool free_inputs)
         return num_res;
     }
 
-    return num_mul_ssm(num_1, num_2, free_inputs);
+    if(mul_is_karatsuba(
+        num_1->count,
+        num_2->count,
+        araucaria_disk_config_get_threshold_bytes()
+    ))
+    {
+        return num_mul_karatsuba(num_1, num_2, free_inputs, threads);
+    }
+
+    uint64_t ceiling = num_mul_threads_ceiling(num_1->count, num_2->count);
+    if(threads > ceiling)
+    {
+        threads = ceiling;
+    }
+
+    return num_mul_ssm(num_1, num_2, free_inputs, threads);
 }
 
 
 
-// 0 if disk_threshold would redirect this size to disk, matching num_create's
-// per-buffer check.
-static double mem_estimate_ram_bytes(uint64_t size, uint64_t disk_threshold)
+// Fraction of the excess charged for a buffer num_create would mmap.
+constexpr double mem_disk_excess_fraction = 0.125;
+
+// Bytes past disk_threshold_bytes are reclaimable page cache: charged at a
+// fraction, never dropped, so this charge stays monotone in size.
+static double mem_estimate_ram_bytes(uint64_t size, uint64_t disk_threshold_bytes)
 {
-    if(size > disk_threshold)
+    uint64_t bytes = sizeof(num_t) + (size * sizeof(uint64_t));
+    if(bytes <= disk_threshold_bytes)
     {
-        return 0.0;
+        return (double)bytes;
     }
 
-    return (double)(sizeof(num_t) + (size * sizeof(uint64_t)));
+    return (double)disk_threshold_bytes
+        + ((double)(bytes - disk_threshold_bytes) * mem_disk_excess_fraction);
+}
+
+// Bytes charged for one buffer of this limb count, on num_create's terms.
+uint64_t num_estimate_ram_bytes(uint64_t count, uint64_t disk_threshold_bytes)
+{
+    return (uint64_t)mem_estimate_ram_bytes(count, disk_threshold_bytes);
 }
 
 // Butterfly-count proxy for FFT cost; K is always a power of two here.
@@ -3973,24 +5265,33 @@ static mem_profile_t ssm_pointwise_mem_estimate(
     uint64_t n,
     uint64_t K,
     double live_baseline,
-    uint64_t disk_threshold
+    uint64_t disk_threshold_bytes,
+    uint64_t threads
 )
 {
+    uint64_t workers = ssm_worker_count(threads, K);
+
     if(!ssm_is_recursive(n))
     {
-        double dt = (double)K * (double)n * (double)n;
+        double extra = (double)(workers - 1) * mem_estimate_ram_bytes(2 * n, disk_threshold_bytes);
+        double live = live_baseline + extra;
+        double dt = ((double)K * (double)n * (double)n) / (double)workers;
         return (mem_profile_t)
         {
-            .integral = live_baseline * dt,
+            .integral = live * dt,
             .duration = dt,
         };
     }
 
     ssm_params_t p_next = ssm_get_params_wrap(n);
-    double next_bytes = 2.0 * mem_estimate_ram_bytes(p_next.n * p_next.K, disk_threshold);
-    double live = live_baseline + next_bytes;
+    double extra_aux = (double)(workers - 1) * (
+        mem_estimate_ram_bytes(n, disk_threshold_bytes) +
+        mem_estimate_ram_bytes(2 * n, disk_threshold_bytes)
+    );
+    double next_bytes = (double)workers * 2.0 * mem_estimate_ram_bytes(p_next.n * p_next.K, disk_threshold_bytes);
+    double live = live_baseline + extra_aux + next_bytes;
 
-    mem_profile_t inner = ssm_pointwise_mem_estimate(p_next.n, p_next.K, live, disk_threshold);
+    mem_profile_t inner = ssm_pointwise_mem_estimate(p_next.n, p_next.K, live, disk_threshold_bytes, 1);
 
     double fft_inv_dt = (double)p_next.n * (double)p_next.K * mem_estimate_log2_pow2(p_next.K);
     double iter_integral = inner.integral + (live * fft_inv_dt);
@@ -3998,34 +5299,82 @@ static mem_profile_t ssm_pointwise_mem_estimate(
 
     return (mem_profile_t)
     {
-        .integral = iter_integral * (double)K,
-        .duration = iter_duration * (double)K,
+        .integral = (iter_integral * (double)K) / (double)workers,
+        .duration = (iter_duration * (double)K) / (double)workers,
     };
 }
 
-// Time-weighted average RAM (bytes) live during num_mul, mirroring num_mul_core's
-// allocation sites. disk_threshold excludes buffers num_create would put on disk.
-uint64_t num_mul_estimate_memory(
+// Integral and duration for one num_mul_threads, mirroring num_mul_core's
+// allocation sites. Unreduced, so callers can compose a time-weighted mean
+// across sub products.
+static mem_profile_t mul_mem_profile(
     uint64_t count_1,
     uint64_t count_2,
-    uint64_t disk_threshold
+    uint64_t disk_threshold_bytes,
+    uint64_t threads
 )
 {
     if(count_1 == 0 || count_2 == 0)
     {
-        return sizeof(num_t) + sizeof(uint64_t);
+        return (mem_profile_t)
+        {
+            .integral = 0.0,
+            .duration = 0.0,
+        };
     }
 
     if(mul_is_classic(count_1, count_2))
     {
-        double bytes = mem_estimate_ram_bytes(count_1, disk_threshold)
-            + mem_estimate_ram_bytes(count_2, disk_threshold)
-            + mem_estimate_ram_bytes(count_1 + count_2, disk_threshold);
-        return (uint64_t)bytes;
+        double bytes = mem_estimate_ram_bytes(count_1, disk_threshold_bytes)
+            + mem_estimate_ram_bytes(count_2, disk_threshold_bytes)
+            + mem_estimate_ram_bytes(count_1 + count_2, disk_threshold_bytes);
+
+        // num_mul_classic is schoolbook: one word operation per limb pair
+        double dt = (double)count_1 * (double)count_2;
+        return (mem_profile_t)
+        {
+            .integral = bytes * dt,
+            .duration = dt,
+        };
     }
 
-    double live = mem_estimate_ram_bytes(count_1, disk_threshold)
-        + mem_estimate_ram_bytes(count_2, disk_threshold);
+    // num_mul_karatsuba keeps about one operand pair live across all three
+    // sub products
+    if(mul_is_karatsuba(count_1, count_2, disk_threshold_bytes))
+    {
+        uint64_t count_max = count_1 < count_2 ? count_2 : count_1;
+        uint64_t split = (count_max + 1) / 2;
+
+        uint64_t count_1_hi = count_1 > split ? count_1 - split : 0;
+        uint64_t count_1_lo = count_1 < split ? count_1 : split;
+        uint64_t count_2_hi = count_2 > split ? count_2 - split : 0;
+        uint64_t count_2_lo = count_2 < split ? count_2 : split;
+
+        double held = mem_estimate_ram_bytes(count_1 + count_2, disk_threshold_bytes);
+
+        mem_profile_t sub_mid = mul_mem_profile(
+            split + 1, split + 1, disk_threshold_bytes, threads
+        );
+        mem_profile_t sub_hi = mul_mem_profile(
+            count_1_hi, count_2_hi, disk_threshold_bytes, threads
+        );
+        mem_profile_t sub_lo = mul_mem_profile(
+            count_1_lo, count_2_lo, disk_threshold_bytes, threads
+        );
+
+        // the three run in sequence with held live throughout, so a sub product
+        // that does no work carries no weight
+        double duration = sub_mid.duration + sub_hi.duration + sub_lo.duration;
+        return (mem_profile_t)
+        {
+            .integral = sub_mid.integral + sub_hi.integral + sub_lo.integral
+                + (held * duration),
+            .duration = duration,
+        };
+    }
+
+    double live = mem_estimate_ram_bytes(count_1, disk_threshold_bytes)
+        + mem_estimate_ram_bytes(count_2, disk_threshold_bytes);
     double integral = 0.0;
     double duration = 0.0;
 
@@ -4033,41 +5382,68 @@ uint64_t num_mul_estimate_memory(
     uint64_t n = p.n;
     uint64_t K = p.K;
 
-    live += mem_estimate_ram_bytes(n, disk_threshold) + mem_estimate_ram_bytes(2 * n, disk_threshold);
+    live += mem_estimate_ram_bytes(n, disk_threshold_bytes) + mem_estimate_ram_bytes(2 * n, disk_threshold_bytes);
+
+    uint64_t fft_workers = ssm_worker_count(threads, K / 2);
 
     for(uint64_t side = 0; side < 2; side++)
     {
         uint64_t count = side == 0 ? count_1 : count_2;
-        live += mem_estimate_ram_bytes(n * K, disk_threshold);
-        live -= mem_estimate_ram_bytes(count, disk_threshold);
+        double extra = (double)(fft_workers - 1) * mem_estimate_ram_bytes(2 * n, disk_threshold_bytes);
+        live += mem_estimate_ram_bytes(n * K, disk_threshold_bytes);
+        live -= mem_estimate_ram_bytes(count, disk_threshold_bytes);
 
-        double dt = (double)n * (double)K * mem_estimate_log2_pow2(K);
-        integral += live * dt;
+        double dt = ((double)n * (double)K * mem_estimate_log2_pow2(K)) / (double)fft_workers;
+        integral += (live + extra) * dt;
         duration += dt;
     }
 
-    mem_profile_t pw = ssm_pointwise_mem_estimate(n, K, live, disk_threshold);
+    mem_profile_t pw = ssm_pointwise_mem_estimate(n, K, live, disk_threshold_bytes, threads);
     integral += pw.integral;
     duration += pw.duration;
 
-    live -= mem_estimate_ram_bytes(n, disk_threshold);
-    live -= mem_estimate_ram_bytes(n * K, disk_threshold);
+    live -= mem_estimate_ram_bytes(n, disk_threshold_bytes);
+    live -= mem_estimate_ram_bytes(n * K, disk_threshold_bytes);
 
-    double fft_inv_dt = (double)n * (double)K * mem_estimate_log2_pow2(K);
-    integral += live * fft_inv_dt;
+    double fft_inv_extra = (double)(fft_workers - 1) * mem_estimate_ram_bytes(2 * n, disk_threshold_bytes);
+    double fft_inv_dt = ((double)n * (double)K * mem_estimate_log2_pow2(K)) / (double)fft_workers;
+    integral += (live + fft_inv_extra) * fft_inv_dt;
     duration += fft_inv_dt;
 
-    live -= mem_estimate_ram_bytes(2 * n, disk_threshold);
+    live -= mem_estimate_ram_bytes(2 * n, disk_threshold_bytes);
 
     uint64_t target_count = (p.M * (p.K - 1)) + p.n;
-    live += mem_estimate_ram_bytes(target_count, disk_threshold);
-    live -= mem_estimate_ram_bytes(n * K, disk_threshold);
+    live += mem_estimate_ram_bytes(target_count, disk_threshold_bytes);
+    live -= mem_estimate_ram_bytes(n * K, disk_threshold_bytes);
 
     double depad_dt = (double)target_count;
     integral += live * depad_dt;
     duration += depad_dt;
 
-    return duration > 0.0 ? (uint64_t)(integral / duration) : (uint64_t)live;
+    return (mem_profile_t)
+    {
+        .integral = integral,
+        .duration = duration,
+    };
+}
+
+// Time-weighted average RAM (bytes) live during num_mul_threads.
+// disk_threshold_bytes charges buffers num_create would mmap at a fraction;
+// threads should match whatever will be passed to num_mul_threads.
+uint64_t num_mul_estimate_memory(
+    uint64_t count_1,
+    uint64_t count_2,
+    uint64_t disk_threshold_bytes,
+    uint64_t threads
+)
+{
+    mem_profile_t profile = mul_mem_profile(count_1, count_2, disk_threshold_bytes, threads);
+    if(profile.duration <= 0.0)
+    {
+        return sizeof(num_t) + sizeof(uint64_t);
+    }
+
+    return (uint64_t)(profile.integral / profile.duration);
 }
 
 
@@ -4094,7 +5470,8 @@ static void num_ssm_sqr_pointwise(
     num_p num_aux_1,
     num_p num_aux_2,
     num_p num_fft,
-    ssm_params_p p
+    ssm_params_p p,
+    uint64_t threads
 );
 
 // KEEPS NUM
@@ -4116,10 +5493,11 @@ static void num_ssm_sqr_wrap(
         num_aux_1,
         num_aux_2,
         num_fft,
-        p
+        p,
+        1
     );
 
-    num_ssm_fft_inv(num_aux_2, num_fft, p);
+    num_ssm_fft_inv(num_aux_2, num_fft, p, 1);
     num_ssm_depad_wrap(
         num_aux_1,
         num_aux_2,
@@ -4130,13 +5508,63 @@ static void num_ssm_sqr_wrap(
     );
 }
 
+typedef struct
+{
+    num_p num_fft;
+    ssm_params_p p;
+    num_p num_aux_2;
+    uint64_t i_start;
+    uint64_t i_end;
+} ssm_sqr_pointwise_base_worker_t;
+
+static void * ssm_sqr_pointwise_base_worker(void * arg)
+{
+    ssm_sqr_pointwise_base_worker_t * w = arg;
+    for(uint64_t i = w->i_start; i < w->i_end; i++)
+    {
+        num_ssm_sqr_mod_span(w->num_aux_2, w->num_fft, i * w->p->n, w->p->n);
+    }
+    return nullptr;
+}
+
+typedef struct
+{
+    num_p num_fft;
+    ssm_params_p p;
+    ssm_params_p p_next;
+    num_p num_aux_1;
+    num_p num_aux_2;
+    num_p num_fft_next;
+    uint64_t i_start;
+    uint64_t i_end;
+} ssm_sqr_pointwise_rec_worker_t;
+
+static void * ssm_sqr_pointwise_rec_worker(void * arg)
+{
+    ssm_sqr_pointwise_rec_worker_t * w = arg;
+    for(uint64_t i = w->i_start; i < w->i_end; i++)
+    {
+        // NOLINTNEXTLINE(readability-suspicious-call-argument)
+        num_ssm_sqr_wrap(
+            w->num_aux_1,
+            w->num_aux_2,
+            w->num_fft_next,
+            w->num_fft,
+            i * w->p->n,
+            w->p_next
+        );
+    }
+    return nullptr;
+}
+
 // num_aux_1->size >= p->n
 // num_aux_2->size >= 2 * p->n
 static void num_ssm_sqr_pointwise(
     num_p num_aux_1,
     num_p num_aux_2,
     num_p num_fft,
-    ssm_params_p p
+    ssm_params_p p,
+    uint64_t threads
 )
 {
     CLU_HANDLER_IS_SAFE(num_aux_1)
@@ -4148,33 +5576,105 @@ static void num_ssm_sqr_pointwise(
     assert(num_aux_1->size >= p->n)
     assert(num_aux_2->size >= 2 * p->n)
 
+    uint64_t workers = ssm_worker_count(threads, p->K);
+
     if(!ssm_is_recursive(p->n))
     {
-        for(uint64_t i=0; i<p->K; i++)
+        if(workers <= 1)
         {
-            num_ssm_sqr_mod_span(num_aux_2, num_fft, i * p->n, p->n);
+            for(uint64_t i=0; i<p->K; i++)
+            {
+                num_ssm_sqr_mod_span(num_aux_2, num_fft, i * p->n, p->n);
+            }
+            return;
         }
+
+        ssm_sqr_pointwise_base_worker_t * worker_args = malloc(workers * sizeof(*worker_args));
+        assert(worker_args)
+        pthread_t * worker_ids = malloc(workers * sizeof(*worker_ids));
+        assert(worker_ids)
+
+        for(uint64_t w=0; w<workers; w++)
+        {
+            uint64_t i_start, i_end;
+            ssm_worker_range(w, workers, p->K, &i_start, &i_end);
+            worker_args[w] = (ssm_sqr_pointwise_base_worker_t)
+            {
+                .num_fft = num_fft,
+                .p = p,
+                .num_aux_2 = num_create_dirty(CLU_ARGS(2 * p->n, 0)),
+                .i_start = i_start,
+                .i_end = i_end,
+            };
+            TREAT(pthread_create(&worker_ids[w], nullptr, ssm_sqr_pointwise_base_worker, &worker_args[w]))
+        }
+        for(uint64_t w=0; w<workers; w++)
+        {
+            TREAT(pthread_join(worker_ids[w], nullptr))
+            num_free(worker_args[w].num_aux_2);
+        }
+
+        free(worker_ids);
+        free(worker_args);
         return;
     }
 
     ssm_params_t p_next = ssm_get_params_wrap(p->n);
-    num_p num_fft_next = num_create_dirty(CLU_ARGS(p_next.n * p_next.K, 0));
-    for(uint64_t i=0; i<p->K; i++)
+
+    if(workers <= 1)
     {
-        // NOLINTNEXTLINE(readability-suspicious-call-argument)
-        num_ssm_sqr_wrap(
-            num_aux_1,
-            num_aux_2,
-            num_fft_next,
-            num_fft,
-            i * p->n,
-            &p_next
-        );
+        num_p num_fft_next = num_create_dirty(CLU_ARGS(p_next.n * p_next.K, 0));
+        for(uint64_t i=0; i<p->K; i++)
+        {
+            // NOLINTNEXTLINE(readability-suspicious-call-argument)
+            num_ssm_sqr_wrap(
+                num_aux_1,
+                num_aux_2,
+                num_fft_next,
+                num_fft,
+                i * p->n,
+                &p_next
+            );
+        }
+        num_free(num_fft_next);
+        return;
     }
-    num_free(num_fft_next);
+
+    ssm_sqr_pointwise_rec_worker_t * worker_args = malloc(workers * sizeof(*worker_args));
+    assert(worker_args)
+    pthread_t * worker_ids = malloc(workers * sizeof(*worker_ids));
+    assert(worker_ids)
+
+    for(uint64_t w=0; w<workers; w++)
+    {
+        uint64_t i_start, i_end;
+        ssm_worker_range(w, workers, p->K, &i_start, &i_end);
+        worker_args[w] = (ssm_sqr_pointwise_rec_worker_t)
+        {
+            .num_fft = num_fft,
+            .p = p,
+            .p_next = &p_next,
+            .num_aux_1 = num_create_dirty(CLU_ARGS(p->n, 0)),
+            .num_aux_2 = num_create_dirty(CLU_ARGS(2 * p->n, 0)),
+            .num_fft_next = num_create_dirty(CLU_ARGS(p_next.n * p_next.K, 0)),
+            .i_start = i_start,
+            .i_end = i_end,
+        };
+        TREAT(pthread_create(&worker_ids[w], nullptr, ssm_sqr_pointwise_rec_worker, &worker_args[w]))
+    }
+    for(uint64_t w=0; w<workers; w++)
+    {
+        TREAT(pthread_join(worker_ids[w], nullptr))
+        num_free(worker_args[w].num_aux_1);
+        num_free(worker_args[w].num_aux_2);
+        num_free(worker_args[w].num_fft_next);
+    }
+
+    free(worker_ids);
+    free(worker_args);
 }
 
-num_p num_sqr_ssm(num_p num)
+num_p num_sqr_ssm(num_p num, uint64_t threads)
 {
     CLU_HANDLER_IS_SAFE(num)
     assert(num)
@@ -4182,15 +5682,15 @@ num_p num_sqr_ssm(num_p num)
     ssm_params_t p = ssm_get_params(2 * num->count);
     num_p num_aux_1 = num_create_dirty(CLU_ARGS(p.n, 0));
     num_p num_aux_2 = num_create_dirty(CLU_ARGS(2 * p.n, 0));
-    num_p num_fft = num_ssm_prepare_no_wrap(num_aux_2, num, &p, true);
+    num_p num_fft = num_ssm_prepare_no_wrap(num_aux_2, num, &p, true, threads);
 
-    num_ssm_sqr_pointwise(num_aux_1, num_aux_2, num_fft, &p);
+    num_ssm_sqr_pointwise(num_aux_1, num_aux_2, num_fft, &p, threads);
     num_free(num_aux_1);
 
-    num_ssm_fft_inv(num_aux_2, num_fft, &p);
+    num_ssm_fft_inv(num_aux_2, num_fft, &p, threads);
     num_free(num_aux_2);
 
-    return num_ssm_depad_no_wrap(num_fft, &p);
+    return num_ssm_depad_no_wrap(num_fft, &p, threads);
 }
 
 // Returns quotient
@@ -4340,7 +5840,8 @@ static num_p num_div_mod_bz_rec(
     num_p num_aux,
     num_p num_1,
     num_p num_2,
-    bz_frame_t f[]
+    bz_frame_t f[],
+    uint64_t threads
 )
 {
     CLU_HANDLER_IS_SAFE(num_1)
@@ -4372,7 +5873,8 @@ static num_p num_div_mod_bz_rec(
             num_aux,
             &num_1_1,
             &f->num_2_1,
-            &f[1]
+            &f[1],
+            threads
         );
         num_normalize(num_1);
 
@@ -4382,7 +5884,7 @@ static num_p num_div_mod_bz_rec(
             continue;
         }
 
-        num_p num_aux_2 = num_mul_core(num_q_tmp, &f->num_2_0, false);
+        num_p num_aux_2 = num_mul_core(num_q_tmp, &f->num_2_0, false, threads);
         while(num_cmp_offset(num_1, k * i, num_aux_2) < 0)
         {
             num_q_tmp = num_sub_uint(num_q_tmp, 1);
@@ -4404,7 +5906,7 @@ static num_p num_div_mod_bz_rec(
 // Returns quotient
 // NUM_1 becomes remainder
 // Keeps NUM_2
-static num_p num_div_mod_bz(num_p num_1, num_p num_2)
+static num_p num_div_mod_bz(num_p num_1, num_p num_2, uint64_t threads)
 {
     CLU_HANDLER_IS_SAFE(num_1)
     CLU_HANDLER_IS_SAFE(num_2)
@@ -4425,7 +5927,7 @@ static num_p num_div_mod_bz(num_p num_1, num_p num_2)
         num_t num_1_1;
         num_span(&num_1_1, num_1, n_1 - (2 * n_2), num_1->count);
 
-        num_p num_q_tmp = num_div_mod_bz_rec(num_aux, &num_1_1, num_2, f);
+        num_p num_q_tmp = num_div_mod_bz_rec(num_aux, &num_1_1, num_2, f, threads);
         num_normalize(num_1);
         num_q_tmp = num_expand_to(num_q_tmp, n_2 + num_q->count);
         num_add_offset(num_q_tmp, n_2, num_q);
@@ -4433,7 +5935,7 @@ static num_p num_div_mod_bz(num_p num_1, num_p num_2)
         num_q = num_q_tmp;
     }
 
-    num_p num_q_tmp = num_div_mod_bz_rec(num_aux, num_1, num_2, f);
+    num_p num_q_tmp = num_div_mod_bz_rec(num_aux, num_1, num_2, f, threads);
     num_q_tmp = num_expand_to(num_q_tmp, n_1 - n_2 + num_q->count);
     num_add_offset(num_q_tmp, n_1 - n_2, num_q);
 
@@ -4614,10 +6116,21 @@ num_p num_mul(num_p num_1, num_p num_2)
     assert(num_1)
     assert(num_2)
 
-    return num_mul_core(num_1, num_2, true);
+    return num_mul_core(num_1, num_2, true, 1);
 }
 
-num_p num_sqr(num_p num)
+num_p num_mul_threads(num_p num_1, num_p num_2, uint64_t threads)
+{
+    CLU_HANDLER_IS_SAFE(num_1)
+    CLU_HANDLER_IS_SAFE(num_2)
+    assert(num_1)
+    assert(num_2)
+    assert(threads)
+
+    return num_mul_core(num_1, num_2, true, threads);
+}
+
+static num_p num_sqr_core(num_p num, uint64_t threads)
 {
     CLU_HANDLER_IS_SAFE(num);
     assert(num);
@@ -4633,14 +6146,34 @@ num_p num_sqr(num_p num)
         return num_sqr_classic(num);
     }
 
-    return num_sqr_ssm(num);
+    uint64_t ceiling = num_mul_threads_ceiling(num->count, num->count);
+    if(threads > ceiling)
+    {
+        threads = ceiling;
+    }
+
+    return num_sqr_ssm(num, threads);
 }
 
-num_p num_pow(num_p num, uint64_t value) // TODO TEST
+num_p num_sqr(num_p num)
 {
     CLU_HANDLER_IS_SAFE(num);
     assert(num);
 
+    return num_sqr_core(num, 1);
+}
+
+num_p num_sqr_threads(num_p num, uint64_t threads)
+{
+    CLU_HANDLER_IS_SAFE(num);
+    assert(num);
+    assert(threads);
+
+    return num_sqr_core(num, threads);
+}
+
+static num_p num_pow_core(num_p num, uint64_t value, uint64_t threads)
+{
     if(num->count == 0)
     {
         assert(value);
@@ -4650,18 +6183,41 @@ num_p num_pow(num_p num, uint64_t value) // TODO TEST
     num_p num_res = num_wrap(1);
     for(uint64_t mask = B(63); mask; mask >>= 1)
     {
-        num_res = num_sqr(num_res);
+        num_res = num_sqr_threads(num_res, threads);
         if(value & mask)
         {
-            num_res = num_mul(num_res, num_copy(num));
+            num_res = num_mul_threads(num_res, num_copy(num), threads);
         }
     }
     num_free(num);
     return num_res;
 }
 
+num_p num_pow(num_p num, uint64_t value) // TODO TEST
+{
+    CLU_HANDLER_IS_SAFE(num);
+    assert(num);
+
+    return num_pow_core(num, value, 1);
+}
+
+num_p num_pow_threads(num_p num, uint64_t value, uint64_t threads) // TODO TEST
+{
+    CLU_HANDLER_IS_SAFE(num);
+    assert(num);
+    assert(threads);
+
+    return num_pow_core(num, value, threads);
+}
+
 // out_num_q and out_num_r can be nullptr
-void num_div_mod(num_p *out_num_q, num_p *out_num_r, num_p num_1, num_p num_2)
+static void num_div_mod_core(
+    num_p *out_num_q,
+    num_p *out_num_r,
+    num_p num_1,
+    num_p num_2,
+    uint64_t threads
+)
 {
     CLU_HANDLER_IS_SAFE(num_1)
     CLU_HANDLER_IS_SAFE(num_2)
@@ -4685,8 +6241,35 @@ void num_div_mod(num_p *out_num_q, num_p *out_num_r, num_p num_1, num_p num_2)
     }
 
     uint64_t bits = num_div_normalize(&num_1, &num_2);
-    num_p num_q = num_div_mod_bz(num_1, num_2);
+    num_p num_q = num_div_mod_bz(num_1, num_2, threads);
     num_div_mod_finalize(out_num_q, out_num_r, num_q, num_1, num_2, bits);
+}
+
+void num_div_mod(num_p *out_num_q, num_p *out_num_r, num_p num_1, num_p num_2)
+{
+    CLU_HANDLER_IS_SAFE(num_1)
+    CLU_HANDLER_IS_SAFE(num_2)
+    assert(num_1)
+    assert(num_2)
+
+    num_div_mod_core(out_num_q, out_num_r, num_1, num_2, 1);
+}
+
+void num_div_mod_threads(
+    num_p *out_num_q,
+    num_p *out_num_r,
+    num_p num_1,
+    num_p num_2,
+    uint64_t threads
+)
+{
+    CLU_HANDLER_IS_SAFE(num_1)
+    CLU_HANDLER_IS_SAFE(num_2)
+    assert(num_1)
+    assert(num_2)
+    assert(threads)
+
+    num_div_mod_core(out_num_q, out_num_r, num_1, num_2, threads);
 }
 
 num_p num_div(num_p num_1, num_p num_2)
@@ -4701,6 +6284,19 @@ num_p num_div(num_p num_1, num_p num_2)
     return num_q;
 }
 
+num_p num_div_threads(num_p num_1, num_p num_2, uint64_t threads)
+{
+    CLU_HANDLER_IS_SAFE(num_1)
+    CLU_HANDLER_IS_SAFE(num_2)
+    assert(num_1)
+    assert(num_2)
+    assert(threads)
+
+    num_p num_q;
+    num_div_mod_threads(&num_q, nullptr, num_1, num_2, threads);
+    return num_q;
+}
+
 num_p num_mod(num_p num_1, num_p num_2)
 {
     CLU_HANDLER_IS_SAFE(num_1)
@@ -4709,6 +6305,18 @@ num_p num_mod(num_p num_1, num_p num_2)
     assert(num_2)
 
     num_div_mod(nullptr, &num_1, num_1, num_2);
+    return num_1;
+}
+
+num_p num_mod_threads(num_p num_1, num_p num_2, uint64_t threads)
+{
+    CLU_HANDLER_IS_SAFE(num_1)
+    CLU_HANDLER_IS_SAFE(num_2)
+    assert(num_1)
+    assert(num_2)
+    assert(threads)
+
+    num_div_mod_threads(nullptr, &num_1, num_1, num_2, threads);
     return num_1;
 }
 
@@ -4731,29 +6339,293 @@ num_p num_gcd(num_p num_1, num_p num_2)
 
 
 
-static num_p num_base_to_rec(num_p num, num_p num_bases[], uint64_t i)
+// Levels with a divisor below this keep the generic division
+constexpr uint64_t base_to_barrett_min_limbs = 32;
+
+// Pieces the level loop splits down to before the leaf pass takes over
+constexpr uint64_t base_to_pieces_per_thread = 4;
+
+// The top level falls back to generic division when its quotient is under this
+// share of the divisor
+constexpr uint64_t base_to_barrett_top_quotient_share = 2;
+
+// num_recips[i] underestimates 2^(64 * (2n + g)) / num_bases[i], with
+// n = num_bases[i]->count and g = base_to_recip_guard. The guard limb holds the
+// quotient estimate within 2 of the true quotient.
+constexpr uint64_t base_to_recip_guard = 1;
+
+// Exact; seeds the chain at level 0, whose divisor is the single-limb base
+static num_p num_base_to_recip_seed(uint64_t base)
+{
+    constexpr uint64_t count = 3 + base_to_recip_guard;
+    num_p num_pow = num_create(CLU_ARGS(count, count));
+    num_pow->chunk[count-1] = 1;
+
+    num_p num_recip = num_div_mod_uint(num_pow, base);
+    num_free(num_pow);
+    return num_recip;
+}
+
+// One Newton step, y += y * (2^(64k) - y * num_base) / 2^(64k), k = 2n + g.
+// Each factor keeps only the limbs the correction reaches; both are truncated
+// downwards, which keeps y an underestimate.
+static num_p num_base_to_recip_refine(num_p num_y, num_p num_base, uint64_t threads)
+{
+    uint64_t k = (2 * num_base->count) + base_to_recip_guard;
+
+    num_p num_w = num_create(CLU_ARGS(k + 1, k + 1));
+    num_w->chunk[k] = 1;
+    num_p num_aux = num_mul_core(num_y, num_base, false, threads);
+    num_sub_offset(num_w, 0, num_aux);
+    num_free(num_aux);
+
+    uint64_t drop_w = num_y->count < k ? k - num_y->count : 0;
+    uint64_t drop_y = num_w->count < k ? k - num_w->count : 0;
+    if(drop_w >= num_w->count || drop_y >= num_y->count)
+    {
+        num_free(num_w);
+        return num_y;
+    }
+
+    num_t num_y_hi, num_w_hi;
+    num_span(&num_y_hi, num_y, drop_y, num_y->count);
+    num_span(&num_w_hi, num_w, drop_w, num_w->count);
+
+    num_p num_corr = num_mul_core(&num_y_hi, &num_w_hi, false, threads);
+    num_free(num_w);
+    num_head_trim(num_corr, k - drop_w - drop_y);
+
+    uint64_t count = num_y->count < num_corr->count
+        ? num_corr->count
+        : num_y->count;
+    num_y = num_expand_to(num_y, count + 1);
+    num_add_offset(num_y, 0, num_corr);
+    num_free(num_corr);
+    return num_y;
+}
+
+// num_base is the square of the divisor num_recip_prev inverts
+// Keeps NUM_RECIP_PREV
+static num_p num_base_to_recip_next(
+    num_p num_recip_prev,
+    uint64_t count_prev,
+    num_p num_base,
+    uint64_t threads
+)
+{
+    num_p num_y = num_sqr_threads(num_copy(num_recip_prev), threads);
+    uint64_t drop = (4 * count_prev) - (2 * num_base->count) + base_to_recip_guard;
+    num_head_trim(num_y, drop);
+    return num_base_to_recip_refine(num_y, num_base, threads);
+}
+
+// Requires num_base <= num_x < num_base ^ 2
+// Consumes NUM_X, keeps NUM_BASE and NUM_RECIP
+static void num_base_to_div(
+    num_p *out_num_q,
+    num_p *out_num_r,
+    num_p num_x,
+    num_p num_base,
+    num_p num_recip,
+    uint64_t threads
+)
+{
+    uint64_t n = num_base->count;
+
+    num_t num_x_hi;
+    num_span(&num_x_hi, num_x, n - 1, num_x->count);
+
+    num_p num_prod = num_mul_core(&num_x_hi, num_recip, false, threads);
+    num_p num_q, num_aux;
+    num_break(&num_q, &num_aux, num_prod, n + 1 + base_to_recip_guard);
+    num_free(num_aux);
+
+    if(num_q->count)
+    {
+        num_aux = num_mul_core(num_q, num_base, false, threads);
+        assert(num_cmp(num_x, num_aux) >= 0);
+        num_sub_offset(num_x, 0, num_aux);
+        num_free(num_aux);
+    }
+
+    // The estimate is short by at most 2
+    while(num_cmp(num_x, num_base) >= 0)
+    {
+        num_sub_offset(num_x, 0, num_base);
+        num_q = num_add_uint(num_q, 1);
+    }
+
+    *out_num_q = num_q;
+    *out_num_r = num_x;
+}
+
+// Requires num_x < num_base ^ 2
+// Consumes NUM_X, keeps NUM_BASE and NUM_RECIP
+// num_recip is null on a level the reciprocal chain stops short of
+static void num_base_to_split(
+    num_p *out_num_q,
+    num_p *out_num_r,
+    num_p num_x,
+    num_p num_base,
+    num_p num_recip,
+    uint64_t threads
+)
+{
+    if(num_cmp(num_x, num_base) < 0)
+    {
+        *out_num_q = num_create(CLU_ARGS(0, 0));
+        *out_num_r = num_x;
+        return;
+    }
+
+    if(num_recip == nullptr || num_base->count < base_to_barrett_min_limbs)
+    {
+        num_div_mod_threads(out_num_q, out_num_r, num_x, num_copy(num_base), threads);
+        return;
+    }
+
+    num_base_to_div(out_num_q, out_num_r, num_x, num_base, num_recip, threads);
+}
+
+// Writes the digits of NUM into num_res from limb POS up; consumes NUM.
+// The slot at level i is B(i) limbs wide and num_res comes out zeroed, so a
+// value that runs short of its slot needs nothing written.
+static void num_base_to_rec(
+    num_p num_res,
+    uint64_t pos,
+    num_p num,
+    num_p num_bases[],
+    num_p num_recips[],
+    uint64_t i
+)
 {
     CLU_HANDLER_IS_SAFE(num);
     assert(num);
 
+    if(num->count == 0)
+    {
+        num_free(num);
+        return;
+    }
+
     if(i == UINT64_MAX)
     {
-        return num;
+        assert(num->count == 1);
+        assert(pos < num_res->size);
+        num_res->chunk[pos] = num->chunk[0];
+        num_free(num);
+        return;
     }
 
     if(num_cmp(num, num_bases[i]) < 0)
     {
-        return num_base_to_rec(num, num_bases, i - 1);
+        num_base_to_rec(num_res, pos, num, num_bases, num_recips, i - 1);
+        return;
     }
 
     num_p num_q, num_r;
-    num_div_mod(&num_q, &num_r, num, num_copy(num_bases[i]));
-    num_q = num_base_to_rec(num_q, num_bases, i - 1);
-    num_r = num_base_to_rec(num_r, num_bases, i - 1);
-    num_r = num_expand_to(num_r, B(i) + num_q->count);
-    num_add_offset(num_r, B(i), num_q);
-    num_free(num_q);
-    return num_r;
+    num_base_to_split(&num_q, &num_r, num, num_bases[i], num_recips[i], 1);
+    num_base_to_rec(num_res, pos, num_r, num_bases, num_recips, i - 1);
+    num_base_to_rec(num_res, pos + B(i), num_q, num_bases, num_recips, i - 1);
+}
+
+// One subtree of the split: a piece below num_bases[level + 1], whose digits go
+// to num_res from limb POS up
+typedef struct
+{
+    num_p num;
+    uint64_t level;
+    uint64_t pos;
+} num_base_to_task_t;
+
+// Levels do not run in lockstep: a piece is split as soon as any worker is free
+// and its halves join the stack immediately. THREADS is shared out over the
+// tasks outstanding
+typedef struct
+{
+    pthread_mutex_t lock;
+    pthread_cond_t cond;
+    num_base_to_task_t * task;
+    uint64_t count;
+    uint64_t active;
+    num_p num_res;
+    num_p * num_bases;
+    num_p * num_recips;
+    uint64_t leaf;
+    uint64_t threads;
+} num_base_to_pool_t;
+
+static void * num_base_to_pool_worker(void * arg)
+{
+    num_base_to_pool_t * pool = arg;
+
+    TREAT(pthread_mutex_lock(&pool->lock))
+    while(true)
+    {
+        while(pool->count == 0 && pool->active)
+        {
+            TREAT(pthread_cond_wait(&pool->cond, &pool->lock))
+        }
+
+        if(pool->count == 0)
+        {
+            break;
+        }
+
+        num_base_to_task_t task = pool->task[--pool->count];
+        pool->active++;
+        uint64_t share = pool->threads / (pool->count + pool->active);
+        TREAT(pthread_mutex_unlock(&pool->lock))
+
+        num_p num_q = nullptr;
+        num_p num_r = nullptr;
+        if(task.level != UINT64_MAX && task.level >= pool->leaf)
+        {
+            num_base_to_split(
+                &num_q,
+                &num_r,
+                task.num,
+                pool->num_bases[task.level],
+                pool->num_recips[task.level],
+                share ? share : 1
+            );
+        }
+        else
+        {
+            // below leaf the whole subtree is cheaper to convert on one thread
+            num_base_to_rec(
+                pool->num_res,
+                task.pos,
+                task.num,
+                pool->num_bases,
+                pool->num_recips,
+                task.level
+            );
+        }
+
+        TREAT(pthread_mutex_lock(&pool->lock))
+        pool->active--;
+        if(num_r)
+        {
+            pool->task[pool->count++] = (num_base_to_task_t)
+            {
+                .num = num_r,
+                .level = task.level - 1,
+                .pos = task.pos,
+            };
+            pool->task[pool->count++] = (num_base_to_task_t)
+            {
+                .num = num_q,
+                .level = task.level - 1,
+                .pos = task.pos + B(task.level),
+            };
+        }
+        TREAT(pthread_cond_broadcast(&pool->cond))
+    }
+
+    TREAT(pthread_cond_broadcast(&pool->cond))
+    TREAT(pthread_mutex_unlock(&pool->lock))
+    return nullptr;
 }
 
 num_p num_base_to(num_p num, uint64_t base)
@@ -4762,32 +6634,136 @@ num_p num_base_to(num_p num, uint64_t base)
     assert(num);
     assert(base > 1);
 
+    return num_base_to_threads(num, base, 1);
+}
+
+// Binary splitting: at level i a piece is divided by base ^ (2 ^ i), remainder
+// low half, quotient high. A piece's digit offset follows from its index, so
+// every worker writes into the one result buffer and nothing is spliced. The
+// reciprocals are freed as the level loop descends past the level using each.
+num_p num_base_to_threads(num_p num, uint64_t base, uint64_t threads)
+{
+    CLU_HANDLER_IS_SAFE(num);
+    assert(num);
+    assert(base > 1);
+    assert(threads);
+
     constexpr uint64_t len = 100;
     num_p num_base = num_wrap(base);
     num_p num_bases[len];
 
-    uint64_t max;
-    for(max=0; num_cmp(num_base, num) <= 0; max++)
+    // The bit counts end the table without the final square; a null num_base
+    // past the loop means the table owns the last one
+    uint64_t max = 0;
+    while(num_cmp(num_base, num) <= 0)
     {
-        num_bases[max] = num_copy(num_base);
-        num_base = num_sqr(num_base);
-    }
-    num_free(num_base);
+        assert(max < len);
+        num_bases[max++] = num_base;
 
+        if((2 * num_bit_count(num_base)) - 1 > num_bit_count(num))
+        {
+            num_base = nullptr;
+            break;
+        }
+
+        num_base = num_sqr_threads(num_copy(num_base), threads);
+    }
+
+    if(num_base)
+    {
+        num_free(num_base);
+    }
 
     if(max == 0)
     {
         return num;
     }
 
-    num_p num_res = num_base_to_rec(num, num_bases, max - 1);
+    uint64_t leaf = max;
+    for(uint64_t pieces=1; leaf && pieces<threads*base_to_pieces_per_thread; pieces*=2)
+    {
+        leaf--;
+    }
+
+    uint64_t top = num_bases[max-1]->count;
+    uint64_t levels = (num->count - top) * base_to_barrett_top_quotient_share < top
+        ? max - 1
+        : max;
+
+    // One per level, each Newton step doubling the precision of the one below.
+    // The level loop frees them as it descends; the levels the leaf pass runs
+    // concurrently are freed at the end
+    num_p num_recips[len];
+    for(uint64_t i=0; i<max; i++)
+    {
+        num_recips[i] = nullptr;
+    }
+    for(uint64_t i=0; i<levels; i++)
+    {
+        num_recips[i] = i
+            ? num_base_to_recip_next(
+                num_recips[i-1],
+                num_bases[i-1]->count,
+                num_bases[i],
+                threads
+            )
+            : num_base_to_recip_seed(base);
+    }
+
+    // A task's digits land at an offset fixed by its place in the split, so every
+    // worker writes into one result buffer. B(max) is up to twice the digits num
+    // needs; the pages past them are never touched
+    num_p num_res = num_create(CLU_ARGS(B(max), B(max)));
+
+    // never more tasks than the pieces at the deepest level the pool splits to
+    num_base_to_pool_t pool =
+    {
+        .task = malloc((B(max - leaf) + threads) * sizeof(num_base_to_task_t)),
+        .count = 1,
+        .num_res = num_res,
+        .num_bases = num_bases,
+        .num_recips = num_recips,
+        .leaf = leaf,
+        .threads = threads,
+    };
+    assert(pool.task);
+    TREAT(pthread_mutex_init(&pool.lock, nullptr))
+    TREAT(pthread_cond_init(&pool.cond, nullptr))
+
+    pool.task[0] = (num_base_to_task_t)
+    {
+        .num = num,
+        .level = max - 1,
+        .pos = 0,
+    };
+
+    pthread_t * worker_ids = malloc(threads * sizeof(pthread_t));
+    assert(worker_ids);
+    for(uint64_t w=1; w<threads; w++)
+    {
+        TREAT(pthread_create(&worker_ids[w], nullptr, num_base_to_pool_worker, &pool))
+    }
+    num_base_to_pool_worker(&pool);
+    for(uint64_t w=1; w<threads; w++)
+    {
+        TREAT(pthread_join(worker_ids[w], nullptr))
+    }
+
+    TREAT(pthread_cond_destroy(&pool.cond))
+    TREAT(pthread_mutex_destroy(&pool.lock))
+    free(worker_ids);
+    free(pool.task);
 
     for(uint64_t i=0; i<max; i++)
     {
         num_free(num_bases[i]);
+        if(num_recips[i])
+        {
+            num_free(num_recips[i]);
+        }
     }
 
-    return num_res;
+    return num_normalize(num_res);
 }
 
 num_p num_base_from(num_p num, uint64_t base)

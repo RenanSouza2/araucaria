@@ -12,6 +12,9 @@ What sets it apart:
 - **Disk-backed numbers.** Past a configurable size, values live in
   `mmap`-ed temporary files instead of the heap, so a single computation can
   outgrow RAM.
+- **Threaded multiply, divide and base conversion.** Every heavy operation
+  has a `*_threads` variant that fans the work out over a caller-chosen
+  number of threads.
 - **Explicit, predictable ownership.** No GC, no refcounting — operations
   consume their inputs and return the only valid pointer, which keeps
   performance predictable in hot loops.
@@ -83,17 +86,62 @@ Values are stored little-endian as arrays of 64-bit limbs.
 #include "mods/araucaria/lib/num/struct.h"
 
 araucaria_disk_config_t config = {
-    .disk_path      = "./cache",  // must already exist
-    .disk_threshold = 1024,       // limbs; larger allocations go to disk
+    .disk_path            = "./cache",  // must already exist
+    .disk_threshold_bytes = 8192,       // bytes; larger allocations go to disk
 };
 araucaria_disk_config_set(&config);
 ```
 
-Allocations above `disk_threshold` limbs come from an anonymous `mmap` over a
-temporary file that's `unlink`-ed immediately, so it disappears when the
-number is freed or the process exits. The default threshold is `UINT64_MAX`
-(nothing goes to disk); `num_realloc_disk` (and the `sig` / `flt`
-equivalents) moves an already-allocated value to disk on demand.
+Allocations whose backing size (in bytes) exceeds `disk_threshold_bytes` come
+from an anonymous `mmap` over a temporary file that's `unlink`-ed
+immediately, so it disappears when the number is freed or the process exits.
+The default threshold is `UINT64_MAX` (nothing goes to disk);
+`num_realloc_disk` (and the `sig` / `flt` equivalents) moves an
+already-allocated value to disk on demand.
+
+## Threading
+
+Every heavy operation has a `*_threads` counterpart taking a thread count as
+its last argument. The plain name is the sequential entry point and is exactly
+the `*_threads` one called with `1`:
+
+```c
+num_p c = num_mul_threads(a, b, 8);   // consumes a and b, same as num_mul
+```
+
+| Module | Threaded entry points |
+| --- | --- |
+| `num` | `num_mul_threads`, `num_sqr_threads`, `num_pow_threads`, `num_div_threads`, `num_mod_threads`, `num_div_mod_threads`, `num_base_to_threads`, `num_display_dec_threads` |
+| `sig` | `sig_num_mul_threads`, `sig_num_div_threads`, `sig_num_display_dec_threads` |
+| `fxd` | `fxd_num_mul_threads`, `fxd_num_div_threads`, `fxd_num_mul_sig_threads`, `fxd_num_div_sig_threads`, `fxd_num_display_dec_threads` |
+| `flt` | `flt_num_mul_threads`, `flt_num_div_threads`, `flt_num_mul_sig_threads`, `flt_num_div_sig_threads`, `flt_num_display_dec_threads` |
+
+Rules:
+
+- `threads` must be at least `1`; `1` runs the sequential path. Zero is an
+  assertion failure, not undefined behaviour.
+- Threads are created and joined inside the call. There is no pool that
+  outlives it and no global state to initialise or tear down.
+- The count is an upper bound, not a promise. Operands too small to be worth
+  splitting run sequentially whatever is asked for. `num_mul_threads_ceiling`
+  reports the limit a Schönhage–Strassen multiply of a given operand pair is
+  clamped to, so a scheduler can size its request against the same number.
+- Ownership is unchanged from the sequential call — the `*_threads` variant
+  consumes and returns the same way.
+
+Link with `-pthread`; the bundled makefiles already do.
+
+### Estimating memory
+
+`num_mul_estimate_memory(count_1, count_2, disk_threshold_bytes, threads)`
+returns the time-weighted average RAM, in bytes, a `num_mul_threads` of that
+shape holds live — a scheduler can use it to decide how many multiplies to
+admit at once. `num_estimate_ram_bytes(count, disk_threshold_bytes)` gives the
+same charge for a single value of `count` limbs.
+
+Both account for `disk_threshold_bytes`: a buffer large enough to be `mmap`-ed
+is charged at a fraction of its size, since the pages past the threshold are
+reclaimable page cache.
 
 ## Ownership
 
@@ -111,6 +159,17 @@ at the end of a program catches a missed `num_free`.
 ([RenanSouza2/clu](https://github.com/RenanSouza2/clu)); `mods/macros` holds
 the shared assert/test/integer macros
 ([RenanSouza2/c-macros](https://github.com/RenanSouza2/c-macros)).
+
+## Upgrading
+
+Changes that break a consuming project. Nothing was removed from the public
+headers; these three changed name or meaning.
+
+| Before | Now | Note |
+| --- | --- | --- |
+| `araucaria_disk_config_t.disk_threshold` | `.disk_threshold_bytes` | **Unit changed from limbs to bytes.** A field initialiser by name stops compiling, but a positional one does not — check any `araucaria_disk_config_t` you build. `1024` limbs is `8192` bytes. |
+| `araucaria_disk_config_get_threshold()` | `araucaria_disk_config_get_threshold_bytes()` | Same unit change; the rename makes it a compile error rather than a silent one. |
+| `num_mul_estimate_memory(count_1, count_2, disk_threshold)` | `num_mul_estimate_memory(count_1, count_2, disk_threshold_bytes, threads)` | Gained a trailing `threads` argument, matching what will be passed to `num_mul_threads`. Pass `1` to keep the old meaning. |
 
 ## Development
 

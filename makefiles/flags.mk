@@ -5,11 +5,12 @@ FLAGS = -std=c23 -Wall -Wextra -Wpedantic -Werror -Wfatal-errors -Wshadow -Wpoin
 FLAGS_PRD = -O3 -ffunction-sections -fdata-sections -flto=auto -g
 FLAGS_DBG = -D DEBUG -O0 -g3 -ggdb -fno-omit-frame-pointer -fsanitize=address,undefined -fno-optimize-sibling-calls
 
-FLAGS_CMP = -c -MMD -MP
+FLAGS_CMP = -c -MMD -MP -pthread
 FLAGS_LNK = -r -nostdlib
-FLAGS_EXE =
+FLAGS_EXE = -pthread
 
 ifeq ($(UNAME_S),Linux)
+	FLAGS += -D_GNU_SOURCE
 	FLAGS += -Wduplicated-cond -Wduplicated-branches -Wlogical-op -Wcast-align=strict -Walloc-zero -Wtrailing-whitespace -Wleading-whitespace=spaces
 
     FLAGS_PRD += -fstack-clash-protection -fcf-protection=full
@@ -20,6 +21,7 @@ ifeq ($(UNAME_S),Linux)
 endif
 
 ifeq ($(UNAME_S),Darwin)
+    FLAGS += -D_DARWIN_C_SOURCE
     FLAGS += -Wunreachable-code -Wunreachable-code-break -Wconditional-uninitialized -Wmissing-variable-declarations -Wcast-align -Wshadow-all -Wassign-enum -Wcomma -Wcovered-switch-default -Wthread-safety -Wconsumed
 
     FLAGS_EXE += -Wl,-fatal_warnings -Wl,-dead_strip

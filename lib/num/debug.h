@@ -89,8 +89,8 @@ STATIC void num_ssm_shr_mod(
 );
 STATIC ssm_params_t ssm_get_params(uint64_t count);
 STATIC ssm_params_t ssm_get_params_wrap(uint64_t n);
-STATIC void num_ssm_fft_fwd(num_p num_aux, num_p num_fft, ssm_params_p p);
-STATIC void num_ssm_fft_inv(num_p num_aux, num_p num_fft, ssm_params_p p);
+STATIC void num_ssm_fft_fwd(num_p num_aux, num_p num_fft, ssm_params_p p, uint64_t threads);
+STATIC void num_ssm_fft_inv(num_p num_aux, num_p num_fft, ssm_params_p p, uint64_t threads);
 
 STATIC void num_ssm_pad_wrap(num_p num_fft, num_p num, uint64_t pos, ssm_params_p p);
 STATIC void num_ssm_depad_wrap(
@@ -103,7 +103,7 @@ STATIC void num_ssm_depad_wrap(
 );
 
 STATIC num_p num_ssm_pad_no_wrap(num_p num, ssm_params_p p);
-STATIC num_p num_ssm_depad_no_wrap(num_p num_fft, ssm_params_p p);
+STATIC num_p num_ssm_depad_no_wrap(num_p num_fft, ssm_params_p p, uint64_t threads);
 STATIC void num_ssm_mul_wrap(
     num_p num_aux_1,
     num_p num_aux_2,
@@ -116,11 +116,12 @@ STATIC void num_ssm_mul_wrap(
 );
 
 STATIC num_p num_mul_classic(num_p num_1, num_p num_2);
-STATIC num_p num_mul_ssm(num_p num_1, num_p num_2, bool free_inputs);
-STATIC num_p num_mul_core(num_p num_1, num_p num_2, bool free_inputs);
+STATIC num_p num_mul_ssm(num_p num_1, num_p num_2, bool free_inputs, uint64_t threads);
+STATIC num_p num_mul_karatsuba(num_p num_1, num_p num_2, bool free_inputs, uint64_t threads);
+STATIC num_p num_mul_core(num_p num_1, num_p num_2, bool free_inputs, uint64_t threads);
 
 STATIC num_p num_sqr_classic(num_p num);
-num_p num_sqr_ssm(num_p num);
+num_p num_sqr_ssm(num_p num, uint64_t threads);
 
 STATIC uint64_t num_div_normalize(num_p *num_1, num_p *num_2);
 

@@ -8,8 +8,6 @@
 static char buffer[256];
 
 #ifndef NAME
-// Fallback definition to keep the IDE/linter happy
-// when it parses behavior.c in isolation.
 #define NAME "UNDEFINED_TAG"
 #endif
 
@@ -37,20 +35,8 @@ static void test_seed_init()
     srand(seed_base);
 }
 
-// Every fuzz iteration executes in a fresh fork of the main process, so it
-// inherits whatever rand() state the parent holds — and the parent never
-// advances it, because the case body only ever runs in the child. Without an
-// explicit reseed each iteration therefore generates byte-identical operands
-// and RUNS=100 tests one input a hundred times.
-//
-// Deriving the seed from _tag (which TEST_FUZZ_CASE_OPEN sets to
-// TAG * 1000000 + iteration) keeps every iteration distinct while staying
-// reproducible: the same SEED replays the same operands for the same tag.
 static void fuzz_seed(uint64_t tag)
 {
-    // rand() is LCG-based, so consecutive seeds yield strongly correlated first
-    // outputs. Mix the tag before seeding or successive iterations would draw
-    // near-identical operands.
     uint32_t x = (uint32_t)(seed_base + tag);
     x ^= x >> 16;
     x *= 0x7feb352du;
@@ -699,6 +685,9 @@ static void test_num_cmp_offset(bool show)
         <,
         (3, 0x8000000000000000, UINT64_MAX >> 1, 0x8000000000000000)
     )
+    TEST_NUM_CMP(12, (0), 3, ==, (0))
+    TEST_NUM_CMP(13, (1, 1), 3, >, (0))
+    TEST_NUM_CMP(14, (2, 1, 2), 5, >, (0))
 
     #undef TEST_NUM_CMP
 
@@ -1679,7 +1668,7 @@ static void test_num_ssm_fft_fwd(bool show)
                 .n = (Nv),                              \
             };                                          \
             num_p num_aux = num_create_rand(2 * (Nv));  \
-            num_ssm_fft_fwd(num_aux, num, &p);          \
+            num_ssm_fft_fwd(num_aux, num, &p, 1);       \
             num_free(num_aux);                          \
             assert(num_immed(num, ARG_OPEN RES));       \
         }                                               \
@@ -2177,9 +2166,9 @@ static void test_num_mul(bool show)
 
     #define TEST_NUM_MUL_BATCH(TAG, NUM_1, NUM_2, RES)                                              \
     {                                                                                               \
-        TEST_NUM_MUL((10 * (TAG)) + 1, num_mul_classic(num_1, num_2),        NUM_1, NUM_2, RES)     \
-        TEST_NUM_MUL((10 * (TAG)) + 2, num_mul_ssm(num_1, num_2, false),     NUM_1, NUM_2, RES)     \
-        TEST_NUM_MUL((10 * (TAG)) + 3, num_mul_core(num_1, num_2, false),    NUM_1, NUM_2, RES)     \
+        TEST_NUM_MUL((10 * (TAG)) + 1, num_mul_classic(num_1, num_2),         NUM_1, NUM_2, RES)     \
+        TEST_NUM_MUL((10 * (TAG)) + 2, num_mul_ssm(num_1, num_2, false, 1),   NUM_1, NUM_2, RES)     \
+        TEST_NUM_MUL((10 * (TAG)) + 3, num_mul_core(num_1, num_2, false, 1), NUM_1, NUM_2, RES)     \
     }
 
     TEST_NUM_MUL_BATCH(1,
@@ -2791,6 +2780,66 @@ static void test_num_base_to(bool show)
     TEST_FN_CLOSE
 }
 
+static void test_fuzz_num_base_to_threads(bool show)
+{
+    TEST_FN_OPEN
+
+    // Oracle is the sequential num_base_to. COUNT below mul_threads_ceiling's
+    // per-thread limb floor (16384) takes the threads<=1 fallback in
+    // num_base_to_rec instead of forking.
+    #define TEST_FUZZ_NUM_BASE_TO_THREADED(TAG, COUNT, RUNS, THREADS)          \
+    {                                                                          \
+        TEST_FUZZ_CASE_OPEN(TAG, RUNS)                                        \
+        {                                                                     \
+            fuzz_seed(_tag);                                                  \
+            num_p num = num_create_rand(COUNT);                              \
+            num_p num_res_1 = num_base_to_threads(num_copy(num), 10, THREADS); \
+            num_p num_res_2 = num_base_to(num, 10);                          \
+            assert(num_eq_dbg(num_res_1, num_res_2));                        \
+        }                                                                     \
+        TEST_FUZZ_CASE_CLOSE                                                  \
+    }
+
+    TEST_FUZZ_NUM_BASE_TO_THREADED(1, 2000, 5, 2)
+    TEST_FUZZ_NUM_BASE_TO_THREADED(2, 5000, 2, 4)
+    TEST_FUZZ_NUM_BASE_TO_THREADED(3, 5000, 1, 3)
+
+    #undef TEST_FUZZ_NUM_BASE_TO_THREADED
+
+    TEST_FN_CLOSE
+}
+
+// num_base_from shares no code with num_base_to, so the round trip oracles the
+// conversion. COUNT has to put a level's divisor over base_to_barrett_min_limbs
+// for the reciprocal path to run; base 2 is the case whose divisors land on
+// exact powers of 2^64.
+static void test_fuzz_num_base_to_round_trip(bool show)
+{
+    TEST_FN_OPEN
+
+    #define TEST_FUZZ_NUM_BASE_TO_ROUND_TRIP(TAG, COUNT, BASE, RUNS)  \
+    {                                                                 \
+        TEST_FUZZ_CASE_OPEN(TAG, RUNS)                                \
+        {                                                             \
+            fuzz_seed(_tag);                                          \
+            num_p num = num_create_rand(COUNT);                       \
+            num_p num_res = num_base_to(num_copy(num), BASE);         \
+            num_res = num_base_from(num_res, BASE);                   \
+            assert(num_eq_dbg(num_res, num));                         \
+        }                                                             \
+        TEST_FUZZ_CASE_CLOSE                                          \
+    }
+
+    TEST_FUZZ_NUM_BASE_TO_ROUND_TRIP(1,  400,                   10, 3)
+    TEST_FUZZ_NUM_BASE_TO_ROUND_TRIP(2,  200,                    2, 3)
+    TEST_FUZZ_NUM_BASE_TO_ROUND_TRIP(3,  300,                65536, 3)
+    TEST_FUZZ_NUM_BASE_TO_ROUND_TRIP(4, 1500, 1000000000000000000, 2)
+
+    #undef TEST_FUZZ_NUM_BASE_TO_ROUND_TRIP
+
+    TEST_FN_CLOSE
+}
+
 static void test_num_base_from(bool show)
 {
     TEST_FN_OPEN
@@ -2885,7 +2934,7 @@ static void test_fuzz_num_ssm_pad_no_wrap_round_trip(bool show)
             num_p num_in = num_create_rand(COUNT);                      \
             ssm_params_t p = ssm_get_params(COUNT);                     \
             num_p num_middle = num_ssm_pad_no_wrap(num_in, &p);         \
-            num_p num_out = num_ssm_depad_no_wrap(num_middle, &p);      \
+            num_p num_out = num_ssm_depad_no_wrap(num_middle, &p, 1);      \
             assert(num_eq_dbg(num_in, num_out));                        \
         }                                                               \
         TEST_FUZZ_CASE_CLOSE                                            \
@@ -2939,7 +2988,7 @@ static void test_fuzz_num_ssm_fft(bool show)
 {
     TEST_FN_OPEN
 
-    #define TEST_FUZZ_NUM_SSM_FFT(TAG, Nv, Kv, RUNS)                    \
+    #define TEST_FUZZ_NUM_SSM_FFT_THREADS(TAG, Nv, Kv, RUNS, THREADS)   \
     {                                                                   \
         TEST_FUZZ_CASE_OPEN(TAG, RUNS)                                  \
         {                                                               \
@@ -2958,8 +3007,8 @@ static void test_fuzz_num_ssm_fft(bool show)
             num_fft->count = (Nv) * (Kv);                               \
             num_p num_res = num_copy(num_fft);                          \
             num_p num_aux = num_create_rand(2 * (Nv));                  \
-            num_ssm_fft_fwd(num_aux, num_res, &p);                      \
-            num_ssm_fft_inv(num_aux, num_res, &p);                      \
+            num_ssm_fft_fwd(num_aux, num_res, &p, THREADS);             \
+            num_ssm_fft_inv(num_aux, num_res, &p, THREADS);             \
             num_free(num_aux);                                          \
             if(!num_eq_dbg(num_copy(num_res), num_copy(num_fft)))       \
             {                                                           \
@@ -2976,6 +3025,9 @@ static void test_fuzz_num_ssm_fft(bool show)
         TEST_FUZZ_CASE_CLOSE                                            \
     }
 
+    #define TEST_FUZZ_NUM_SSM_FFT(TAG, Nv, Kv, RUNS) \
+        TEST_FUZZ_NUM_SSM_FFT_THREADS(TAG, Nv, Kv, RUNS, 1)
+
     TEST_FUZZ_NUM_SSM_FFT(1, 9, 4, 100)
     TEST_FUZZ_NUM_SSM_FFT(2, 9, 8, 100)
     TEST_FUZZ_NUM_SSM_FFT(3, 9, 16, 100)
@@ -2984,6 +3036,20 @@ static void test_fuzz_num_ssm_fft(bool show)
 
     #undef TEST_FUZZ_NUM_SSM_FFT
 
+    TEST_FUZZ_NUM_SSM_FFT_THREADS(6, 25, 128, 100, 2)
+    TEST_FUZZ_NUM_SSM_FFT_THREADS(7, 25, 128, 100, 4)
+    TEST_FUZZ_NUM_SSM_FFT_THREADS(8, 25, 128, 100, 8)
+
+    TEST_FUZZ_NUM_SSM_FFT_THREADS(9, 25, 128, 100, 3)
+    TEST_FUZZ_NUM_SSM_FFT_THREADS(10, 25, 128, 100, 6)
+    TEST_FUZZ_NUM_SSM_FFT_THREADS(11, 25, 128, 100, 7)
+
+    TEST_FUZZ_NUM_SSM_FFT_THREADS(12, 4097, 256, 3, 4)
+    TEST_FUZZ_NUM_SSM_FFT_THREADS(13, 16385, 64, 3, 4)
+    TEST_FUZZ_NUM_SSM_FFT_THREADS(14, 65537, 16, 2, 4)
+
+    #undef TEST_FUZZ_NUM_SSM_FFT_THREADS
+
     TEST_FN_CLOSE
 }
 
@@ -2991,15 +3057,15 @@ static void test_fuzz_num_ssm_mul(bool show)
 {
     TEST_FN_OPEN
 
-    #define TEST_FUZZ_NUM_SSM_MUL_COUNT(COUNT_1, COUNT_2)   \
-    {                                                       \
-        num_p num_1 = num_create_rand(COUNT_1);             \
-        num_p num_2 = num_create_rand(COUNT_2);             \
-        num_p num_res_1 = num_mul_ssm(num_1, num_2, false); \
-        num_p num_res_2 = num_mul_classic(num_1, num_2);    \
-        assert(num_eq_dbg(num_res_1, num_res_2));           \
-        num_free(num_1);                                    \
-        num_free(num_2);                                    \
+    #define TEST_FUZZ_NUM_SSM_MUL_COUNT(COUNT_1, COUNT_2)      \
+    {                                                          \
+        num_p num_1 = num_create_rand(COUNT_1);                \
+        num_p num_2 = num_create_rand(COUNT_2);                \
+        num_p num_res_1 = num_mul_ssm(num_1, num_2, false, 1); \
+        num_p num_res_2 = num_mul_classic(num_1, num_2);       \
+        assert(num_eq_dbg(num_res_1, num_res_2));              \
+        num_free(num_1);                                       \
+        num_free(num_2);                                       \
     }
 
     #define TEST_FUZZ_NUM_SSM_MUL(TAG, COUNT, RUNS)     \
@@ -3037,6 +3103,65 @@ static void test_fuzz_num_ssm_mul(bool show)
 
     #undef TEST_FUZZ_NUM_SSM_MUL
 
+    #define TEST_FUZZ_NUM_SSM_MUL_THREADED(TAG, COUNT, RUNS, THREADS)                       \
+    {                                                                                       \
+        TEST_FUZZ_CASE_OPEN(TAG, RUNS)                                                      \
+        {                                                                                   \
+            fuzz_seed(_tag);                                                                \
+            num_p num_1 = num_create_rand(COUNT);                                           \
+            num_p num_2 = num_create_rand(COUNT);                                           \
+            num_p num_res_1 = num_mul_threads(num_copy(num_1), num_copy(num_2), THREADS);   \
+            num_p num_res_2 = num_mul_classic(num_1, num_2);                                \
+            assert(num_eq_dbg(num_res_1, num_res_2));                                       \
+            num_free(num_1);                                                                \
+            num_free(num_2);                                                                \
+        }                                                                                   \
+        TEST_FUZZ_CASE_CLOSE                                                                \
+    }
+
+    TEST_FUZZ_NUM_SSM_MUL_THREADED(8, 1000, 10, 2)
+    TEST_FUZZ_NUM_SSM_MUL_THREADED(9, 5000, 4, 4)
+    TEST_FUZZ_NUM_SSM_MUL_THREADED(10, 80000, 1, 4)
+    TEST_FUZZ_NUM_SSM_MUL_THREADED(11, 5000, 4, 3)
+    TEST_FUZZ_NUM_SSM_MUL_THREADED(12, 80000, 1, 6)
+
+    #undef TEST_FUZZ_NUM_SSM_MUL_THREADED
+    #undef TEST_FUZZ_NUM_SSM_MUL_COUNT
+
+    TEST_FN_CLOSE
+}
+
+static void test_fuzz_num_karatsuba_mul(bool show)
+{
+    TEST_FN_OPEN
+
+    #define TEST_FUZZ_NUM_KARATSUBA_MUL(TAG, COUNT_MIN, COUNT_MAX, RUNS)    \
+    {                                                                       \
+        TEST_FUZZ_CASE_OPEN(TAG, RUNS)                                      \
+        {                                                                   \
+            fuzz_seed(_tag);                                                \
+            uint64_t count_1 = rand_64_range(COUNT_MIN, COUNT_MAX);         \
+            uint64_t count_2 = rand_64_range(COUNT_MIN, COUNT_MAX);         \
+            num_p num_1 = num_create_rand(count_1);                         \
+            num_p num_2 = num_create_rand(count_2);                         \
+            num_p num_res_1 = num_mul_karatsuba(num_1, num_2, false, 1);    \
+            num_p num_res_2 = num_mul_classic(num_1, num_2);                \
+            assert(num_eq_dbg(num_res_1, num_res_2));                       \
+            num_free(num_1);                                                \
+            num_free(num_2);                                                \
+        }                                                                   \
+        TEST_FUZZ_CASE_CLOSE                                                \
+    }
+
+    TEST_FUZZ_NUM_KARATSUBA_MUL(1,    1,    8, 100)
+    TEST_FUZZ_NUM_KARATSUBA_MUL(2,  100,  300,  50)
+    TEST_FUZZ_NUM_KARATSUBA_MUL(3, 1000, 2000,  10)
+
+    // one operand under the split point, so its high half comes back empty
+    TEST_FUZZ_NUM_KARATSUBA_MUL(4,    1, 3000,  20)
+
+    #undef TEST_FUZZ_NUM_KARATSUBA_MUL
+
     TEST_FN_CLOSE
 }
 
@@ -3044,12 +3169,12 @@ static void test_fuzz_num_ssm_sqr(bool show)
 {
     TEST_FN_OPEN
 
-    #define TEST_FUZZ_NUM_SSM_SQR_COUNT(COUNT)          \
-    {                                                   \
-        num_p num = num_create_rand(COUNT);             \
-        num_p num_res_1 = num_sqr_ssm(num_copy(num));   \
-        num_p num_res_2 = num_sqr_classic(num);         \
-        assert(num_eq_dbg(num_res_1, num_res_2));       \
+    #define TEST_FUZZ_NUM_SSM_SQR_COUNT(COUNT)             \
+    {                                                       \
+        num_p num = num_create_rand(COUNT);                \
+        num_p num_res_1 = num_sqr_ssm(num_copy(num), 1);    \
+        num_p num_res_2 = num_sqr_classic(num);              \
+        assert(num_eq_dbg(num_res_1, num_res_2));           \
     }
 
     #define TEST_FUZZ_NUM_SSM_SQR(TAG, COUNT, RUNS) \
@@ -3068,6 +3193,25 @@ static void test_fuzz_num_ssm_sqr(bool show)
 
     #undef TEST_FUZZ_NUM_SSM_SQR
     #undef TEST_FUZZ_NUM_SSM_SQR_COUNT
+
+    #define TEST_FUZZ_NUM_SSM_SQR_THREADED(TAG, COUNT, RUNS, THREADS)   \
+    {                                                                   \
+        TEST_FUZZ_CASE_OPEN(TAG, RUNS)                                  \
+        {                                                               \
+            fuzz_seed(_tag);                                            \
+            num_p num = num_create_rand(COUNT);                         \
+            num_p num_res_1 = num_sqr_threads(num_copy(num), THREADS);  \
+            num_p num_res_2 = num_sqr_classic(num);                     \
+            assert(num_eq_dbg(num_res_1, num_res_2));                  \
+        }                                                               \
+        TEST_FUZZ_CASE_CLOSE                                            \
+    }
+
+    TEST_FUZZ_NUM_SSM_SQR_THREADED(4, 1000, 10, 2)
+    TEST_FUZZ_NUM_SSM_SQR_THREADED(5, 5000,  4, 4)
+    TEST_FUZZ_NUM_SSM_SQR_THREADED(6, 5000,  4, 3)
+
+    #undef TEST_FUZZ_NUM_SSM_SQR_THREADED
 
     TEST_FN_CLOSE
 }
@@ -3127,6 +3271,71 @@ static void test_fuzz_num_bz_div(bool show)
     TEST_FUZZ_NUM_BZ_DIV(11, 50, 20,   5)
 
     #undef TEST_FUZZ_NUM_BZ_DIV
+
+    #define TEST_FUZZ_NUM_BZ_DIV_THREADED(TAG, COUNT_1, COUNT_2, RUNS, THREADS)     \
+    {                                                                               \
+        TEST_FUZZ_CASE_OPEN(TAG, RUNS)                                             \
+        {                                                                          \
+            fuzz_seed(_tag);                                                       \
+            num_p num_1 = num_create_rand(COUNT_1);                                \
+            num_p num_2 = num_create_rand(COUNT_2);                                \
+            num_p num_q, num_r;                                                    \
+            num_div_mod_threads(&num_q, &num_r, num_copy(num_1), num_copy(num_2), THREADS); \
+            assert(num_cmp(num_r, num_2) < 0)                                      \
+            num_p num_aux = num_mul(num_copy(num_q), num_copy(num_2));             \
+            num_aux = num_add(num_aux, num_copy(num_r));                           \
+            assert(num_eq_dbg(num_copy(num_aux), num_copy(num_1)))                 \
+            num_free(num_1);                                                       \
+            num_free(num_2);                                                       \
+            num_free(num_aux);                                                     \
+            num_free(num_q);                                                       \
+            num_free(num_r);                                                       \
+        }                                                                          \
+        TEST_FUZZ_CASE_CLOSE                                                       \
+    }
+
+    TEST_FUZZ_NUM_BZ_DIV_THREADED(12, 2000, 1000, 10, 2)
+    TEST_FUZZ_NUM_BZ_DIV_THREADED(13, 5000, 2000,  4, 4)
+
+    #undef TEST_FUZZ_NUM_BZ_DIV_THREADED
+
+    // ZEROS low limbs cleared: at ZEROS >= COUNT_2/2 the divisor's low half is
+    // zero, which is what num_div_mod_bz_rec multiplies its quotient estimate by
+    #define TEST_FUZZ_NUM_BZ_DIV_LOW_ZERO(TAG, COUNT_1, COUNT_2, ZEROS, RUNS)  \
+    {                                                                          \
+        TEST_FUZZ_CASE_OPEN(TAG, RUNS)                                         \
+        {                                                                      \
+            fuzz_seed(_tag);                                                   \
+            num_p num_1 = num_create_rand(COUNT_1);                            \
+            num_p num_2 = num_create_rand(COUNT_2);                            \
+            for(uint64_t i=0; i<(ZEROS); i++)                                  \
+            {                                                                  \
+                num_2->chunk[i] = 0;                                           \
+            }                                                                  \
+            num_p num_q, num_r;                                                \
+            num_div_mod(&num_q, &num_r, num_copy(num_1), num_copy(num_2));     \
+            assert(num_cmp(num_r, num_2) < 0)                                  \
+            num_p num_aux = num_mul(num_copy(num_q), num_copy(num_2));         \
+            num_aux = num_add(num_aux, num_copy(num_r));                       \
+            assert(num_eq_dbg(num_copy(num_aux), num_copy(num_1)))             \
+            num_free(num_1);                                                   \
+            num_free(num_2);                                                   \
+            num_free(num_aux);                                                 \
+            num_free(num_q);                                                   \
+            num_free(num_r);                                                   \
+        }                                                                      \
+        TEST_FUZZ_CASE_CLOSE                                                   \
+    }
+
+    TEST_FUZZ_NUM_BZ_DIV_LOW_ZERO(14, 11,  5,  2, 20)
+    TEST_FUZZ_NUM_BZ_DIV_LOW_ZERO(15, 20,  8,  4, 20)
+    TEST_FUZZ_NUM_BZ_DIV_LOW_ZERO(16, 40, 16,  8, 10)
+    TEST_FUZZ_NUM_BZ_DIV_LOW_ZERO(17, 67, 32, 16,  5)
+    TEST_FUZZ_NUM_BZ_DIV_LOW_ZERO(18, 20,  8,  7, 20)
+    TEST_FUZZ_NUM_BZ_DIV_LOW_ZERO(19, 40, 16, 15, 10)
+    TEST_FUZZ_NUM_BZ_DIV_LOW_ZERO(20, 67, 32, 31,  5)
+
+    #undef TEST_FUZZ_NUM_BZ_DIV_LOW_ZERO
 
     TEST_FN_CLOSE
 }
@@ -3189,6 +3398,8 @@ static void test_all(bool show)
     test_num_div_mod_uint(show);
 
     test_num_base_to(show);
+    test_fuzz_num_base_to_threads(show);
+    test_fuzz_num_base_to_round_trip(show);
     test_num_base_from(show);
 
     test_fuzz_num_ssm_shift_round_trip(show);
@@ -3196,6 +3407,7 @@ static void test_all(bool show)
     test_fuzz_num_ssm_pad_wrap_round_trip(show);
     test_fuzz_num_ssm_fft(show);
     test_fuzz_num_ssm_mul(show);
+    test_fuzz_num_karatsuba_mul(show);
     test_fuzz_num_ssm_sqr(show);
     test_fuzz_num_bz_div(show);
 }

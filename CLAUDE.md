@@ -40,8 +40,9 @@ make run_test_1_ram -C lib/num/test   # build+run just one runner
 
 Every module has a single `test.c` → `runner_test`, except `num`, which has
 three runners sharing case bodies from `behavior.c` and differing only in
-allocation strategy: `test_1_ram` (heap only), `test_2_disk` (`disk_threshold
-= 0`, everything on disk), `test_3_mist` (`disk_threshold = 1024`, mixed).
+allocation strategy: `test_1_ram` (heap only), `test_2_disk`
+(`disk_threshold_bytes = 0`, everything on disk), `test_3_mist`
+(`disk_threshold_bytes = 8192`, mixed).
 
 Fuzz cases derive their RNG seed from the case tag, so a failure is
 reproducible by rerunning the runner binary directly with the seed it
@@ -83,13 +84,16 @@ Values are little-endian arrays of 64-bit limbs.
 
 ### Multiplication dispatch (`lib/num/code.c`)
 
-`num_mul` picks the algorithm by operand size (threshold `256` limbs,
-`code.c:3899`):
+`num_mul_core` dispatches three ways, in this order:
 
-- Either operand below the threshold — classic schoolbook.
-- Both at or above it — `num_mul_ssm`: Schönhage–Strassen, splitting operands
-  into blocks, transforming with a negacyclic FFT modulo `2^(64·(n-1)) + 1`,
-  multiplying pointwise, transforming back.
+- `mul_is_classic` (`code.c:5149`) — either operand under `256` limbs: classic
+  schoolbook.
+- `mul_is_karatsuba` (`code.c:5078`) — the SSM arrays would exceed both
+  `mul_karatsuba_min_bytes` (256 MB) and `disk_threshold_bytes`: split
+  recursively rather than transform a working set that would land on disk.
+- Otherwise `num_mul_ssm`: Schönhage–Strassen, splitting operands into blocks,
+  transforming with a negacyclic FFT modulo `2^(64·(n-1)) + 1`, multiplying
+  pointwise, transforming back.
 
 The hot inner loops (classic add/sub/mul, SSM modular add/sub/negate) have
 hand-written assembly, selected at compile time via `NUM_ASM_X86_64` (GCC +
@@ -100,13 +104,36 @@ refactors that add overhead (extra copies, indirection, allocations in inner
 loops) in the multiply/asm paths in particular. CI builds and tests both the
 assembly and portable paths on both x86-64 and AArch64.
 
+### Threading
+
+Every heavy operation has a `*_threads` variant taking a thread count last; the
+plain name calls it with `1`. Public API and the caller-facing rules are in
+README's *Threading*. Internally the split is:
+
+- `num_mul_ssm` threads the FFT passes, the pointwise multiply and the depad.
+  `num_mul_core` clamps the request to `num_mul_threads_ceiling`, so asking for
+  more than the operands can use is harmless.
+- `num_base_to_threads` runs a shared task pool over the binary split, workers
+  pulling pieces off one stack; the pool lives and dies inside the call.
+- Everything else (`sig`/`fxd`/`flt`, `pow`, `div`) threads only by forwarding
+  the count to the `num` multiply or division underneath.
+
+Threads are created and joined within a call — no pool outlives it, and there
+is no global state to initialise. `threads` must be non-zero, asserted at every
+public `*_threads` entry point -- `mods/macros`' `assert` is live in production
+too, not compiled out. Every pthread call is wrapped in `TREAT`, so a failure
+aborts rather than passing unnoticed.
+
+The build passes `-pthread` (`makefiles/flags.mk`, in `FLAGS_CMP` and
+`FLAGS_EXE`) plus `-D_GNU_SOURCE` on Linux and `-D_DARWIN_C_SOURCE` on macOS.
+
 ### Disk-backed allocation
 
 `araucaria_disk_config_set` (config struct in `lib/num/struct.h`) redirects
-allocations above `disk_threshold` limbs to an anonymous `mmap` over a
-temporary file in `disk_path` (unlinked immediately, so it disappears with
-the number or the process). Default threshold is `UINT64_MAX` (nothing goes
-to disk). This is load-bearing for the `num`/`sig`/`flt` test suites, which
+allocations whose backing size exceeds `disk_threshold_bytes` to an
+anonymous `mmap` over a temporary file in `disk_path` (unlinked immediately,
+so it disappears with the number or the process). Default threshold is
+`UINT64_MAX` (nothing goes to disk). This is load-bearing for the `num`/`sig`/`flt` test suites, which
 each run their behavior cases three ways (ram/disk/mist) against the same
 case bodies — a bug that only reproduces on the disk path is a real category
 here, not a hypothetical.

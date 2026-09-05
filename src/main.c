@@ -1,7 +1,18 @@
+#include <stdlib.h>
 #include <unistd.h>
+#include <sys/mman.h>
+
+#if defined(__linux__)
+#include <sched.h>
+#elif defined(__APPLE__)
+#include <mach/mach.h>
+#include <mach/thread_policy.h>
+#include <pthread.h>
+#endif
 
 #include "../mods/clu/header.h"
 #include "../mods/macros/assert.h"
+#include "../mods/macros/fork.h"
 #include "../mods/macros/time.h"
 
 #include "../lib/fxd/header.h"
@@ -739,6 +750,62 @@ static void time_assembly_mul()
 }
 
 [[maybe_unused]]
+static void time_threads_mul()
+{
+#ifdef DEBUG
+    uint64_t base = 22;
+#else
+    uint64_t base = 30;
+#endif
+
+    tprintf("base: " U64P() "", base);
+
+    num_p num_1 = num_generate_1(base, 2);
+    num_p num_2 = num_add(num_copy(num_1), num_wrap(1));
+
+    tprintf("num_1->count: " U64P() "", num_1->count);
+    tprintf("num_2->count: " U64P() "", num_2->count);
+
+    uint64_t thread_counts[] = {1, 2, 4, 8, 16};
+    num_p num_res_ref = nullptr;
+
+    for(uint64_t i=0; i<sizeof(thread_counts)/sizeof(thread_counts[0]); i++)
+    {
+        uint64_t threads = thread_counts[i];
+
+        num_p num_1_c = num_copy(num_1);
+        num_p num_2_c = num_copy(num_2);
+
+        TIME_SETUP
+        num_p num_res = num_mul_threads(num_1_c, num_2_c, threads);
+        TIME_END(t1)
+        tprintf("threads: " U64P(2) "  time: %.3f", threads, dtime(t1));
+
+        if(num_res_ref == nullptr)
+        {
+            num_res_ref = num_copy(num_res);
+        }
+        else
+        {
+            assert(num_cmp(num_res, num_res_ref) == 0)
+        }
+
+        num_free(num_res);
+    }
+
+    num_free(num_res_ref);
+    num_free(num_1);
+    num_free(num_2);
+
+#ifdef DEBUG
+    uint64_t count = clu_get_register_count();
+    tprintf("total allocations : " U64P() "", count);
+    tprintf("max occupancy     : " U64P() "", clu_get_max_occupancy());
+    assert(clu_mem_is_empty());
+#endif
+}
+
+[[maybe_unused]]
 static void time_assembly_sqr()
 {
 #ifdef DEBUG
@@ -808,7 +875,6 @@ static void time_assembly_div()
 
     tprintf("base: " U64P() "", base);
 
-    // Generate a massive dividend (num_1) and a divisor roughly half its size (num_2)
     num_p num_2 = num_generate_1(base, 2);
     num_p num_1 = num_generate_1(base + 1, 3);
 
@@ -828,6 +894,360 @@ static void time_assembly_div()
     tprintf("time div         : %.3f", dtime(t1));
 
     num_free(num_q);
+    num_free(num_1);
+    num_free(num_2);
+
+#ifdef DEBUG
+    uint64_t count = clu_get_register_count();
+    tprintf("total allocations : " U64P() "", count);
+    tprintf("max occupancy     : " U64P() "", clu_get_max_occupancy());
+    assert(clu_mem_is_empty());
+#endif
+}
+
+
+
+[[maybe_unused]]
+static void time_threads_div()
+{
+#ifdef DEBUG
+    uint64_t base = 22;
+#else
+    uint64_t base = 28;
+#endif
+
+    tprintf("base: " U64P() "", base);
+
+    num_p num_2 = num_generate_1(base, 2);
+    num_p num_1 = num_generate_1(base + 1, 3);
+
+    tprintf("num_1->count: " U64P() "", num_1->count);
+    tprintf("num_2->count: " U64P() "", num_2->count);
+
+    uint64_t thread_counts[] = {1, 2, 4, 8, 16};
+    num_p num_res_ref = nullptr;
+
+    for(uint64_t i=0; i<sizeof(thread_counts)/sizeof(thread_counts[0]); i++)
+    {
+        uint64_t threads = thread_counts[i];
+
+        num_p num_1_c = num_copy(num_1);
+        num_p num_2_c = num_copy(num_2);
+
+        TIME_SETUP
+        num_p num_res = num_div_threads(num_1_c, num_2_c, threads);
+        TIME_END(t1)
+        tprintf("threads: " U64P(2) "  time: %.3f", threads, dtime(t1));
+
+        if(num_res_ref == nullptr)
+        {
+            num_res_ref = num_copy(num_res);
+        }
+        else
+        {
+            assert(num_cmp(num_res, num_res_ref) == 0)
+        }
+
+        num_free(num_res);
+    }
+
+    num_free(num_res_ref);
+    num_free(num_1);
+    num_free(num_2);
+
+#ifdef DEBUG
+    uint64_t count = clu_get_register_count();
+    tprintf("total allocations : " U64P() "", count);
+    tprintf("max occupancy     : " U64P() "", clu_get_max_occupancy());
+    assert(clu_mem_is_empty());
+#endif
+}
+
+
+[[maybe_unused]]
+static num_p num_generate_size(uint64_t count, uint64_t salt)
+{
+    num_p num = num_wrap(2);
+    while(num->count < count)
+    {
+        num = num_generate_1_step(num, salt);
+    }
+
+    return num_shr(num, (num->count - count) * chunk_bits);
+}
+
+[[maybe_unused]]
+static void time_disk_mul_count(uint64_t count, uint64_t threads, uint64_t threshold)
+{
+    uint64_t thresholds[] = {UINT64_MAX, threshold};
+    const char * labels[] = {"ram", "disk"};
+
+    araucaria_disk_config_t config = { .disk_path = "./cache" };
+    config.disk_threshold_bytes = UINT64_MAX;
+    araucaria_disk_config_set(&config);
+
+    num_p num_1 = num_generate_size(count, 2);
+    num_p num_2 = num_add(num_copy(num_1), num_wrap(1));
+    num_p num_res_ref = nullptr;
+
+    tprintf(
+        "count: " U64P(9) "  threads: " U64P() "  threshold: " U64P() " MB",
+        num_1->count, threads, threshold >> 20
+    );
+
+    for(uint64_t j=0; j<sizeof(thresholds)/sizeof(thresholds[0]); j++)
+    {
+        num_p num_1_c = num_copy(num_1);
+        num_p num_2_c = num_copy(num_2);
+
+        config.disk_threshold_bytes = thresholds[j];
+        araucaria_disk_config_set(&config);
+
+        TIME_SETUP
+        num_p num_res = num_mul_threads(num_1_c, num_2_c, threads);
+        TIME_END(t1)
+
+        config.disk_threshold_bytes = UINT64_MAX;
+        araucaria_disk_config_set(&config);
+
+        tprintf("%-4s  time: %10.3f", labels[j], dtime(t1));
+
+        if(num_res_ref == nullptr)
+        {
+            num_res_ref = num_res;
+            continue;
+        }
+
+        assert(num_cmp(num_res, num_res_ref) == 0)
+        num_free(num_res);
+    }
+
+    num_free(num_res_ref);
+    num_free(num_1);
+    num_free(num_2);
+}
+
+
+
+constexpr uint64_t processor_siblings = 2;
+
+static uint64_t processor_of(uint64_t index)
+{
+    uint64_t cores = (uint64_t)sysconf(_SC_NPROCESSORS_ONLN) / processor_siblings;
+    if(index < cores)
+    {
+        return processor_siblings * index;
+    }
+    return (processor_siblings * (index - cores)) + 1;
+}
+
+static void lock_processor([[maybe_unused]] uint64_t index)
+{
+#if defined(__linux__)
+
+    cpu_set_t cpu_set;
+    CPU_ZERO(&cpu_set);
+    CPU_SET(index, &cpu_set);
+    assert(sched_setaffinity(0, sizeof(cpu_set), &cpu_set) == 0)
+
+#elif defined(__APPLE__)
+
+    thread_affinity_policy_data_t policy = { .affinity_tag = (integer_t)index };
+    thread_policy_set(
+        pthread_mach_thread_np(pthread_self()),
+        THREAD_AFFINITY_POLICY,
+        (thread_policy_t)&policy,
+        THREAD_AFFINITY_POLICY_COUNT
+    );
+
+#endif
+}
+
+
+[[maybe_unused]]
+static void time_procs_mul()
+{
+#ifdef DEBUG
+    uint64_t base = 22;
+#else
+    uint64_t base = 28;
+#endif
+
+    tprintf("base: " U64P() "", base);
+
+    num_p num_1 = num_generate_1(base, 2);
+    num_p num_2 = num_add(num_copy(num_1), num_wrap(1));
+
+    tprintf("num_1->count: " U64P() "", num_1->count);
+    tprintf("num_2->count: " U64P() "", num_2->count);
+
+    num_p num_res_ref = num_mul_threads(num_copy(num_1), num_copy(num_2), 1);
+
+    constexpr uint64_t procs_max = 16;
+    uint64_t proc_counts[] = {1, 2, 4, 8, 16};
+
+    double * times = mmap(
+        nullptr,
+        procs_max * sizeof(double),
+        PROT_READ | PROT_WRITE,
+        MAP_SHARED | MAP_ANONYMOUS,
+        -1,
+        0
+    );
+    assert(times != MAP_FAILED);
+
+    double solo = 0;
+
+    for(uint64_t i=0; i<sizeof(proc_counts)/sizeof(proc_counts[0]); i++)
+    {
+        uint64_t procs = proc_counts[i];
+        pid_t pid[procs_max];
+
+        for(uint64_t p=0; p<procs; p++)
+        {
+            pid[p] = fork_safe();
+            if(pid[p] == 0)
+            {
+                lock_processor(processor_of(p));
+
+                num_p num_1_c = num_copy(num_1);
+                num_p num_2_c = num_copy(num_2);
+
+                TIME_SETUP
+                num_p num_res = num_mul_threads(num_1_c, num_2_c, 1);
+                TIME_END(t1)
+
+                assert(num_cmp(num_res, num_res_ref) == 0)
+                times[p] = dtime(t1);
+
+                num_free(num_res);
+                exit(EXIT_SUCCESS);
+            }
+        }
+
+        for(uint64_t p=0; p<procs; p++)
+        {
+            waitpid_safe(pid[p], nullptr);
+        }
+
+        double total = 0;
+        double worst = 0;
+        for(uint64_t p=0; p<procs; p++)
+        {
+            total += times[p];
+            worst = times[p] > worst ? times[p] : worst;
+        }
+
+        double mean = total / (double)procs;
+        if(i == 0)
+        {
+            solo = mean;
+        }
+
+        tprintf(
+            "procs: " U64P(2) "  mean: %.3f  max: %.3f  vs solo: %.2fx  throughput: %.2fx",
+            procs, mean, worst, mean / solo, ((double)procs * solo) / mean
+        );
+    }
+
+    assert(munmap(times, procs_max * sizeof(double)) == 0);
+    num_free(num_res_ref);
+    num_free(num_1);
+    num_free(num_2);
+
+#ifdef DEBUG
+    uint64_t count = clu_get_register_count();
+    tprintf("total allocations : " U64P() "", count);
+    tprintf("max occupancy     : " U64P() "", clu_get_max_occupancy());
+    assert(clu_mem_is_empty());
+#endif
+}
+
+
+
+[[maybe_unused]]
+static void affinity_span([[maybe_unused]] uint64_t threads, [[maybe_unused]] bool spread)
+{
+#if defined(__linux__)
+
+    cpu_set_t cpu_set;
+    CPU_ZERO(&cpu_set);
+    for(uint64_t i = 0; i < threads; i++)
+    {
+        CPU_SET(spread ? (processor_siblings * i) : i, &cpu_set);
+    }
+    assert(sched_setaffinity(0, sizeof(cpu_set), &cpu_set) == 0)
+
+#endif
+}
+
+[[maybe_unused]]
+static void affinity_all()
+{
+#if defined(__linux__)
+
+    cpu_set_t cpu_set;
+    CPU_ZERO(&cpu_set);
+    for(uint64_t i = 0; i < (uint64_t)sysconf(_SC_NPROCESSORS_ONLN); i++)
+    {
+        CPU_SET(i, &cpu_set);
+    }
+    assert(sched_setaffinity(0, sizeof(cpu_set), &cpu_set) == 0)
+
+#endif
+}
+
+[[maybe_unused]]
+static void time_smt_mul()
+{
+#ifdef DEBUG
+    uint64_t base = 22;
+#else
+    uint64_t base = 28;
+#endif
+
+    tprintf("base: " U64P() "", base);
+
+    num_p num_1 = num_generate_1(base, 2);
+    num_p num_2 = num_add(num_copy(num_1), num_wrap(1));
+
+    tprintf("num_1->count: " U64P() "", num_1->count);
+
+    num_p num_res_ref = num_mul_threads(num_copy(num_1), num_copy(num_2), 1);
+
+    uint64_t thread_counts[] = {2, 8};
+
+    for(uint64_t i=0; i<sizeof(thread_counts)/sizeof(thread_counts[0]); i++)
+    {
+        uint64_t threads = thread_counts[i];
+
+        for(uint64_t s=0; s<2; s++)
+        {
+            bool spread = (bool)s;
+            affinity_span(threads, spread);
+
+            num_p num_1_c = num_copy(num_1);
+            num_p num_2_c = num_copy(num_2);
+
+            TIME_SETUP
+            num_p num_res = num_mul_threads(num_1_c, num_2_c, threads);
+            TIME_END(t1)
+
+            assert(num_cmp(num_res, num_res_ref) == 0)
+            num_free(num_res);
+
+            tprintf(
+                "threads: " U64P(2) "  cores: " U64P(2) "  %-6s  time: %.3f",
+                threads,
+                spread ? threads : ((threads + processor_siblings - 1) / processor_siblings),
+                spread ? "spread" : "packed",
+                dtime(t1)
+            );
+        }
+    }
+
+    affinity_all();
+    num_free(num_res_ref);
     num_free(num_1);
     num_free(num_2);
 
@@ -868,7 +1288,12 @@ int main()
     // flt_num_pi_2(1000);
     // flt_num_pi_3(1000);
     // mem_1(21);
-    time_assembly_mul();
+    // time_assembly_mul();
+    // time_threads_mul();
+    // time_disk_mul_count(132'000'000, 16, 3'000'000'000);
+    time_threads_div();
+    // time_procs_mul();
+    // time_smt_mul();
     // time_assembly_sqr();
     // time_assembly_div();
 

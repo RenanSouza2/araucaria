@@ -165,10 +165,8 @@ void flt_num_display_full(flt_num_t flt)
     printf(" | exponent: " D64P() "", flt.exponent);
 }
 
-void flt_num_display_dec(flt_num_t flt_0) // TODO TEST
+static void flt_num_display_dec_core(flt_num_t flt_0, uint64_t threads)
 {
-    CLU_FLT_IS_SAFE(flt_0);
-
     if(flt_num_is_zero(flt_0))
     {
         printf("0");
@@ -266,8 +264,23 @@ void flt_num_display_dec(flt_num_t flt_0) // TODO TEST
             .num = flt_0.sig.num
         }
     };
-    fxd_num_display_dec(fxd);
+    fxd_num_display_dec_threads(fxd, threads);
     printf(" * 10 ^ " D64P() "", base);
+}
+
+void flt_num_display_dec(flt_num_t flt) // TODO TEST
+{
+    CLU_FLT_IS_SAFE(flt);
+
+    flt_num_display_dec_core(flt, 1);
+}
+
+void flt_num_display_dec_threads(flt_num_t flt, uint64_t threads) // TODO TEST
+{
+    CLU_FLT_IS_SAFE(flt);
+    assert(threads);
+
+    flt_num_display_dec_core(flt, threads);
 }
 
 
@@ -620,11 +633,17 @@ flt_num_t flt_num_sub(flt_num_t flt_1, flt_num_t flt_2) // TODO TEST
 
 flt_num_t flt_num_mul(flt_num_t flt_1, flt_num_t flt_2) // TODO TEST
 {
+    return flt_num_mul_threads(flt_1, flt_2, 1);
+}
+
+flt_num_t flt_num_mul_threads(flt_num_t flt_1, flt_num_t flt_2, uint64_t threads)
+{
     CLU_FLT_IS_SAFE(flt_1);
     CLU_FLT_IS_SAFE(flt_2);
+    assert(threads);
 
     flt_1.exponent = int64_add(flt_1.exponent, flt_2.exponent);
-    flt_1.sig = sig_num_mul(flt_1.sig, flt_2.sig);
+    flt_1.sig = sig_num_mul_threads(flt_1.sig, flt_2.sig, threads);
     return flt_num_normalize(flt_1);
 }
 
@@ -668,13 +687,19 @@ flt_num_t flt_num_pow(flt_num_t flt, int64_t value) // TODO TEST | USE NUM
 
 flt_num_t flt_num_div(flt_num_t flt_1, flt_num_t flt_2) // TODO TEST
 {
+    return flt_num_div_threads(flt_1, flt_2, 1);
+}
+
+flt_num_t flt_num_div_threads(flt_num_t flt_1, flt_num_t flt_2, uint64_t threads)
+{
     CLU_FLT_IS_SAFE(flt_1);
     CLU_FLT_IS_SAFE(flt_2);
+    assert(threads);
 
     int64_t exponent = int64_add(flt_1.exponent, -(int64_t)flt_1.size);
     flt_1 = flt_num_set_exponent(flt_1, exponent);
     flt_1.exponent = int64_sub(flt_1.exponent, flt_2.exponent);
-    flt_1.sig = sig_num_div(flt_1.sig, flt_2.sig);
+    flt_1.sig = sig_num_div_threads(flt_1.sig, flt_2.sig, threads);
     return flt_num_normalize(flt_1);
 }
 
@@ -682,20 +707,32 @@ flt_num_t flt_num_div(flt_num_t flt_1, flt_num_t flt_2) // TODO TEST
 
 flt_num_t flt_num_mul_sig(flt_num_t flt, sig_num_t sig) // TODO TEST
 {
+    return flt_num_mul_sig_threads(flt, sig, 1);
+}
+
+flt_num_t flt_num_mul_sig_threads(flt_num_t flt, sig_num_t sig, uint64_t threads)
+{
     CLU_FLT_IS_SAFE(flt);
     CLU_HANDLER_IS_SAFE(sig.num);
+    assert(threads);
 
-    flt.sig = sig_num_mul(flt.sig, sig);
+    flt.sig = sig_num_mul_threads(flt.sig, sig, threads);
     return flt_num_normalize(flt);
 }
 
 flt_num_t flt_num_div_sig(flt_num_t flt, sig_num_t sig) // TODO TEST
 {
+    return flt_num_div_sig_threads(flt, sig, 1);
+}
+
+flt_num_t flt_num_div_sig_threads(flt_num_t flt, sig_num_t sig, uint64_t threads)
+{
     CLU_FLT_IS_SAFE(flt);
     CLU_HANDLER_IS_SAFE(sig.num);
+    assert(threads);
 
     int64_t exponent = int64_add(flt.exponent, -(int64_t)sig.num->count);
     flt = flt_num_set_exponent(flt, exponent);
-    flt.sig = sig_num_div(flt.sig, sig);
+    flt.sig = sig_num_div_threads(flt.sig, sig, threads);
     return flt_num_normalize(flt);
 }

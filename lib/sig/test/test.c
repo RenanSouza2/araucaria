@@ -653,6 +653,121 @@ static void test_sig_num_div(bool show)
 }
 
 
+constexpr uint64_t threads_mul_count = 65536;
+constexpr uint64_t threads_mul_n = 4;
+constexpr uint64_t threads_div_count = 32768;
+constexpr uint64_t threads_div_n = 2;
+
+static void test_sig_num_mul_threads(bool show)
+{
+    TEST_FN_OPEN
+
+    #define TEST_SIG_NUM_MUL_THREADS(TAG, SIG_NUM_1, SIG_NUM_2, THREADS, SIG_NUM_OUT) \
+    {                                                                                 \
+        TEST_CASE_OPEN(TAG)                                                           \
+        {                                                                             \
+            sig_num_t sig = sig_num_mul_threads(                                      \
+                sig_num_create_immed(ARG_OPEN SIG_NUM_1),                             \
+                sig_num_create_immed(ARG_OPEN SIG_NUM_2),                             \
+                THREADS                                                               \
+            );                                                                        \
+            assert(sig_num_immed(sig, ARG_OPEN SIG_NUM_OUT));                         \
+        }                                                                             \
+        TEST_CASE_CLOSE                                                               \
+    }
+
+    TEST_SIG_NUM_MUL_THREADS(1, (POSITIVE, 1, 2), (POSITIVE, 1, 3), 4, (POSITIVE, 1, 6));
+    TEST_SIG_NUM_MUL_THREADS(2, (POSITIVE, 1, 2), (NEGATIVE, 1, 3), 4, (NEGATIVE, 1, 6));
+    TEST_SIG_NUM_MUL_THREADS(3, (NEGATIVE, 1, 2), (POSITIVE, 1, 3), 4, (NEGATIVE, 1, 6));
+    TEST_SIG_NUM_MUL_THREADS(4, (NEGATIVE, 1, 2), (NEGATIVE, 1, 3), 4, (POSITIVE, 1, 6));
+    TEST_SIG_NUM_MUL_THREADS(5, (POSITIVE, 1, 2), (ZERO, 0), 4, (ZERO, 0));
+    TEST_SIG_NUM_MUL_THREADS(6, (ZERO, 0), (NEGATIVE, 1, 2), 4, (ZERO, 0));
+
+    TEST_SIG_NUM_MUL_THREADS(7, (NEGATIVE, 1, 2), (POSITIVE, 1, 3), 1, (NEGATIVE, 1, 6));
+
+    #undef TEST_SIG_NUM_MUL_THREADS
+
+    #define TEST_SIG_NUM_MUL_THREADS_LARGE(TAG, THREADS)            \
+    {                                                               \
+        TEST_CASE_OPEN_TIMEOUT(TAG, 0)                              \
+        {                                                           \
+            sig_num_t sig_1 = sig_num_create_rand(threads_mul_count); \
+            sig_num_t sig_2 = sig_num_create_rand(threads_mul_count); \
+                                                                    \
+            sig_num_t ref = sig_num_mul(                            \
+                sig_num_copy(sig_1),                                \
+                sig_num_copy(sig_2)                                 \
+            );                                                      \
+            sig_num_t thr = sig_num_mul_threads(                    \
+                sig_num_copy(sig_1),                                \
+                sig_num_copy(sig_2),                                \
+                THREADS                                             \
+            );                                                      \
+            assert(sig_num_eq_dbg(ref, thr));                       \
+                                                                    \
+            sig_num_free(sig_1);                                    \
+            sig_num_free(sig_2);                                    \
+        }                                                           \
+        TEST_CASE_CLOSE                                             \
+    }
+
+    TEST_SIG_NUM_MUL_THREADS_LARGE(8, threads_mul_n);
+    TEST_SIG_NUM_MUL_THREADS_LARGE(9, 3);
+
+    #undef TEST_SIG_NUM_MUL_THREADS_LARGE
+
+    TEST_FN_CLOSE
+}
+
+static void test_sig_num_div_threads(bool show)
+{
+    TEST_FN_OPEN
+
+    #define TEST_SIG_NUM_DIV_THREADS(TAG, SIG_NUM_1, SIG_NUM_2, THREADS, SIG_NUM_OUT) \
+    {                                                                                 \
+        TEST_CASE_OPEN(TAG)                                                           \
+        {                                                                             \
+            sig_num_t sig = sig_num_div_threads(                                      \
+                sig_num_create_immed(ARG_OPEN SIG_NUM_1),                             \
+                sig_num_create_immed(ARG_OPEN SIG_NUM_2),                             \
+                THREADS                                                               \
+            );                                                                        \
+            assert(sig_num_immed(sig, ARG_OPEN SIG_NUM_OUT));                         \
+        }                                                                             \
+        TEST_CASE_CLOSE                                                               \
+    }
+
+    TEST_SIG_NUM_DIV_THREADS(1, (POSITIVE, 1, 3), (POSITIVE, 1, 2), 4, (POSITIVE, 1, 1));
+    TEST_SIG_NUM_DIV_THREADS(2, (NEGATIVE, 1, 3), (POSITIVE, 1, 2), 4, (NEGATIVE, 1, 1));
+    TEST_SIG_NUM_DIV_THREADS(3, (POSITIVE, 1, 3), (NEGATIVE, 1, 2), 4, (NEGATIVE, 1, 1));
+    TEST_SIG_NUM_DIV_THREADS(4, (NEGATIVE, 1, 3), (NEGATIVE, 1, 2), 4, (POSITIVE, 1, 1));
+    TEST_SIG_NUM_DIV_THREADS(5, (POSITIVE, 1, 2), (POSITIVE, 1, 3), 4, (ZERO, 0));
+    TEST_SIG_NUM_DIV_THREADS(6, (ZERO, 0), (POSITIVE, 1, 2), 4, (ZERO, 0));
+    TEST_SIG_NUM_DIV_THREADS(7, (POSITIVE, 1, 3), (POSITIVE, 1, 2), 1, (POSITIVE, 1, 1));
+
+    #undef TEST_SIG_NUM_DIV_THREADS
+
+    TEST_CASE_OPEN_TIMEOUT(8, 0)
+    {
+        sig_num_t sig_1 = sig_num_create_rand(2 * threads_div_count);
+        sig_num_t sig_2 = sig_num_create_rand(threads_div_count);
+
+        sig_num_t ref = sig_num_div(sig_num_copy(sig_1), sig_num_copy(sig_2));
+        sig_num_t thr = sig_num_div_threads(
+            sig_num_copy(sig_1),
+            sig_num_copy(sig_2),
+            threads_div_n
+        );
+        assert(sig_num_eq_dbg(ref, thr));
+
+        sig_num_free(sig_1);
+        sig_num_free(sig_2);
+    }
+    TEST_CASE_CLOSE
+
+    TEST_FN_CLOSE
+}
+
 
 static void test_sig_num()
 {
@@ -679,6 +794,9 @@ static void test_sig_num()
     test_sig_num_sub(show);
     test_sig_num_mul(show);
     test_sig_num_div(show);
+
+    test_sig_num_mul_threads(show);
+    test_sig_num_div_threads(show);
 
     TEST_ASSERT_MEM_EMPTY
 }
