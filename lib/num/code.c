@@ -419,6 +419,7 @@ void num_display_dec_threads(num_p num, uint64_t threads)
 {
     CLU_HANDLER_IS_SAFE(num);
     assert(num);
+    assert(threads);
 
     num_display_dec_core(num, threads);
 }
@@ -6124,6 +6125,7 @@ num_p num_mul_threads(num_p num_1, num_p num_2, uint64_t threads)
     CLU_HANDLER_IS_SAFE(num_2)
     assert(num_1)
     assert(num_2)
+    assert(threads)
 
     return num_mul_core(num_1, num_2, true, threads);
 }
@@ -6165,6 +6167,7 @@ num_p num_sqr_threads(num_p num, uint64_t threads)
 {
     CLU_HANDLER_IS_SAFE(num);
     assert(num);
+    assert(threads);
 
     return num_sqr_core(num, threads);
 }
@@ -6202,6 +6205,7 @@ num_p num_pow_threads(num_p num, uint64_t value, uint64_t threads) // TODO TEST
 {
     CLU_HANDLER_IS_SAFE(num);
     assert(num);
+    assert(threads);
 
     return num_pow_core(num, value, threads);
 }
@@ -6263,6 +6267,7 @@ void num_div_mod_threads(
     CLU_HANDLER_IS_SAFE(num_2)
     assert(num_1)
     assert(num_2)
+    assert(threads)
 
     num_div_mod_core(out_num_q, out_num_r, num_1, num_2, threads);
 }
@@ -6285,6 +6290,7 @@ num_p num_div_threads(num_p num_1, num_p num_2, uint64_t threads)
     CLU_HANDLER_IS_SAFE(num_2)
     assert(num_1)
     assert(num_2)
+    assert(threads)
 
     num_p num_q;
     num_div_mod_threads(&num_q, nullptr, num_1, num_2, threads);
@@ -6308,6 +6314,7 @@ num_p num_mod_threads(num_p num_1, num_p num_2, uint64_t threads)
     CLU_HANDLER_IS_SAFE(num_2)
     assert(num_1)
     assert(num_2)
+    assert(threads)
 
     num_div_mod_threads(nullptr, &num_1, num_1, num_2, threads);
     return num_1;

@@ -118,7 +118,8 @@ num_p c = num_mul_threads(a, b, 8);   // consumes a and b, same as num_mul
 
 Rules:
 
-- `threads` must be at least `1`; `1` runs the sequential path.
+- `threads` must be at least `1`; `1` runs the sequential path. Zero is an
+  assertion failure, not undefined behaviour.
 - Threads are created and joined inside the call. There is no pool that
   outlives it and no global state to initialise or tear down.
 - The count is an upper bound, not a promise. Operands too small to be worth

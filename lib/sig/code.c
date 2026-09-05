@@ -148,6 +148,7 @@ void sig_num_display_dec_threads(sig_num_t sig, uint64_t threads)
 {
     CLU_SIG_IS_SAFE(sig);
     assert(sig.num);
+    assert(threads);
 
     if(sig.signal == ZERO)
     {
@@ -437,6 +438,7 @@ sig_num_t sig_num_mul_threads(sig_num_t sig_1, sig_num_t sig_2, uint64_t threads
 {
     CLU_SIG_IS_SAFE(sig_1);
     CLU_SIG_IS_SAFE(sig_2);
+    assert(threads);
 
     uint64_t signal_res = sig_signal_mul(sig_1.signal, sig_2.signal);
     num_p num_res = num_mul_threads(sig_1.num, sig_2.num, threads);
@@ -460,6 +462,7 @@ sig_num_t sig_num_div_threads(sig_num_t sig_1, sig_num_t sig_2, uint64_t threads
 {
     CLU_SIG_IS_SAFE(sig_1);
     CLU_SIG_IS_SAFE(sig_2);
+    assert(threads);
 
     uint64_t signal_res = sig_signal_mul(sig_1.signal, sig_2.signal);
     num_p num_res = num_div_threads(sig_1.num, sig_2.num, threads);

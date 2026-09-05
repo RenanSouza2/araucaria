@@ -278,6 +278,7 @@ void flt_num_display_dec(flt_num_t flt) // TODO TEST
 void flt_num_display_dec_threads(flt_num_t flt, uint64_t threads) // TODO TEST
 {
     CLU_FLT_IS_SAFE(flt);
+    assert(threads);
 
     flt_num_display_dec_core(flt, threads);
 }
@@ -639,6 +640,7 @@ flt_num_t flt_num_mul_threads(flt_num_t flt_1, flt_num_t flt_2, uint64_t threads
 {
     CLU_FLT_IS_SAFE(flt_1);
     CLU_FLT_IS_SAFE(flt_2);
+    assert(threads);
 
     flt_1.exponent = int64_add(flt_1.exponent, flt_2.exponent);
     flt_1.sig = sig_num_mul_threads(flt_1.sig, flt_2.sig, threads);
@@ -692,6 +694,7 @@ flt_num_t flt_num_div_threads(flt_num_t flt_1, flt_num_t flt_2, uint64_t threads
 {
     CLU_FLT_IS_SAFE(flt_1);
     CLU_FLT_IS_SAFE(flt_2);
+    assert(threads);
 
     int64_t exponent = int64_add(flt_1.exponent, -(int64_t)flt_1.size);
     flt_1 = flt_num_set_exponent(flt_1, exponent);
@@ -711,6 +714,7 @@ flt_num_t flt_num_mul_sig_threads(flt_num_t flt, sig_num_t sig, uint64_t threads
 {
     CLU_FLT_IS_SAFE(flt);
     CLU_HANDLER_IS_SAFE(sig.num);
+    assert(threads);
 
     flt.sig = sig_num_mul_threads(flt.sig, sig, threads);
     return flt_num_normalize(flt);
@@ -725,6 +729,7 @@ flt_num_t flt_num_div_sig_threads(flt_num_t flt, sig_num_t sig, uint64_t threads
 {
     CLU_FLT_IS_SAFE(flt);
     CLU_HANDLER_IS_SAFE(sig.num);
+    assert(threads);
 
     int64_t exponent = int64_add(flt.exponent, -(int64_t)sig.num->count);
     flt = flt_num_set_exponent(flt, exponent);

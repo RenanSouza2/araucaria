@@ -119,10 +119,10 @@ README's *Threading*. Internally the split is:
   the count to the `num` multiply or division underneath.
 
 Threads are created and joined within a call — no pool outlives it, and there
-is no global state to initialise. `threads` must be non-zero; `num_dec_dump`
-and `num_base_to_threads` assert it, the arithmetic entry points do not. Every
-pthread call is wrapped in `TREAT`, so a failure aborts rather than passing
-unnoticed.
+is no global state to initialise. `threads` must be non-zero, asserted at every
+public `*_threads` entry point -- `mods/macros`' `assert` is live in production
+too, not compiled out. Every pthread call is wrapped in `TREAT`, so a failure
+aborts rather than passing unnoticed.
 
 The build passes `-pthread` (`makefiles/flags.mk`, in `FLAGS_CMP` and
 `FLAGS_EXE`) plus `-D_GNU_SOURCE` on Linux and `-D_DARWIN_C_SOURCE` on macOS.
