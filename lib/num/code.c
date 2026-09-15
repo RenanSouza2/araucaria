@@ -4,6 +4,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/mman.h>
+#include <sys/statvfs.h>
 
 #include "debug.h"
 #include "internal.h"
@@ -259,6 +260,17 @@ uint64_t araucaria_disk_config_get_threshold_bytes()
     return s_araucaria_disk_config.disk_threshold_bytes;
 }
 
+uint64_t araucaria_disk_config_get_ram_budget_bytes()
+{
+    return s_araucaria_disk_config.ram_budget_bytes;
+}
+
+uint64_t araucaria_disk_config_get_ssm_disk_max_bytes()
+{
+    uint64_t bytes = s_araucaria_disk_config.ssm_disk_max_bytes;
+    return bytes ? bytes : s_araucaria_disk_config.disk_threshold_bytes;
+}
+
 
 
 static void ssm_worker_range(
@@ -500,9 +512,36 @@ void num_display_full(const char tag[], num_p num)
 
 
 
+// the backing file is sparse, so a full disk would surface as SIGBUS on a later
+// write instead of as a failure to allocate
+static void disk_reserve_check(uint64_t total_size)
+{
+    struct statvfs st;
+    int res = statvfs(s_araucaria_disk_config.disk_path, &st);
+    assert(res == 0);
+
+    uint64_t avail = (uint64_t)st.f_bavail * (uint64_t)st.f_frsize;
+    if(avail >= total_size)
+    {
+        return;
+    }
+
+    fprintf(
+        stderr,
+        "\naraucaria: %s has %llu MB free, need %llu MB\n",
+        s_araucaria_disk_config.disk_path,
+        (unsigned long long)(avail >> 20),
+        (unsigned long long)(total_size >> 20)
+    );
+    assert(avail >= total_size);
+}
+
 static num_p num_create_disk(CLU_PARAMS(uint64_t size, uint64_t count))
 {
     assert(s_araucaria_disk_config.is_set);
+
+    uint64_t total_size = sizeof(num_t) + (size * sizeof(uint64_t));
+    disk_reserve_check(total_size);
 
     constexpr uint64_t path_max = 1024;
     char template_path[path_max];
@@ -511,7 +550,6 @@ static num_p num_create_disk(CLU_PARAMS(uint64_t size, uint64_t count))
     assert(fd != -1);
     unlink(template_path);
 
-    uint64_t total_size = sizeof(num_t) + (size * sizeof(uint64_t));
     int res = ftruncate(fd, (off_t)total_size);
     assert(res == 0);
     num_p num = mmap(NULL, total_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
@@ -2951,9 +2989,29 @@ static void num_ssm_butterfly(
 
 constexpr uint64_t ssm_fft_block_bytes = 1024 * 1024;
 
-static uint64_t ssm_fft_fuse_bits(uint64_t n, uint64_t stages_left)
+// Working set one worker fuses into a single pass: cache sized, except for an
+// array past the RAM budget, where a sweep is disk traffic and the pass blocks
+// for RAM instead.
+static uint64_t ssm_fft_budget_bytes(num_p num_fft, uint64_t workers)
 {
-    uint64_t fit = ssm_fft_block_bytes / (n * sizeof(uint64_t));
+    uint64_t budget = araucaria_disk_config_get_ram_budget_bytes();
+    if(!budget || !num_fft->is_mmap)
+    {
+        return ssm_fft_block_bytes;
+    }
+
+    if((num_fft->size * sizeof(uint64_t)) <= budget)
+    {
+        return ssm_fft_block_bytes;
+    }
+
+    uint64_t per_worker = budget / workers;
+    return per_worker > ssm_fft_block_bytes ? per_worker : ssm_fft_block_bytes;
+}
+
+static uint64_t ssm_fft_fuse_bits(uint64_t n, uint64_t stages_left, uint64_t budget)
+{
+    uint64_t fit = budget / (n * sizeof(uint64_t));
     uint64_t r = fit < 2 ? 1 : (uint64_t)stdc_bit_width(fit) - 1;
     return r < stages_left ? r : stages_left;
 }
@@ -3090,6 +3148,7 @@ typedef struct
     uint64_t Q;
     ssm_fft_fwd_pad_t * pad;
     uint64_t stride_end;
+    uint64_t budget;
     uint64_t worker;
     uint64_t workers;
 } ssm_fft_fwd_split_worker_t;
@@ -3104,7 +3163,7 @@ static void * ssm_fft_fwd_split_worker(void * arg)
 
     while(stages_left)
     {
-        uint64_t r = ssm_fft_fuse_bits(w->n, stages_left);
+        uint64_t r = ssm_fft_fuse_bits(w->n, stages_left, w->budget);
         uint64_t gl = stride_hi >> (r - 1);
         uint64_t blocks = w->K / (gl << r);
 
@@ -3194,6 +3253,7 @@ static void num_ssm_fft_fwd_rec(
     assert(num_aux->size >= 2 * n)
 
     uint64_t workers = ssm_worker_count(threads, K / 2);
+    uint64_t budget = ssm_fft_budget_bytes(num_fft, workers);
 
     if(workers <= 1)
     {
@@ -3209,6 +3269,7 @@ static void num_ssm_fft_fwd_rec(
             .Q = Q,
             .pad = pad,
             .stride_end = 1,
+            .budget = budget,
             .worker = 0,
             .workers = 1,
         };
@@ -3245,6 +3306,7 @@ static void num_ssm_fft_fwd_rec(
             .Q = Q,
             .pad = pad,
             .stride_end = split,
+            .budget = budget,
             .worker = w,
             .workers = split,
         };
@@ -3266,7 +3328,7 @@ static void num_ssm_fft_fwd_rec(
 
     while(stages_left)
     {
-        uint64_t r = ssm_fft_fuse_bits(n, stages_left);
+        uint64_t r = ssm_fft_fuse_bits(n, stages_left, budget);
         uint64_t gl = stride_hi >> (r - 1);
         uint64_t blocks = K >> r;
         uint64_t pass_workers = workers < blocks ? workers : blocks;
@@ -3545,6 +3607,7 @@ typedef struct
     uint64_t lim;
     bool postloop;
     ssm_fft_inv_pointwise_t * pw;
+    uint64_t budget;
     uint64_t worker;
     uint64_t workers;
 } ssm_fft_inv_split_worker_t;
@@ -3560,7 +3623,7 @@ static void * ssm_fft_inv_split_worker(void * arg)
 
     while(stages_left)
     {
-        uint64_t r = ssm_fft_fuse_bits(w->n, stages_left);
+        uint64_t r = ssm_fft_fuse_bits(w->n, stages_left, w->budget);
         uint64_t span = gl << r;
         uint64_t c_start = (w->worker * chunk) / span;
         uint64_t c_end = c_start + (chunk / span);
@@ -3680,6 +3743,7 @@ static void num_ssm_fft_inv_rec(
     }
 
     uint64_t workers = ssm_worker_count(threads, k / 2);
+    uint64_t budget = ssm_fft_budget_bytes(num, workers);
 
     if(workers <= 1)
     {
@@ -3698,6 +3762,7 @@ static void num_ssm_fft_inv_rec(
             .lim = lim,
             .postloop = true,
             .pw = num_fft_2 ? &pw : nullptr,
+            .budget = budget,
             .worker = 0,
             .workers = 1,
         };
@@ -3740,6 +3805,7 @@ static void num_ssm_fft_inv_rec(
             .lim = lim,
             .postloop = false,
             .pw = num_fft_2 ? &split_pw[w] : nullptr,
+            .budget = budget,
             .worker = w,
             .workers = split,
         };
@@ -3766,7 +3832,7 @@ static void num_ssm_fft_inv_rec(
 
     while(stages_left)
     {
-        uint64_t r = ssm_fft_fuse_bits(n, stages_left);
+        uint64_t r = ssm_fft_fuse_bits(n, stages_left, budget);
         uint64_t blocks = k >> r;
         uint64_t pass_workers = workers < blocks ? workers : blocks;
 
@@ -5074,12 +5140,21 @@ static uint64_t mul_ssm_array_bytes(uint64_t count_1, uint64_t count_2)
 // product, and it is what bounds the recursion when the threshold is very low
 constexpr uint64_t mul_karatsuba_min_bytes = U64(256) * 1024 * 1024;
 
-// Split while a transform array would land on disk. Halving both operands halves
-// the array, so the recursion ends once it fits under the threshold or the floor.
+// mul_mem_profile is handed a hypothetical threshold; the split limit still
+// comes from the config, falling back to that threshold when unset
+static uint64_t mul_split_max_bytes(uint64_t disk_threshold_bytes)
+{
+    uint64_t bytes = araucaria_disk_config_get_ssm_disk_max_bytes();
+    return bytes ? bytes : disk_threshold_bytes;
+}
+
+// Split while a transform array would exceed what may live on disk. Halving both
+// operands halves the array, so the recursion ends once it fits under the limit
+// or the floor.
 static bool mul_is_karatsuba(
     uint64_t count_1,
     uint64_t count_2,
-    uint64_t disk_threshold_bytes
+    uint64_t ssm_disk_max_bytes
 )
 {
     uint64_t bytes = mul_ssm_array_bytes(count_1, count_2);
@@ -5088,7 +5163,7 @@ static bool mul_is_karatsuba(
         return false;
     }
 
-    return bytes > disk_threshold_bytes;
+    return bytes > ssm_disk_max_bytes;
 }
 
 // KEEPS NUM_1 NUM_2 unless FREE_INPUTS
@@ -5202,7 +5277,7 @@ num_p num_mul_core(num_p num_1, num_p num_2, bool free_inputs, uint64_t threads)
     if(mul_is_karatsuba(
         num_1->count,
         num_2->count,
-        araucaria_disk_config_get_threshold_bytes()
+        araucaria_disk_config_get_ssm_disk_max_bytes()
     ))
     {
         return num_mul_karatsuba(num_1, num_2, free_inputs, threads);
@@ -5223,7 +5298,8 @@ num_p num_mul_core(num_p num_1, num_p num_2, bool free_inputs, uint64_t threads)
 constexpr double mem_disk_excess_fraction = 0.125;
 
 // Bytes past disk_threshold_bytes are reclaimable page cache: charged at a
-// fraction, never dropped, so this charge stays monotone in size.
+// fraction, never dropped, so this charge stays monotone in size. ram_budget_bytes
+// caps the charge -- it bounds a disk backed buffer's resident set.
 static double mem_estimate_ram_bytes(uint64_t size, uint64_t disk_threshold_bytes)
 {
     uint64_t bytes = sizeof(num_t) + (size * sizeof(uint64_t));
@@ -5232,8 +5308,15 @@ static double mem_estimate_ram_bytes(uint64_t size, uint64_t disk_threshold_byte
         return (double)bytes;
     }
 
-    return (double)disk_threshold_bytes
-        + ((double)(bytes - disk_threshold_bytes) * mem_disk_excess_fraction);
+    double excess = (double)(bytes - disk_threshold_bytes) * mem_disk_excess_fraction;
+
+    uint64_t budget = araucaria_disk_config_get_ram_budget_bytes();
+    if(budget && (excess > (double)budget))
+    {
+        excess = (double)budget;
+    }
+
+    return (double)disk_threshold_bytes + excess;
 }
 
 // Bytes charged for one buffer of this limb count, on num_create's terms.
@@ -5340,7 +5423,7 @@ static mem_profile_t mul_mem_profile(
 
     // num_mul_karatsuba keeps about one operand pair live across all three
     // sub products
-    if(mul_is_karatsuba(count_1, count_2, disk_threshold_bytes))
+    if(mul_is_karatsuba(count_1, count_2, mul_split_max_bytes(disk_threshold_bytes)))
     {
         uint64_t count_max = count_1 < count_2 ? count_2 : count_1;
         uint64_t split = (count_max + 1) / 2;

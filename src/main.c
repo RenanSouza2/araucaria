@@ -1028,6 +1028,74 @@ static void time_disk_mul_count(uint64_t count, uint64_t threads, uint64_t thres
 }
 
 
+// Same out-of-core multiply run twice: once with the FFT passes blocked for
+// cache (ram_budget 0, one stage per sweep of the array) and once blocked for
+// RAM. The two results must agree -- there is no in-RAM reference at this size.
+[[maybe_unused]]
+static void time_out_of_core_mul(
+    uint64_t count,
+    uint64_t threads,
+    uint64_t threshold,
+    uint64_t ram_budget
+)
+{
+    uint64_t budgets[] = {0, ram_budget};
+    const char * labels[] = {"cache-blocked", "ram-blocked"};
+
+    araucaria_disk_config_t config =
+    {
+        .disk_path = "./cache",
+        .disk_threshold_bytes = threshold,
+        .ssm_disk_max_bytes = UINT64_MAX,
+    };
+    araucaria_disk_config_set(&config);
+
+    // doubling by shift-and-add, not by squaring: building the operand must not
+    // cost an out-of-core multiply of its own
+    num_p num_1 = num_generate_size(count >> 6, 2);
+    while(num_1->count < count)
+    {
+        num_p num_hi = num_shl(num_copy(num_1), num_1->count * chunk_bits);
+        num_1 = num_add(num_hi, num_1);
+    }
+    num_p num_2 = num_add(num_copy(num_1), num_wrap(1));
+    num_p num_res_ref = nullptr;
+
+    tprintf(
+        "count: " U64P(9) "  threads: " U64P() "  threshold: " U64P() " MB"
+        "  budget: " U64P() " MB",
+        num_1->count, threads, threshold >> 20, ram_budget >> 20
+    );
+
+    for(uint64_t j=0; j<sizeof(budgets)/sizeof(budgets[0]); j++)
+    {
+        num_p num_1_c = num_copy(num_1);
+        num_p num_2_c = num_copy(num_2);
+
+        config.ram_budget_bytes = budgets[j];
+        araucaria_disk_config_set(&config);
+
+        TIME_SETUP
+        num_p num_res = num_mul_threads(num_1_c, num_2_c, threads);
+        TIME_END(t1)
+
+        tprintf("%-14s  time: %10.3f", labels[j], dtime(t1));
+
+        if(num_res_ref == nullptr)
+        {
+            num_res_ref = num_res;
+            continue;
+        }
+
+        assert(num_cmp(num_res, num_res_ref) == 0)
+        num_free(num_res);
+    }
+
+    num_free(num_res_ref);
+    num_free(num_1);
+    num_free(num_2);
+}
+
 
 constexpr uint64_t processor_siblings = 2;
 
@@ -1291,6 +1359,7 @@ int main()
     // time_assembly_mul();
     // time_threads_mul();
     // time_disk_mul_count(132'000'000, 16, 3'000'000'000);
+    // time_out_of_core_mul(268'435'456, 8, U64(256) * 1024 * 1024, U64(4) * 1024 * 1024 * 1024);
     time_threads_div();
     // time_procs_mul();
     // time_smt_mul();

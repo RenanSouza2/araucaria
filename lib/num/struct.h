@@ -16,6 +16,12 @@ STRUCT(araucaria_disk_config)
 {
     uint64_t disk_threshold_bytes;
     const char* disk_path;
+    // RAM one worker may hold resident over a disk backed transform; 0 blocks
+    // the FFT passes for cache instead of for RAM
+    uint64_t ram_budget_bytes;
+    // largest transform array allowed to live on disk; past it num_mul splits
+    // instead. 0 means disk_threshold_bytes
+    uint64_t ssm_disk_max_bytes;
     bool is_set;
 };
 
