@@ -13,7 +13,6 @@ void araucaria_disk_config_set(araucaria_disk_config_p config);
 bool araucaria_disk_config_is_set();
 uint64_t araucaria_disk_config_get_threshold_bytes();
 uint64_t araucaria_disk_config_get_ram_budget_bytes();
-uint64_t araucaria_disk_config_get_ssm_disk_max_bytes();
 
 void num_display_dec(num_p num);
 void num_display_dec_threads(num_p num, uint64_t threads);

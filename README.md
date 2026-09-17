@@ -105,37 +105,33 @@ on the first write to an unbacked page. Every disk allocation checks
 
 ### Multiplying past RAM
 
-Two further fields govern a multiply whose Schönhage–Strassen transform arrays
-do not fit in RAM. Both default to `0`, which preserves the behaviour above.
+`ram_budget_bytes` governs a multiply whose Schönhage–Strassen transform arrays
+are disk-backed. It defaults to `0`, which works those arrays in place through
+the mapping.
 
 ```c
 araucaria_disk_config_t config = {
     .disk_path            = "./cache",
-    .disk_threshold_bytes = U64(512) * 1024 * 1024,
-    .ram_budget_bytes     = U64(5)   * 1024 * 1024 * 1024,
-    .ssm_disk_max_bytes   = UINT64_MAX,
+    .disk_threshold_bytes = U64(2) * 1024 * 1024 * 1024,
+    .ram_budget_bytes     = U64(4) * 1024 * 1024 * 1024,
 };
 ```
 
-`ssm_disk_max_bytes` is the largest transform array allowed to live on disk.
-Past it `num_mul` splits the operands with Karatsuba rather than transform
-them. Left at `0` it means `disk_threshold_bytes`, so *any* array big enough to
-be `mmap`-ed splits — which is what you want when disk is a fallback, and never
-what you want out of core: reaching a 16 GB array by halving costs about 3⁶
-sub-products. Set it to the largest array the disk can hold.
+`ram_budget_bytes` is how much RAM one multiply may keep resident. For a
+disk-backed array the FFT passes are fused into blocks of that size (divided by
+the worker count), so the transform sweeps the array a few times instead of once
+per stage, and each block is read into RAM and written back with explicit
+`pread`/`pwrite` rather than faulted through the mapping. Keep it at or below
+**RAM/2**: past what the page cache can hold, blocks are evicted mid-pass and
+I/O multiplies.
 
-`ram_budget_bytes` is how much RAM one multiply may keep resident. The FFT
-passes are fused into blocks of that size (divided by the worker count) once an
-array outgrows the budget, so the transform costs a couple of sweeps over the
-array instead of one per stage — at 4 GB operands, 2 sweeps rather than 16.
-Below the budget the passes stay blocked for cache, which is faster whenever the
-array is reachable at RAM speed. Size it to what the page cache can really
-hold, not to physical RAM.
+`disk_threshold_bytes` decides which arrays reach disk at all. An array that
+fits in RAM is faster left there, and a multiply holds two transform arrays at
+once, so around **RAM/3** keeps every multiply that can run in RAM in RAM.
 
 Scratch space is the binding constraint out of core. A transform array is
-about twice the product, and a multiply holds two of them plus the result, so
-budget roughly **10× one operand**: 4 GB operands need ~41 GB of `disk_path`,
-8 GB operands ~81 GB.
+about twice the product, and a multiply holds two of them plus an operand, so
+budget roughly **9× one operand**: 8 GB operands need ~72 GB of `disk_path`.
 
 ## Threading
 

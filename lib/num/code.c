@@ -265,12 +265,6 @@ uint64_t araucaria_disk_config_get_ram_budget_bytes()
     return s_araucaria_disk_config.ram_budget_bytes;
 }
 
-uint64_t araucaria_disk_config_get_ssm_disk_max_bytes()
-{
-    uint64_t bytes = s_araucaria_disk_config.ssm_disk_max_bytes;
-    return bytes ? bytes : s_araucaria_disk_config.disk_threshold_bytes;
-}
-
 
 
 static void ssm_worker_range(
@@ -5358,99 +5352,6 @@ num_p num_mul_ssm(num_p num_1, num_p num_2, bool free_inputs, uint64_t threads)
 
 
 
-// bytes num_create hands each of num_mul_ssm's two transform arrays
-static uint64_t mul_ssm_array_bytes(uint64_t count_1, uint64_t count_2)
-{
-    ssm_params_t p = ssm_get_params(count_1 + count_2);
-    return sizeof(num_t) + (p.n * p.K * sizeof(uint64_t));
-}
-
-// floor on splitting: under it a disk backed transform costs less than the extra
-// product, and it is what bounds the recursion when the threshold is very low
-constexpr uint64_t mul_karatsuba_min_bytes = U64(256) * 1024 * 1024;
-
-// mul_mem_profile is handed a hypothetical threshold; the split limit still
-// comes from the config, falling back to that threshold when unset
-static uint64_t mul_split_max_bytes(uint64_t disk_threshold_bytes)
-{
-    uint64_t bytes = araucaria_disk_config_get_ssm_disk_max_bytes();
-    return bytes ? bytes : disk_threshold_bytes;
-}
-
-// Split while a transform array would exceed what may live on disk. Halving both
-// operands halves the array, so the recursion ends once it fits under the limit
-// or the floor.
-static bool mul_is_karatsuba(
-    uint64_t count_1,
-    uint64_t count_2,
-    uint64_t ssm_disk_max_bytes
-)
-{
-    uint64_t bytes = mul_ssm_array_bytes(count_1, count_2);
-    if(bytes <= mul_karatsuba_min_bytes)
-    {
-        return false;
-    }
-
-    return bytes > ssm_disk_max_bytes;
-}
-
-// KEEPS NUM_1 NUM_2 unless FREE_INPUTS
-// split at half the larger operand, so num_mid's operands stay one limb over it
-STATIC num_p num_mul_karatsuba(
-    num_p num_1,
-    num_p num_2,
-    bool free_inputs,
-    uint64_t threads
-)
-{
-    CLU_HANDLER_IS_SAFE(num_1)
-    CLU_HANDLER_IS_SAFE(num_2)
-    assert(num_1)
-    assert(num_2)
-
-    uint64_t count_res = num_1->count + num_2->count;
-    uint64_t count_max = num_1->count < num_2->count ? num_2->count : num_1->count;
-    uint64_t split = (count_max + 1) / 2;
-
-    num_p num_1_hi;
-    num_p num_1_lo;
-    num_break(&num_1_hi, &num_1_lo, free_inputs ? num_1 : num_copy(num_1), split);
-
-    num_p num_2_hi;
-    num_p num_2_lo;
-    num_break(&num_2_hi, &num_2_lo, free_inputs ? num_2 : num_copy(num_2), split);
-
-    // num_create, not num_copy plus num_add: a half can be empty, and num_copy
-    // leaves an empty num's single limb uninitialised for num_add_offset to read
-    num_p num_sum_1 = num_create(CLU_ARGS(split + 1, 0));
-    num_add_offset(num_sum_1, 0, num_1_hi);
-    num_add_offset(num_sum_1, 0, num_1_lo);
-
-    num_p num_sum_2 = num_create(CLU_ARGS(split + 1, 0));
-    num_add_offset(num_sum_2, 0, num_2_hi);
-    num_add_offset(num_sum_2, 0, num_2_lo);
-
-    num_p num_mid = num_mul_core(num_sum_1, num_sum_2, true, threads);
-    num_p num_hi = num_mul_core(num_1_hi, num_2_hi, true, threads);
-    num_p num_lo = num_mul_core(num_1_lo, num_2_lo, true, threads);
-
-    // num_mid holds a_hi * b_lo + a_lo * b_hi once both halves come back out
-    num_sub_offset(num_mid, 0, num_hi);
-    num_sub_offset(num_mid, 0, num_lo);
-
-    num_p num_res = num_create(CLU_ARGS(count_res, 0));
-    num_add_offset(num_res, 0, num_lo);
-    num_add_offset(num_res, split, num_mid);
-    num_add_offset(num_res, 2 * split, num_hi);
-
-    num_free(num_lo);
-    num_free(num_mid);
-    num_free(num_hi);
-
-    return num_normalize(num_res);
-}
-
 static bool mul_is_classic(uint64_t count_1, uint64_t count_2)
 {
     constexpr uint64_t threshold = 256;
@@ -5501,15 +5402,6 @@ num_p num_mul_core(num_p num_1, num_p num_2, bool free_inputs, uint64_t threads)
             num_free(num_2);
         }
         return num_res;
-    }
-
-    if(mul_is_karatsuba(
-        num_1->count,
-        num_2->count,
-        araucaria_disk_config_get_ssm_disk_max_bytes()
-    ))
-    {
-        return num_mul_karatsuba(num_1, num_2, free_inputs, threads);
     }
 
     uint64_t ceiling = num_mul_threads_ceiling(num_1->count, num_2->count);
@@ -5647,41 +5539,6 @@ static mem_profile_t mul_mem_profile(
         {
             .integral = bytes * dt,
             .duration = dt,
-        };
-    }
-
-    // num_mul_karatsuba keeps about one operand pair live across all three
-    // sub products
-    if(mul_is_karatsuba(count_1, count_2, mul_split_max_bytes(disk_threshold_bytes)))
-    {
-        uint64_t count_max = count_1 < count_2 ? count_2 : count_1;
-        uint64_t split = (count_max + 1) / 2;
-
-        uint64_t count_1_hi = count_1 > split ? count_1 - split : 0;
-        uint64_t count_1_lo = count_1 < split ? count_1 : split;
-        uint64_t count_2_hi = count_2 > split ? count_2 - split : 0;
-        uint64_t count_2_lo = count_2 < split ? count_2 : split;
-
-        double held = mem_estimate_ram_bytes(count_1 + count_2, disk_threshold_bytes);
-
-        mem_profile_t sub_mid = mul_mem_profile(
-            split + 1, split + 1, disk_threshold_bytes, threads
-        );
-        mem_profile_t sub_hi = mul_mem_profile(
-            count_1_hi, count_2_hi, disk_threshold_bytes, threads
-        );
-        mem_profile_t sub_lo = mul_mem_profile(
-            count_1_lo, count_2_lo, disk_threshold_bytes, threads
-        );
-
-        // the three run in sequence with held live throughout, so a sub product
-        // that does no work carries no weight
-        double duration = sub_mid.duration + sub_hi.duration + sub_lo.duration;
-        return (mem_profile_t)
-        {
-            .integral = sub_mid.integral + sub_hi.integral + sub_lo.integral
-                + (held * duration),
-            .duration = duration,
         };
     }
 

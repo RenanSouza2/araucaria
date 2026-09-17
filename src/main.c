@@ -1041,7 +1041,6 @@ static void stage_check(uint64_t count, uint64_t threads)
     {
         .disk_path = "./cache",
         .disk_threshold_bytes = threshold,
-        .ssm_disk_max_bytes = UINT64_MAX,
     };
     araucaria_disk_config_set(&config);
 
@@ -1082,29 +1081,24 @@ typedef struct
 {
     const char * label;
     uint64_t ram_budget_bytes;
-    uint64_t ssm_disk_max_bytes;
 } compare_cfg_t;
 
-// main's dispatch is reproduced by clearing both new fields: the budget falls
-// back to the cache block (no fusion, no staging) and the split limit falls back
-// to disk_threshold_bytes.
+// ram_budget_bytes 0 works a disk backed array in place with cache sized passes
 [[maybe_unused]]
-static void time_compare(uint64_t count, uint64_t threads, uint64_t threshold, bool tuned)
+static void time_compare(uint64_t count, uint64_t threads, uint64_t threshold)
 {
     constexpr uint64_t gb = U64(1) * 1024 * 1024 * 1024;
 
     compare_cfg_t cfgs[] =
     {
-        { "main", 0, 0 },
-        { "main-tuned", 0, 2 * gb },
-        { "branch", 4 * gb, UINT64_MAX },
+        { "in-place", 0 },
+        { "staged", 4 * gb },
     };
 
     araucaria_disk_config_t config =
     {
         .disk_path = "./cache",
         .disk_threshold_bytes = threshold,
-        .ssm_disk_max_bytes = UINT64_MAX,
     };
     araucaria_disk_config_set(&config);
 
@@ -1122,13 +1116,7 @@ static void time_compare(uint64_t count, uint64_t threads, uint64_t threshold, b
 
     for(uint64_t j=0; j<sizeof(cfgs)/sizeof(cfgs[0]); j++)
     {
-        if(!tuned && (cfgs[j].ssm_disk_max_bytes == 2 * gb))
-        {
-            continue;
-        }
-
         config.ram_budget_bytes = cfgs[j].ram_budget_bytes;
-        config.ssm_disk_max_bytes = cfgs[j].ssm_disk_max_bytes;
         araucaria_disk_config_set(&config);
 
         TIME_SETUP
@@ -1170,7 +1158,6 @@ static void time_small_check()
     for(uint64_t i=0; i<sizeof(counts)/sizeof(counts[0]); i++)
     {
         config.ram_budget_bytes = 0;
-        config.ssm_disk_max_bytes = 0;
         araucaria_disk_config_set(&config);
 
         num_p num_1 = num_generate_size(counts[i], 2);
@@ -1184,7 +1171,6 @@ static void time_small_check()
             for(uint64_t j=0; j<2; j++)
             {
                 config.ram_budget_bytes = j ? (4 * gb) : 0;
-                config.ssm_disk_max_bytes = j ? UINT64_MAX : 0;
                 araucaria_disk_config_set(&config);
 
                 TIME_SETUP
@@ -1199,8 +1185,8 @@ static void time_small_check()
         }
 
         tprintf(
-            "SMALL " U64P(9) " limbs (" U64P(4) " KB)  main best %8.4f mean %8.4f | "
-            "branch best %8.4f mean %8.4f | ratio %5.3f",
+            "SMALL " U64P(9) " limbs (" U64P(4) " KB)  in-place best %8.4f mean %8.4f | "
+            "staged best %8.4f mean %8.4f | ratio %5.3f",
             num_1->count, (num_1->count * 8) >> 10,
             best[0], tot[0]/(double)reps, best[1], tot[1]/(double)reps,
             (tot[1]/(double)reps) / (tot[0]/(double)reps)
@@ -1218,10 +1204,10 @@ static void time_guard_check()
 
     for(uint64_t r=0; r<3; r++)
     {
-        time_compare(16'777'216, 8, 256 * mb, true);
+        time_compare(16'777'216, 8, 256 * mb);
     }
-    time_compare(67'108'864, 8, 1024 * mb, true);
-    time_compare(268'435'456, 8, 1024 * mb, true);
+    time_compare(67'108'864, 8, 1024 * mb);
+    time_compare(268'435'456, 8, 1024 * mb);
 }
 
 [[maybe_unused]]
@@ -1234,7 +1220,7 @@ static void time_compare_sweep()
 
     for(uint64_t i=0; i<sizeof(counts)/sizeof(counts[0]); i++)
     {
-        time_compare(counts[i], 8, U64(1) * 1024 * 1024 * 1024, true);
+        time_compare(counts[i], 8, U64(1) * 1024 * 1024 * 1024);
     }
 }
 
@@ -1266,7 +1252,6 @@ static void time_bandwidth_sweep()
     {
         .disk_path = "./cache",
         .disk_threshold_bytes = threshold,
-        .ssm_disk_max_bytes = UINT64_MAX,
     };
     araucaria_disk_config_set(&config);
 
@@ -1312,109 +1297,6 @@ static void time_bandwidth_sweep()
     num_free(num_res_ref);
     num_free(num_1);
     num_free(num_2);
-}
-
-
-typedef struct
-{
-    const char * label;
-    uint64_t ssm_disk_max_bytes;
-    uint64_t ram_budget_bytes;
-} crossover_cfg_t;
-
-// The same operands multiplied two ways: split with Karatsuba until a transform
-// array fits RAM, or transformed whole out of core. Karatsuba runs first, on the
-// warmer cache, so a win for the other row is not an artefact of ordering.
-[[maybe_unused]]
-static void time_crossover(
-    uint64_t count,
-    uint64_t threads,
-    uint64_t threshold,
-    uint64_t ssm_ram_fit,
-    uint64_t ram_budget
-)
-{
-    crossover_cfg_t cfgs[] =
-    {
-        { "karatsuba", ssm_ram_fit, 0 },
-        { "ssm-disk", UINT64_MAX, ram_budget },
-    };
-
-    araucaria_disk_config_t config =
-    {
-        .disk_path = "./cache",
-        .disk_threshold_bytes = threshold,
-        .ssm_disk_max_bytes = ssm_ram_fit,
-    };
-    araucaria_disk_config_set(&config);
-
-    // doubling by shift-and-add, not by squaring: building the operand must not
-    // cost a multiply of its own
-    num_p num_1 = num_generate_size(count >> 6, 2);
-    while(num_1->count < count)
-    {
-        num_p num_hi = num_shl(num_copy(num_1), num_1->count * chunk_bits);
-        num_1 = num_add(num_hi, num_1);
-    }
-    num_p num_2 = num_add(num_copy(num_1), num_wrap(1));
-    num_p num_res_ref = nullptr;
-
-    tprintf(
-        "operand " U64P(5) " MB  count " U64P(11) "  threads " U64P()
-        "  ram_fit " U64P() " MB  budget " U64P() " MB",
-        (num_1->count * sizeof(uint64_t)) >> 20, num_1->count, threads,
-        ssm_ram_fit >> 20, ram_budget >> 20
-    );
-
-    for(uint64_t j=0; j<sizeof(cfgs)/sizeof(cfgs[0]); j++)
-    {
-        num_p num_1_c = num_copy(num_1);
-        num_p num_2_c = num_copy(num_2);
-
-        config.ssm_disk_max_bytes = cfgs[j].ssm_disk_max_bytes;
-        config.ram_budget_bytes = cfgs[j].ram_budget_bytes;
-        araucaria_disk_config_set(&config);
-
-        TIME_SETUP
-        num_p num_res = num_mul_threads(num_1_c, num_2_c, threads);
-        TIME_END(t1)
-
-        tprintf("    %-10s time: %10.3f", cfgs[j].label, dtime(t1));
-
-        if(num_res_ref == nullptr)
-        {
-            num_res_ref = num_res;
-            continue;
-        }
-
-        assert(num_cmp(num_res, num_res_ref) == 0)
-        num_free(num_res);
-    }
-
-    num_free(num_res_ref);
-    num_free(num_1);
-    num_free(num_2);
-}
-
-[[maybe_unused]]
-static void time_crossover_sweep()
-{
-    constexpr uint64_t threshold = U64(256) * 1024 * 1024;
-    constexpr uint64_t ssm_ram_fit = U64(2) * 1024 * 1024 * 1024;
-    constexpr uint64_t ram_budget = U64(4) * 1024 * 1024 * 1024;
-
-    uint64_t counts[] =
-    {
-        134'217'728,    // 1 GB
-        268'435'456,    // 2 GB
-        536'870'912,    // 4 GB
-        1'073'741'824,  // 8 GB
-    };
-
-    for(uint64_t i=0; i<sizeof(counts)/sizeof(counts[0]); i++)
-    {
-        time_crossover(counts[i], 8, threshold, ssm_ram_fit, ram_budget);
-    }
 }
 
 
@@ -1680,10 +1562,9 @@ int main()
     // time_assembly_mul();
     // time_threads_mul();
     // time_disk_mul_count(132'000'000, 16, 3'000'000'000);
-    // time_crossover_sweep();
     // time_small_check();
     // time_guard_check();
-    // time_compare(1'610'612'736, 8, U64(1) * 1024 * 1024 * 1024, false);
+    // time_compare(1'610'612'736, 8, U64(1) * 1024 * 1024 * 1024);
     time_threads_div();
     // time_procs_mul();
     // time_smt_mul();

@@ -84,13 +84,10 @@ Values are little-endian arrays of 64-bit limbs.
 
 ### Multiplication dispatch (`lib/num/code.c`)
 
-`num_mul_core` dispatches three ways, in this order:
+`num_mul_core` dispatches two ways:
 
-- `mul_is_classic` (`code.c:5149`) — either operand under `256` limbs: classic
+- `mul_is_classic` (`code.c:5355`) — either operand under `256` limbs: classic
   schoolbook.
-- `mul_is_karatsuba` (`code.c:5078`) — the SSM arrays would exceed both
-  `mul_karatsuba_min_bytes` (256 MB) and `disk_threshold_bytes`: split
-  recursively rather than transform a working set that would land on disk.
 - Otherwise `num_mul_ssm`: Schönhage–Strassen, splitting operands into blocks,
   transforming with a negacyclic FFT modulo `2^(64·(n-1)) + 1`, multiplying
   pointwise, transforming back.
