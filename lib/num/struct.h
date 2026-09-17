@@ -30,6 +30,8 @@ STRUCT(num)
     uint64_t size;
     uint64_t count;
     bool is_mmap;
+    // backing file, kept open for the FFT's explicit block I/O; -1 when on heap
+    int fd;
     chunk_p chunk;
 };
 

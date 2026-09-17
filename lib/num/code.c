@@ -553,7 +553,6 @@ static num_p num_create_disk(CLU_PARAMS(uint64_t size, uint64_t count))
     int res = ftruncate(fd, (off_t)total_size);
     assert(res == 0);
     num_p num = mmap(NULL, total_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    close(fd);
     assert(num != MAP_FAILED);
 
     *num = (num_t)
@@ -561,6 +560,7 @@ static num_p num_create_disk(CLU_PARAMS(uint64_t size, uint64_t count))
         .size = size,
         .count = count,
         .is_mmap = true,
+        .fd = fd,
         .chunk = (chunk_p)&num[1]
     };
     CLU_HANDLER_REGISTER_TAG(num, CLU_STACK_TAG);
@@ -585,6 +585,7 @@ num_p num_create(CLU_PARAMS(uint64_t size, uint64_t count))
     {
         .size = size,
         .count = count,
+        .fd = -1,
         .chunk = (chunk_p)&num[1]
     };
     return num;
@@ -608,6 +609,7 @@ num_p num_create_dirty(CLU_PARAMS(uint64_t size, uint64_t count))
     {
         .size = size,
         .count = count,
+        .fd = -1,
         .chunk = (chunk_p)&num[1]
     };
     return num;
@@ -951,12 +953,57 @@ void num_free(num_p num)
     }
 
     uint64_t total_size = sizeof(num_t) + (num->size * sizeof(uint64_t));
+    int fd = num->fd;
     CLU_HANDLER_UNREGISTER(num)
     int res = munmap(num, total_size);
+    assert(res == 0);
+    res = close(fd);
     assert(res == 0);
 }
 
 
+
+// The backing file carries the num_t header first, so limb POS sits past it.
+static off_t num_file_offset(uint64_t pos)
+{
+    return (off_t)(sizeof(num_t) + (pos * sizeof(uint64_t)));
+}
+
+static void num_block_read(uint64_t * dest, num_p num, uint64_t pos, uint64_t limbs)
+{
+    assert(num->fd >= 0);
+    assert(pos + limbs <= num->size);
+
+    uint64_t left = limbs * sizeof(uint64_t);
+    off_t off = num_file_offset(pos);
+    char * dst = (char *)dest;
+    while(left)
+    {
+        ssize_t got = pread(num->fd, dst, left, off);
+        assert(got > 0);
+        left -= (uint64_t)got;
+        dst += got;
+        off += got;
+    }
+}
+
+static void num_block_write(num_p num, uint64_t pos, const uint64_t * src, uint64_t limbs)
+{
+    assert(num->fd >= 0);
+    assert(pos + limbs <= num->size);
+
+    uint64_t left = limbs * sizeof(uint64_t);
+    off_t off = num_file_offset(pos);
+    const char * s = (const char *)src;
+    while(left)
+    {
+        ssize_t put = pwrite(num->fd, s, left, off);
+        assert(put > 0);
+        left -= (uint64_t)put;
+        s += put;
+        off += put;
+    }
+}
 
 void num_add_uint_offset(num_p num, uint64_t pos, uint64_t value)
 {
@@ -3016,9 +3063,82 @@ static uint64_t ssm_fft_fuse_bits(uint64_t n, uint64_t stages_left, uint64_t bud
     return r < stages_left ? r : stages_left;
 }
 
+// Limbs to stage a fused block through, 0 to work the mapping in place. Worth it
+// only once the array is on disk and blocked for RAM: one transfer per element
+// instead of a page fault every page of it.
+static uint64_t ssm_fft_stage_limbs(num_p num_fft, uint64_t budget)
+{
+    if(!num_fft->is_mmap || (budget <= ssm_fft_block_bytes))
+    {
+        return 0;
+    }
+    return budget / sizeof(uint64_t);
+}
+
+static num_p ssm_stage_create(uint64_t limbs)
+{
+    num_p num = malloc(sizeof(num_t) + (limbs * sizeof(uint64_t)));
+    assert(num);
+
+    CLU_HANDLER_REGISTER_STATIC(num);
+    *num = (num_t)
+    {
+        .size = limbs,
+        .count = limbs,
+        .fd = -1,
+        .chunk = (chunk_p)&num[1]
+    };
+    return num;
+}
+
+static void ssm_stage_free(num_p num)
+{
+    if(!num)
+    {
+        return;
+    }
+
+    CLU_HANDLER_UNREGISTER(num)
+    free(num);
+}
+
+// Element b of a fused block sits at (pos + step*x)*n in the array and at b*n in
+// the stage.
+static void ssm_stage_io(
+    num_p num_stage,
+    num_p num_fft,
+    uint64_t pos,
+    uint64_t step,
+    uint64_t n,
+    uint64_t gl,
+    uint64_t r,
+    uint64_t a,
+    uint64_t c,
+    bool write
+)
+{
+    uint64_t width = U64(1) << r;
+    uint64_t base = a + ((gl << r) * c);
+    assert(num_stage->size >= width * n);
+
+    for(uint64_t b = 0; b < width; b++)
+    {
+        uint64_t x = base + (gl * b);
+        uint64_t off = (pos + (step * x)) * n;
+
+        if(write)
+        {
+            num_block_write(num_fft, off, &num_stage->chunk[b * n], n);
+            continue;
+        }
+        num_block_read(&num_stage->chunk[b * n], num_fft, off, n);
+    }
+}
+
 static void ssm_fft_fwd_block(
     num_p num_aux,
     num_p num_fft,
+    num_p num_stage,
     uint64_t pos,
     uint64_t step,
     uint64_t n,
@@ -3032,6 +3152,7 @@ static void ssm_fft_fwd_block(
 {
     uint64_t width = U64(1) << r;
     uint64_t base = a + ((gl << r) * c);
+    num_p num_tgt = num_stage ? num_stage : num_fft;
 
     for(uint64_t k = r; k-- > 0;)
     {
@@ -3045,15 +3166,18 @@ static void ssm_fft_fwd_block(
             for(uint64_t b = b_0; b < b_0 + reach; b++)
             {
                 uint64_t x_1 = base + (gl * b);
-                uint64_t pos_1 = (pos + (step * x_1)) * n;
-                uint64_t pos_2 = (pos + (step * (x_1 + stride))) * n;
+                // x_1 + stride is element b + reach of the block
+                uint64_t pos_1 = num_stage ? (b * n) : ((pos + (step * x_1)) * n);
+                uint64_t pos_2 = num_stage
+                    ? ((b + reach) * n)
+                    : ((pos + (step * (x_1 + stride))) * n);
 
                 uint64_t i = (b >> (k + 1)) | (c << ((r - k) - 1));
                 uint64_t shift = ssm_bit_inv(i, half) * bits_local;
 
-                num_ssm_shl_mod(num_aux, num_fft, pos_2, n, shift);
+                num_ssm_shl_mod(num_aux, num_tgt, pos_2, n, shift);
 
-                num_ssm_butterfly(num_aux, num_fft, pos_1, pos_2, n);
+                num_ssm_butterfly(num_aux, num_tgt, pos_1, pos_2, n);
             }
         }
     }
@@ -3071,6 +3195,7 @@ typedef struct
 static void ssm_fft_fwd_pad_block(
     ssm_fft_fwd_pad_t * pad,
     num_p num_fft,
+    num_p num_stage,
     uint64_t pos,
     uint64_t step,
     uint64_t n,
@@ -3088,7 +3213,9 @@ static void ssm_fft_fwd_pad_block(
     for(uint64_t b = 0; b < width; b++)
     {
         uint64_t x = base + (gl * b);
-        uint64_t * restrict dest = &num_fft->chunk[(pos + (step * x)) * n];
+        uint64_t * restrict dest = num_stage
+            ? &num_stage->chunk[b * n]
+            : &num_fft->chunk[(pos + (step * x)) * n];
 
         uint64_t copy = 0;
         if(x < pad->full_chunks)
@@ -3116,6 +3243,7 @@ static void ssm_fft_fwd_pad_block(
 static void ssm_fft_fwd_preloop_block(
     num_p num_aux,
     num_p num_fft,
+    num_p num_stage,
     uint64_t pos,
     uint64_t step,
     uint64_t n,
@@ -3128,11 +3256,13 @@ static void ssm_fft_fwd_preloop_block(
 {
     uint64_t width = U64(1) << r;
     uint64_t base = a + ((gl << r) * c);
+    num_p num_tgt = num_stage ? num_stage : num_fft;
 
     for(uint64_t b = 0; b < width; b++)
     {
         uint64_t x = base + (gl * b);
-        num_ssm_shl_mod(num_aux, num_fft, (pos + (step * x)) * n, n, Q * x);
+        uint64_t off = num_stage ? (b * n) : ((pos + (step * x)) * n);
+        num_ssm_shl_mod(num_aux, num_tgt, off, n, Q * x);
     }
 }
 
@@ -3147,6 +3277,7 @@ typedef struct
     uint64_t bits;
     uint64_t Q;
     ssm_fft_fwd_pad_t * pad;
+    num_p num_stage;
     uint64_t stride_end;
     uint64_t budget;
     uint64_t worker;
@@ -3171,10 +3302,20 @@ static void * ssm_fft_fwd_split_worker(void * arg)
         {
             for(uint64_t a = w->worker; a < gl; a += w->workers)
             {
+                // the pad writes every element, so the round it runs in has
+                // nothing to read back first
+                if(w->num_stage && !(first && w->pad))
+                {
+                    ssm_stage_io(
+                        w->num_stage, w->num_fft, w->pos, w->step,
+                        w->n, gl, r, a, c, false
+                    );
+                }
+
                 if(first && w->pad)
                 {
                     ssm_fft_fwd_pad_block(
-                        w->pad, w->num_fft, w->pos, w->step,
+                        w->pad, w->num_fft, w->num_stage, w->pos, w->step,
                         w->n, w->K, gl, r, a, c
                     );
                 }
@@ -3182,15 +3323,23 @@ static void * ssm_fft_fwd_split_worker(void * arg)
                 if(first)
                 {
                     ssm_fft_fwd_preloop_block(
-                        w->num_aux, w->num_fft, w->pos, w->step,
+                        w->num_aux, w->num_fft, w->num_stage, w->pos, w->step,
                         w->n, w->Q, gl, r, a, c
                     );
                 }
 
                 ssm_fft_fwd_block(
-                    w->num_aux, w->num_fft, w->pos, w->step,
+                    w->num_aux, w->num_fft, w->num_stage, w->pos, w->step,
                     w->n, w->K, w->bits, gl, r, a, c
                 );
+
+                if(w->num_stage)
+                {
+                    ssm_stage_io(
+                        w->num_stage, w->num_fft, w->pos, w->step,
+                        w->n, gl, r, a, c, true
+                    );
+                }
             }
         }
 
@@ -3213,6 +3362,7 @@ typedef struct
     uint64_t bits;
     uint64_t gl;
     uint64_t r;
+    num_p num_stage;
     uint64_t idx_start;
     uint64_t idx_end;
 } ssm_fft_fwd_pass_worker_t;
@@ -3223,10 +3373,29 @@ static void * ssm_fft_fwd_pass_worker(void * arg)
 
     for(uint64_t idx = w->idx_start; idx < w->idx_end; idx++)
     {
+        uint64_t a = idx % w->gl;
+        uint64_t c = idx / w->gl;
+
+        if(w->num_stage)
+        {
+            ssm_stage_io(
+                w->num_stage, w->num_fft, w->pos, w->step,
+                w->n, w->gl, w->r, a, c, false
+            );
+        }
+
         ssm_fft_fwd_block(
-            w->num_aux, w->num_fft, w->pos, w->step,
-            w->n, w->K, w->bits, w->gl, w->r, idx % w->gl, idx / w->gl
+            w->num_aux, w->num_fft, w->num_stage, w->pos, w->step,
+            w->n, w->K, w->bits, w->gl, w->r, a, c
         );
+
+        if(w->num_stage)
+        {
+            ssm_stage_io(
+                w->num_stage, w->num_fft, w->pos, w->step,
+                w->n, w->gl, w->r, a, c, true
+            );
+        }
     }
     return nullptr;
 }
@@ -3254,9 +3423,12 @@ static void num_ssm_fft_fwd_rec(
 
     uint64_t workers = ssm_worker_count(threads, K / 2);
     uint64_t budget = ssm_fft_budget_bytes(num_fft, workers);
+    uint64_t stage_limbs = ssm_fft_stage_limbs(num_fft, budget);
 
     if(workers <= 1)
     {
+        num_p num_stage = stage_limbs ? ssm_stage_create(stage_limbs) : nullptr;
+
         ssm_fft_fwd_split_worker_t serial =
         {
             .num_aux = num_aux,
@@ -3268,12 +3440,14 @@ static void num_ssm_fft_fwd_rec(
             .bits = bits,
             .Q = Q,
             .pad = pad,
+            .num_stage = num_stage,
             .stride_end = 1,
             .budget = budget,
             .worker = 0,
             .workers = 1,
         };
         ssm_fft_fwd_split_worker(&serial);
+        ssm_stage_free(num_stage);
         return;
     }
 
@@ -3284,9 +3458,13 @@ static void num_ssm_fft_fwd_rec(
     pthread_t * worker_ids = malloc(workers * sizeof(*worker_ids));
     assert(worker_ids)
 
+    num_p * worker_stage = malloc(workers * sizeof(*worker_stage));
+    assert(worker_stage)
+
     for(uint64_t w=0; w<workers; w++)
     {
         worker_aux[w] = num_create_dirty(CLU_ARGS(2 * n, 0));
+        worker_stage[w] = stage_limbs ? ssm_stage_create(stage_limbs) : nullptr;
     }
 
     ssm_fft_fwd_split_worker_t * split_args = malloc(split * sizeof(*split_args));
@@ -3305,6 +3483,7 @@ static void num_ssm_fft_fwd_rec(
             .bits = bits,
             .Q = Q,
             .pad = pad,
+            .num_stage = worker_stage[w],
             .stride_end = split,
             .budget = budget,
             .worker = w,
@@ -3349,6 +3528,7 @@ static void num_ssm_fft_fwd_rec(
                 .bits = bits,
                 .gl = gl,
                 .r = r,
+                .num_stage = worker_stage[w],
                 .idx_start = idx_start,
                 .idx_end = idx_end,
             };
@@ -3367,10 +3547,12 @@ static void num_ssm_fft_fwd_rec(
     for(uint64_t w=0; w<workers; w++)
     {
         num_free(worker_aux[w]);
+        ssm_stage_free(worker_stage[w]);
     }
     free(worker_ids);
     free(worker_args);
     free(worker_aux);
+    free(worker_stage);
 }
 
 // num_aux->size >= 2 * n
@@ -3427,6 +3609,7 @@ static void num_ssm_fft_fwd_pad(
 static void ssm_fft_inv_block(
     num_p num_aux,
     num_p num,
+    num_p num_stage,
     uint64_t pos,
     uint64_t n,
     uint64_t k,
@@ -3439,6 +3622,7 @@ static void ssm_fft_inv_block(
 {
     uint64_t width = U64(1) << r;
     uint64_t base = a + ((gl << r) * c);
+    num_p num_tgt = num_stage ? num_stage : num;
 
     for(uint64_t kk = 0; kk < r; kk++)
     {
@@ -3451,14 +3635,17 @@ static void ssm_fft_inv_block(
             for(uint64_t b = b_0; b < b_0 + reach; b++)
             {
                 uint64_t x_1 = base + (gl * b);
-                uint64_t pos_1 = (pos + x_1) * n;
-                uint64_t pos_2 = (pos + x_1 + stride) * n;
+                // x_1 + stride is element b + reach of the block
+                uint64_t pos_1 = num_stage ? (b * n) : ((pos + x_1) * n);
+                uint64_t pos_2 = num_stage
+                    ? ((b + reach) * n)
+                    : ((pos + x_1 + stride) * n);
 
                 uint64_t i = a + (gl * (b - b_0));
 
-                num_ssm_shr_mod(num_aux, num, pos_2, n, i * bits_local);
+                num_ssm_shr_mod(num_aux, num_tgt, pos_2, n, i * bits_local);
 
-                num_ssm_butterfly(num_aux, num, pos_1, pos_2, n);
+                num_ssm_butterfly(num_aux, num_tgt, pos_1, pos_2, n);
             }
         }
     }
@@ -3467,6 +3654,7 @@ static void ssm_fft_inv_block(
 static void ssm_fft_inv_postloop_block(
     num_p num_aux,
     num_p num,
+    num_p num_stage,
     uint64_t pos,
     uint64_t n,
     uint64_t Q,
@@ -3480,20 +3668,21 @@ static void ssm_fft_inv_postloop_block(
 {
     uint64_t width = U64(1) << r;
     uint64_t base = a + ((gl << r) * c);
+    num_p num_tgt = num_stage ? num_stage : num;
 
     for(uint64_t b = 0; b < width; b++)
     {
         uint64_t x = base + (gl * b);
-        uint64_t pos_x = (pos + x) * n;
+        uint64_t pos_x = num_stage ? (b * n) : ((pos + x) * n);
 
         if(x < lim)
         {
-            num_ssm_shr_mod(num_aux, num, pos_x, n, (Q * x) + k_);
+            num_ssm_shr_mod(num_aux, num_tgt, pos_x, n, (Q * x) + k_);
             continue;
         }
 
-        num_ssm_shr_mod(num_aux, num, pos_x, n, Q * x);
-        num_ssm_shr_mod(num_aux, num, pos_x, n, k_);
+        num_ssm_shr_mod(num_aux, num_tgt, pos_x, n, Q * x);
+        num_ssm_shr_mod(num_aux, num_tgt, pos_x, n, k_);
     }
 }
 
@@ -3607,6 +3796,7 @@ typedef struct
     uint64_t lim;
     bool postloop;
     ssm_fft_inv_pointwise_t * pw;
+    num_p num_stage;
     uint64_t budget;
     uint64_t worker;
     uint64_t workers;
@@ -3630,10 +3820,21 @@ static void * ssm_fft_inv_split_worker(void * arg)
 
         bool last = w->postloop && (stages_left == r);
 
+        // the pointwise round reads num_fft_2 at array offsets, so it stays on
+        // the mapping; every later round is staged
+        num_p num_stage = (first && w->pw) ? nullptr : w->num_stage;
+
         for(uint64_t c = c_start; c < c_end; c++)
         {
             for(uint64_t a = 0; a < gl; a++)
             {
+                if(num_stage)
+                {
+                    ssm_stage_io(
+                        num_stage, w->num, w->pos, 1, w->n, gl, r, a, c, false
+                    );
+                }
+
                 if(first && w->pw)
                 {
                     ssm_fft_inv_pointwise_block(
@@ -3642,15 +3843,22 @@ static void * ssm_fft_inv_split_worker(void * arg)
                 }
 
                 ssm_fft_inv_block(
-                    w->num_aux, w->num, w->pos,
+                    w->num_aux, w->num, num_stage, w->pos,
                     w->n, w->k, w->bits, gl, r, a, c
                 );
 
                 if(last)
                 {
                     ssm_fft_inv_postloop_block(
-                        w->num_aux, w->num, w->pos,
+                        w->num_aux, w->num, num_stage, w->pos,
                         w->n, w->Q, w->k_, w->lim, gl, r, a, c
+                    );
+                }
+
+                if(num_stage)
+                {
+                    ssm_stage_io(
+                        num_stage, w->num, w->pos, 1, w->n, gl, r, a, c, true
                     );
                 }
             }
@@ -3678,6 +3886,7 @@ typedef struct
     uint64_t k_;
     uint64_t lim;
     bool postloop;
+    num_p num_stage;
     uint64_t idx_start;
     uint64_t idx_end;
 } ssm_fft_inv_pass_worker_t;
@@ -3691,16 +3900,30 @@ static void * ssm_fft_inv_pass_worker(void * arg)
         uint64_t a = idx % w->gl;
         uint64_t c = idx / w->gl;
 
+        if(w->num_stage)
+        {
+            ssm_stage_io(
+                w->num_stage, w->num, w->pos, 1, w->n, w->gl, w->r, a, c, false
+            );
+        }
+
         ssm_fft_inv_block(
-            w->num_aux, w->num, w->pos,
+            w->num_aux, w->num, w->num_stage, w->pos,
             w->n, w->k, w->bits, w->gl, w->r, a, c
         );
 
         if(w->postloop)
         {
             ssm_fft_inv_postloop_block(
-                w->num_aux, w->num, w->pos,
+                w->num_aux, w->num, w->num_stage, w->pos,
                 w->n, w->Q, w->k_, w->lim, w->gl, w->r, a, c
+            );
+        }
+
+        if(w->num_stage)
+        {
+            ssm_stage_io(
+                w->num_stage, w->num, w->pos, 1, w->n, w->gl, w->r, a, c, true
             );
         }
     }
@@ -3744,10 +3967,12 @@ static void num_ssm_fft_inv_rec(
 
     uint64_t workers = ssm_worker_count(threads, k / 2);
     uint64_t budget = ssm_fft_budget_bytes(num, workers);
+    uint64_t stage_limbs = ssm_fft_stage_limbs(num, budget);
 
     if(workers <= 1)
     {
         ssm_fft_inv_pointwise_t pw = ssm_fft_inv_pointwise_create(num_fft_2, pw_recursive ? &p_next : nullptr, n);
+        num_p num_stage = stage_limbs ? ssm_stage_create(stage_limbs) : nullptr;
 
         ssm_fft_inv_split_worker_t serial =
         {
@@ -3762,11 +3987,13 @@ static void num_ssm_fft_inv_rec(
             .lim = lim,
             .postloop = true,
             .pw = num_fft_2 ? &pw : nullptr,
+            .num_stage = num_stage,
             .budget = budget,
             .worker = 0,
             .workers = 1,
         };
         ssm_fft_inv_split_worker(&serial);
+        ssm_stage_free(num_stage);
         ssm_fft_inv_pointwise_free(&pw);
         return;
     }
@@ -3778,9 +4005,13 @@ static void num_ssm_fft_inv_rec(
     pthread_t * worker_ids = malloc(workers * sizeof(*worker_ids));
     assert(worker_ids)
 
+    num_p * worker_stage = malloc(workers * sizeof(*worker_stage));
+    assert(worker_stage)
+
     for(uint64_t w=0; w<workers; w++)
     {
         worker_aux[w] = num_create_dirty(CLU_ARGS(2 * n, 0));
+        worker_stage[w] = stage_limbs ? ssm_stage_create(stage_limbs) : nullptr;
     }
 
     ssm_fft_inv_split_worker_t * split_args = malloc(split * sizeof(*split_args));
@@ -3805,6 +4036,7 @@ static void num_ssm_fft_inv_rec(
             .lim = lim,
             .postloop = false,
             .pw = num_fft_2 ? &split_pw[w] : nullptr,
+            .num_stage = worker_stage[w],
             .budget = budget,
             .worker = w,
             .workers = split,
@@ -3855,6 +4087,7 @@ static void num_ssm_fft_inv_rec(
                 .k_ = k_,
                 .lim = lim,
                 .postloop = (stages_left == r),
+                .num_stage = worker_stage[w],
                 .idx_start = idx_start,
                 .idx_end = idx_end,
             };
@@ -3873,10 +4106,12 @@ static void num_ssm_fft_inv_rec(
     for(uint64_t w=0; w<workers; w++)
     {
         num_free(worker_aux[w]);
+        ssm_stage_free(worker_stage[w]);
     }
     free(worker_ids);
     free(worker_args);
     free(worker_aux);
+    free(worker_stage);
 }
 
 // num_aux->size >= 2 * p->n
