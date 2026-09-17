@@ -1089,10 +1089,9 @@ typedef struct
 // back to the cache block (no fusion, no staging) and the split limit falls back
 // to disk_threshold_bytes.
 [[maybe_unused]]
-static void time_compare(uint64_t count, uint64_t threads)
+static void time_compare(uint64_t count, uint64_t threads, uint64_t threshold, bool tuned)
 {
     constexpr uint64_t gb = U64(1) * 1024 * 1024 * 1024;
-    constexpr uint64_t threshold = 1 * gb;
 
     compare_cfg_t cfgs[] =
     {
@@ -1118,11 +1117,16 @@ static void time_compare(uint64_t count, uint64_t threads)
     num_p num_2 = num_add(num_copy(num_1), num_wrap(1));
     num_p num_res_ref = nullptr;
 
-    tprintf("SIZE operand " U64P(6) " MB  count " U64P(11) "  threads " U64P(),
-        (num_1->count * sizeof(uint64_t)) >> 20, num_1->count, threads);
+    tprintf("SIZE operand " U64P(6) " MB  count " U64P(11) "  threshold " U64P() " MB",
+        (num_1->count * sizeof(uint64_t)) >> 20, num_1->count, threshold >> 20);
 
     for(uint64_t j=0; j<sizeof(cfgs)/sizeof(cfgs[0]); j++)
     {
+        if(!tuned && (cfgs[j].ssm_disk_max_bytes == 2 * gb))
+        {
+            continue;
+        }
+
         config.ram_budget_bytes = cfgs[j].ram_budget_bytes;
         config.ssm_disk_max_bytes = cfgs[j].ssm_disk_max_bytes;
         araucaria_disk_config_set(&config);
@@ -1148,6 +1152,78 @@ static void time_compare(uint64_t count, uint64_t threads)
     num_free(num_2);
 }
 
+// Small operands with repetitions: at these sizes nothing reaches disk, so the
+// two configs must run the identical path.
+[[maybe_unused]]
+static void time_small_check()
+{
+    constexpr uint64_t gb = U64(1) * 1024 * 1024 * 1024;
+    constexpr uint64_t reps = 20;
+    uint64_t counts[] = { 65'536, 262'144, 1'048'576, 4'194'304, 16'777'216 };
+
+    araucaria_disk_config_t config =
+    {
+        .disk_path = "./cache",
+        .disk_threshold_bytes = 1 * gb,
+    };
+
+    for(uint64_t i=0; i<sizeof(counts)/sizeof(counts[0]); i++)
+    {
+        config.ram_budget_bytes = 0;
+        config.ssm_disk_max_bytes = 0;
+        araucaria_disk_config_set(&config);
+
+        num_p num_1 = num_generate_size(counts[i], 2);
+        num_p num_2 = num_add(num_copy(num_1), num_wrap(1));
+
+        double best[2] = {1e9, 1e9};
+        double tot[2] = {0, 0};
+
+        for(uint64_t r=0; r<reps; r++)
+        {
+            for(uint64_t j=0; j<2; j++)
+            {
+                config.ram_budget_bytes = j ? (4 * gb) : 0;
+                config.ssm_disk_max_bytes = j ? UINT64_MAX : 0;
+                araucaria_disk_config_set(&config);
+
+                TIME_SETUP
+                num_p res = num_mul_threads(num_copy(num_1), num_copy(num_2), 8);
+                TIME_END(t1)
+                num_free(res);
+
+                double d = dtime(t1);
+                tot[j] += d;
+                if(d < best[j]) best[j] = d;
+            }
+        }
+
+        tprintf(
+            "SMALL " U64P(9) " limbs (" U64P(4) " KB)  main best %8.4f mean %8.4f | "
+            "branch best %8.4f mean %8.4f | ratio %5.3f",
+            num_1->count, (num_1->count * 8) >> 10,
+            best[0], tot[0]/(double)reps, best[1], tot[1]/(double)reps,
+            (tot[1]/(double)reps) / (tot[0]/(double)reps)
+        );
+
+        num_free(num_1);
+        num_free(num_2);
+    }
+}
+
+[[maybe_unused]]
+static void time_guard_check()
+{
+    constexpr uint64_t mb = U64(1) * 1024 * 1024;
+
+    for(uint64_t r=0; r<3; r++)
+    {
+        time_compare(16'777'216, 8, 256 * mb, true);
+    }
+    time_compare(67'108'864, 8, 1024 * mb, true);
+    time_compare(268'435'456, 8, 1024 * mb, true);
+}
+
 [[maybe_unused]]
 static void time_compare_sweep()
 {
@@ -1158,7 +1234,7 @@ static void time_compare_sweep()
 
     for(uint64_t i=0; i<sizeof(counts)/sizeof(counts[0]); i++)
     {
-        time_compare(counts[i], 8);
+        time_compare(counts[i], 8, U64(1) * 1024 * 1024 * 1024, true);
     }
 }
 
@@ -1605,8 +1681,10 @@ int main()
     // time_threads_mul();
     // time_disk_mul_count(132'000'000, 16, 3'000'000'000);
     // time_crossover_sweep();
-    // time_bandwidth_sweep();
-    time_compare_sweep();
+    // time_small_check();
+    // time_guard_check();
+    // time_compare(1'610'612'736, 8, U64(1) * 1024 * 1024 * 1024, false);
+    time_threads_div();
     // time_procs_mul();
     // time_smt_mul();
     // time_assembly_sqr();

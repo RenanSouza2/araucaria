@@ -3036,18 +3036,12 @@ static void num_ssm_butterfly(
 
 constexpr uint64_t ssm_fft_block_bytes = 1024 * 1024;
 
-// Working set one worker fuses into a single pass: cache sized, except for an
-// array past the RAM budget, where a sweep is disk traffic and the pass blocks
-// for RAM instead.
+// Working set one worker fuses into a single pass: cache sized in RAM, budget
+// sized for a disk backed array.
 static uint64_t ssm_fft_budget_bytes(num_p num_fft, uint64_t workers)
 {
     uint64_t budget = araucaria_disk_config_get_ram_budget_bytes();
     if(!budget || !num_fft->is_mmap)
-    {
-        return ssm_fft_block_bytes;
-    }
-
-    if((num_fft->size * sizeof(uint64_t)) <= budget)
     {
         return ssm_fft_block_bytes;
     }
