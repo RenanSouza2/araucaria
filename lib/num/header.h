@@ -11,8 +11,6 @@ PLACEHOLDER(num)
 
 void araucaria_disk_config_set(araucaria_disk_config_p config);
 bool araucaria_disk_config_is_set();
-uint64_t araucaria_disk_config_get_threshold_bytes();
-uint64_t araucaria_disk_config_get_ram_budget_bytes();
 
 void num_display_dec(num_p num);
 void num_display_dec_threads(num_p num, uint64_t threads);
@@ -46,13 +44,7 @@ num_p num_sub(num_p num_1, num_p num_2);
 num_p num_mul(num_p num_1, num_p num_2);
 num_p num_mul_threads(num_p num_1, num_p num_2, uint64_t threads);
 uint64_t num_mul_threads_ceiling(uint64_t count_1, uint64_t count_2);
-uint64_t num_mul_estimate_memory(
-    uint64_t count_1,
-    uint64_t count_2,
-    uint64_t disk_threshold_bytes,
-    uint64_t threads
-);
-uint64_t num_estimate_ram_bytes(uint64_t count, uint64_t disk_threshold_bytes);
+uint64_t num_mul_estimate_memory(uint64_t count_1, uint64_t count_2, uint64_t threads);
 num_p num_pow(num_p num, uint64_t value);
 num_p num_pow_threads(num_p num, uint64_t value, uint64_t threads);
 num_p num_sqr(num_p num);

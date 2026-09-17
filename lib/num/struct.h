@@ -19,7 +19,6 @@ STRUCT(araucaria_disk_config)
     // RAM one worker may hold resident over a disk backed transform; 0 blocks
     // the FFT passes for cache instead of for RAM
     uint64_t ram_budget_bytes;
-    bool is_set;
 };
 
 STRUCT(num)

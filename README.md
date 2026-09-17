@@ -167,17 +167,19 @@ Link with `-pthread`; the bundled makefiles already do.
 
 ### Estimating memory
 
-`num_mul_estimate_memory(count_1, count_2, disk_threshold_bytes, threads)`
-returns the time-weighted average RAM, in bytes, a `num_mul_threads` of that
-shape holds live — a scheduler can use it to decide how many multiplies to
-admit at once. `num_estimate_ram_bytes(count, disk_threshold_bytes)` gives the
-same charge for a single value of `count` limbs.
+`num_mul_estimate_memory(count_1, count_2, threads)` returns the time-weighted
+average RAM, in bytes, a `num_mul_threads` of that shape holds live — a
+scheduler can use it to decide how many multiplies to admit at once.
 
-Both account for `disk_threshold_bytes`: a buffer large enough to be `mmap`-ed
-is charged at a fraction of its size, since the pages past the threshold are
+It reads `disk_threshold_bytes` and `ram_budget_bytes` from the configuration
+set by `araucaria_disk_config_set`, so the estimate always describes the
+multiply that would actually run. A buffer large enough to be `mmap`-ed is
+charged at a fraction of its size, since the pages past the threshold are
 reclaimable page cache. When `ram_budget_bytes` is set that fraction is also
 capped by it, since the budget is what bounds a disk-backed buffer's resident
-set.
+set. Past the size where that cap saturates, the charge stops growing with the
+operands — a scheduler comparing two joins on it should expect the larger one
+to charge no more, and sometimes slightly less.
 
 ## Ownership
 
@@ -198,14 +200,15 @@ the shared assert/test/integer macros
 
 ## Upgrading
 
-Changes that break a consuming project. Nothing was removed from the public
-headers; these three changed name or meaning.
+Changes that break a consuming project.
 
 | Before | Now | Note |
 | --- | --- | --- |
 | `araucaria_disk_config_t.disk_threshold` | `.disk_threshold_bytes` | **Unit changed from limbs to bytes.** A field initialiser by name stops compiling, but a positional one does not — check any `araucaria_disk_config_t` you build. `1024` limbs is `8192` bytes. |
-| `araucaria_disk_config_get_threshold()` | `araucaria_disk_config_get_threshold_bytes()` | Same unit change; the rename makes it a compile error rather than a silent one. |
-| `num_mul_estimate_memory(count_1, count_2, disk_threshold)` | `num_mul_estimate_memory(count_1, count_2, disk_threshold_bytes, threads)` | Gained a trailing `threads` argument, matching what will be passed to `num_mul_threads`. Pass `1` to keep the old meaning. |
+| `num_mul_estimate_memory(count_1, count_2, disk_threshold)` | `num_mul_estimate_memory(count_1, count_2, threads)` | Lost the threshold argument, which is now read from the configuration; gained a trailing `threads` argument, matching what will be passed to `num_mul_threads`. Pass `1` to keep the old meaning. |
+| `araucaria_disk_config_get_threshold()` | — | Removed; the threshold is read from the configuration internally. |
+| `num_estimate_ram_bytes(count, disk_threshold)` | — | Removed; it had no callers. |
+| `araucaria_disk_config_t.is_set` | — | Removed from the struct. It was internal state in a caller-facing field, and the setter overwrote whatever was put there. `araucaria_disk_config_is_set()` stays, and now reports whether a `disk_path` was given. |
 
 ## Development
 
