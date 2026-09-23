@@ -277,10 +277,7 @@ void file_write_sig_num_raw(file_p fp, sig_num_t sig)
 {
     file_write_uint64(fp, sig.signal);
     file_write_uint64(fp, sig.num->count);
-    for(uint64_t i=0; i<sig.num->count; i++)
-    {
-        file_write_uint64(fp, sig.num->chunk[i]);
-    }
+    fwrite(sig.num->chunk, sizeof(uint64_t), sig.num->count, fp->fp);
 }
 
 void file_write_sig_num(file_p fp, sig_num_t sig)
@@ -304,10 +301,7 @@ sig_num_t file_read_sig_num_raw(FILE *fp)
     uint64_t signal = file_read_uint64(fp);
     uint64_t count = file_read_uint64(fp);
     num_p num = num_create(CLU_ARGS(count, count));
-    for(uint64_t i=0; i<count; i++)
-    {
-        num->chunk[i] = file_read_uint64(fp);
-    }
+    assert(fread(num->chunk, sizeof(uint64_t), count, fp) == count);
 
     return sig_num_create(signal, num);
 }

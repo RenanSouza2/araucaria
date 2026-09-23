@@ -30,12 +30,11 @@ library's entry point (consumers link `lib/lib.o` directly, see README).
 
 ### Running a single test
 
-`make test` at the root runs every module's suite. To iterate on one module:
+`make test` at the root runs every module's suite. To run one module's suite,
+use its lib folder, never `test/`, which gets its flags only from there:
 
 ```bash
-make dbg -C lib          # rebuild lib/debug_full.o first (test runners link against it)
-make -C lib/num/test      # builds and runs every runner_* in that module
-make run_test_1_ram -C lib/num/test   # build+run just one runner
+make test -C lib/num
 ```
 
 Every module has a single `test.c` → `runner_test`, except `num`, which has
