@@ -5294,6 +5294,70 @@ static void * ssm_depad_worker(void * arg)
     return nullptr;
 }
 
+// Result limbs one staged depad worker assembles in RAM per write
+constexpr uint64_t ssm_depad_stage_limbs = U64(2) * 1024 * 1024;
+
+// ssm_depad_worker over a disk backed num_fft: each chunk of the worker's range
+// is summed in RAM from block slices read with num_block_read, then written once.
+// A carry out of one chunk enters the next at its first limb
+static void * ssm_depad_worker_staged(void * arg)
+{
+    ssm_depad_worker_t * w = arg;
+
+    uint64_t M = w->p->M;
+    uint64_t n = w->p->n;
+
+    uint64_t range = w->pos_max - w->pos_init;
+    uint64_t chunk_limbs = range < ssm_depad_stage_limbs ? range : ssm_depad_stage_limbs;
+
+    uint64_t * res = malloc(chunk_limbs * sizeof(uint64_t));
+    assert(res)
+    uint64_t * elem = malloc(n * sizeof(uint64_t));
+    assert(elem)
+
+    uint64_t carry = 0;
+    for(uint64_t p_0 = w->pos_init; p_0 < w->pos_max; p_0 += chunk_limbs)
+    {
+        uint64_t p_1 = p_0 + chunk_limbs < w->pos_max ? p_0 + chunk_limbs : w->pos_max;
+
+        memset(res, 0, (p_1 - p_0) * sizeof(uint64_t));
+        res[0] = carry;
+        carry = 0;
+
+        uint64_t first = p_0 < n ? 0 : ((p_0 - n) / M) + 1;
+        uint64_t last = (p_1 - 1) / M;
+        if(last >= w->p->K)
+        {
+            last = w->p->K - 1;
+        }
+
+        for(uint64_t i = first; i <= last; i++)
+        {
+            uint64_t block = M * i;
+            uint64_t lo = block > p_0 ? block : p_0;
+            uint64_t hi = block + n < p_1 ? block + n : p_1;
+
+            num_block_read(elem, w->num_fft, (n * i) + (lo - block), hi - lo);
+            carry += ssm_depad_add(&res[lo - p_0], elem, hi - lo, p_1 - lo);
+        }
+
+        if(w->num_res->is_mmap)
+        {
+            num_block_write(w->num_res, p_0, res, p_1 - p_0);
+        }
+        else
+        {
+            memcpy(&w->num_res->chunk[p_0], res, (p_1 - p_0) * sizeof(uint64_t));
+        }
+    }
+
+    free(elem);
+    free(res);
+
+    w->carry = carry;
+    return nullptr;
+}
+
 // Blocks below this leave too little per worker to pay for the threads
 constexpr uint64_t ssm_depad_min_limbs_to_thread = 65536;
 
@@ -5332,11 +5396,13 @@ num_p num_ssm_depad_no_wrap(num_p num, ssm_params_p p, uint64_t threads)
         };
     }
 
+    void * (*worker_fn)(void *) = num->is_mmap ? ssm_depad_worker_staged : ssm_depad_worker;
+
     for(uint64_t w=1; w<workers; w++)
     {
-        TREAT(pthread_create(&worker_ids[w], nullptr, ssm_depad_worker, &worker_args[w]))
+        TREAT(pthread_create(&worker_ids[w], nullptr, worker_fn, &worker_args[w]))
     }
-    ssm_depad_worker(&worker_args[0]);
+    worker_fn(&worker_args[0]);
     for(uint64_t w=1; w<workers; w++)
     {
         TREAT(pthread_join(worker_ids[w], nullptr))
