@@ -3673,6 +3673,18 @@ static void num_ssm_mul_mod_span(
     uint64_t n
 );
 
+static void num_ssm_mul_wrap_at(
+    num_p num_aux_1,
+    num_p num_aux_2,
+    num_p num_fft_1,
+    num_p num_fft_2,
+    num_p num_1,
+    uint64_t pos_1,
+    num_p num_2,
+    uint64_t pos_2,
+    ssm_params_p p
+);
+
 typedef struct
 {
     num_p num_fft_2;
@@ -3680,6 +3692,8 @@ typedef struct
     num_p num_aux_1;
     num_p num_fft_1_next;
     num_p num_fft_2_next;
+    // one n-limb element of a disk backed num_fft_2, read for a staged block
+    num_p num_elem_2;
 } ssm_fft_inv_pointwise_t;
 
 static ssm_fft_inv_pointwise_t ssm_fft_inv_pointwise_create(
@@ -3705,6 +3719,7 @@ static ssm_fft_inv_pointwise_t ssm_fft_inv_pointwise_create(
         .num_aux_1 = num_create_dirty(CLU_ARGS(n, 0)),
         .num_fft_1_next = num_create_dirty(CLU_ARGS(p_next->n * p_next->K, 0)),
         .num_fft_2_next = num_create_dirty(CLU_ARGS(p_next->n * p_next->K, 0)),
+        .num_elem_2 = num_fft_2->is_mmap ? num_create_dirty(CLU_ARGS(n, 0)) : nullptr,
     };
 }
 
@@ -3718,12 +3733,19 @@ static void ssm_fft_inv_pointwise_free(ssm_fft_inv_pointwise_t * pw)
     num_free(pw->num_aux_1);
     num_free(pw->num_fft_1_next);
     num_free(pw->num_fft_2_next);
+    if(pw->num_elem_2)
+    {
+        num_free(pw->num_elem_2);
+    }
 }
 
+// num_stage non-null holds element b of the block at b*n; only the recursive
+// multiply runs staged
 static void ssm_fft_inv_pointwise_block(
     ssm_fft_inv_pointwise_t * pw,
     num_p num_aux,
     num_p num,
+    num_p num_stage,
     uint64_t pos,
     uint64_t n,
     uint64_t gl,
@@ -3739,6 +3761,33 @@ static void ssm_fft_inv_pointwise_block(
     {
         uint64_t x = base + (gl * b);
         uint64_t pos_x = (pos + x) * n;
+
+        if(num_stage)
+        {
+            assert(pw->p_next)
+
+            num_p num_2 = pw->num_fft_2;
+            uint64_t pos_2 = pos_x;
+            if(pw->num_elem_2)
+            {
+                num_block_read(pw->num_elem_2->chunk, pw->num_fft_2, pos_x, n);
+                num_2 = pw->num_elem_2;
+                pos_2 = 0;
+            }
+
+            num_ssm_mul_wrap_at(
+                pw->num_aux_1,
+                num_aux,
+                pw->num_fft_1_next,
+                pw->num_fft_2_next,
+                num_stage,
+                b * n,
+                num_2,
+                pos_2,
+                pw->p_next
+            );
+            continue;
+        }
 
         if(pw->p_next)
         {
@@ -3797,9 +3846,9 @@ static void * ssm_fft_inv_split_worker(void * arg)
 
         bool last = w->postloop && (stages_left == r);
 
-        // the pointwise round reads num_fft_2 at array offsets, so it stays on
-        // the mapping; every later round is staged
-        num_p num_stage = (first && w->pw) ? nullptr : w->num_stage;
+        // a non-recursive pointwise round reads num_fft_2 at array offsets, so
+        // it stays on the mapping; every other round is staged
+        num_p num_stage = (first && w->pw && !w->pw->p_next) ? nullptr : w->num_stage;
 
         for(uint64_t c = c_start; c < c_end; c++)
         {
@@ -3815,7 +3864,7 @@ static void * ssm_fft_inv_split_worker(void * arg)
                 if(first && w->pw)
                 {
                     ssm_fft_inv_pointwise_block(
-                        w->pw, w->num_aux, w->num, w->pos, w->n, gl, r, a, c
+                        w->pw, w->num_aux, w->num, num_stage, w->pos, w->n, gl, r, a, c
                     );
                 }
 
@@ -4891,14 +4940,16 @@ static void num_ssm_mul_pointwise(
 );
 
 // KEEPS NUM_1 NUM_2
-void num_ssm_mul_wrap(
+// the product lands in num_1 at pos_1
+static void num_ssm_mul_wrap_at(
     num_p num_aux_1,
     num_p num_aux_2,
     num_p num_fft_1,
     num_p num_fft_2,
     num_p num_1,
+    uint64_t pos_1,
     num_p num_2,
-    uint64_t pos,
+    uint64_t pos_2,
     ssm_params_p p
 )
 {
@@ -4907,8 +4958,8 @@ void num_ssm_mul_wrap(
     assert(num_1)
     assert(num_2)
 
-    num_ssm_prepare_wrap(num_aux_2, num_fft_1, num_1, pos, p);
-    num_ssm_prepare_wrap(num_aux_2, num_fft_2, num_2, pos, p);
+    num_ssm_prepare_wrap(num_aux_2, num_fft_1, num_1, pos_1, p);
+    num_ssm_prepare_wrap(num_aux_2, num_fft_2, num_2, pos_2, p);
 
     num_ssm_mul_pointwise(
         num_aux_1,
@@ -4924,10 +4975,25 @@ void num_ssm_mul_wrap(
         num_aux_1,
         num_aux_2,
         num_1,
-        pos,
+        pos_1,
         num_fft_1,
         p
     );
+}
+
+// KEEPS NUM_1 NUM_2
+void num_ssm_mul_wrap(
+    num_p num_aux_1,
+    num_p num_aux_2,
+    num_p num_fft_1,
+    num_p num_fft_2,
+    num_p num_1,
+    num_p num_2,
+    uint64_t pos,
+    ssm_params_p p
+)
+{
+    num_ssm_mul_wrap_at(num_aux_1, num_aux_2, num_fft_1, num_fft_2, num_1, pos, num_2, pos, p);
 }
 
 
