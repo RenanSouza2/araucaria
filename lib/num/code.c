@@ -3057,7 +3057,6 @@ static num_p ssm_stage_create(uint64_t limbs)
     num_p num = malloc(sizeof(num_t) + (limbs * sizeof(uint64_t)));
     assert(num);
 
-    CLU_HANDLER_REGISTER_STATIC(num);
     *num = (num_t)
     {
         .size = limbs,
@@ -3075,7 +3074,6 @@ static void ssm_stage_free(num_p num)
         return;
     }
 
-    CLU_HANDLER_UNREGISTER(num)
     free(num);
 }
 
