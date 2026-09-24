@@ -3348,8 +3348,11 @@ typedef struct
     uint64_t n;
     uint64_t K;
     uint64_t bits;
+    uint64_t Q;
     uint64_t gl;
     uint64_t r;
+    ssm_fft_fwd_pad_t * pad;
+    bool first;
     num_p num_stage;
     uint64_t idx_start;
     uint64_t idx_end;
@@ -3364,11 +3367,29 @@ static void * ssm_fft_fwd_pass_worker(void * arg)
         uint64_t a = idx % w->gl;
         uint64_t c = idx / w->gl;
 
-        if(w->num_stage)
+        // the pad writes every element, so the pass it runs in has nothing to
+        // read back first
+        if(w->num_stage && !w->pad)
         {
             ssm_stage_io(
                 w->num_stage, w->num_fft, w->pos, w->step,
                 w->n, w->gl, w->r, a, c, false
+            );
+        }
+
+        if(w->pad)
+        {
+            ssm_fft_fwd_pad_block(
+                w->pad, w->num_fft, w->num_stage, w->pos, w->step,
+                w->n, w->K, w->gl, w->r, a, c
+            );
+        }
+
+        if(w->first)
+        {
+            ssm_fft_fwd_preloop_block(
+                w->num_aux, w->num_fft, w->num_stage, w->pos, w->step,
+                w->n, w->Q, w->gl, w->r, a, c
             );
         }
 
@@ -3441,6 +3462,10 @@ static void num_ssm_fft_fwd_rec(
 
     uint64_t split = B(stdc_bit_width(workers) - 1);
 
+    // a staged array runs every stage as barrier separated passes, so the
+    // stages below the split get no sweep of their own
+    bool staged = stage_limbs != 0;
+
     num_p * worker_aux = malloc(workers * sizeof(*worker_aux));
     assert(worker_aux)
     pthread_t * worker_ids = malloc(workers * sizeof(*worker_ids));
@@ -3455,47 +3480,58 @@ static void num_ssm_fft_fwd_rec(
         worker_stage[w] = stage_limbs ? ssm_stage_create(stage_limbs) : nullptr;
     }
 
-    ssm_fft_fwd_split_worker_t * split_args = malloc(split * sizeof(*split_args));
-    assert(split_args)
-
-    for(uint64_t w=0; w<split; w++)
+    if(!staged)
     {
-        split_args[w] = (ssm_fft_fwd_split_worker_t)
+        ssm_fft_fwd_split_worker_t * split_args = malloc(split * sizeof(*split_args));
+        assert(split_args)
+
+        for(uint64_t w=0; w<split; w++)
         {
-            .num_aux = worker_aux[w],
-            .num_fft = num_fft,
-            .pos = pos,
-            .step = step,
-            .n = n,
-            .K = K,
-            .bits = bits,
-            .Q = Q,
-            .pad = pad,
-            .num_stage = worker_stage[w],
-            .stride_end = split,
-            .budget = budget,
-            .worker = w,
-            .workers = split,
-        };
+            split_args[w] = (ssm_fft_fwd_split_worker_t)
+            {
+                .num_aux = worker_aux[w],
+                .num_fft = num_fft,
+                .pos = pos,
+                .step = step,
+                .n = n,
+                .K = K,
+                .bits = bits,
+                .Q = Q,
+                .pad = pad,
+                .num_stage = worker_stage[w],
+                .stride_end = split,
+                .budget = budget,
+                .worker = w,
+                .workers = split,
+            };
 
-        TREAT(pthread_create(&worker_ids[w], nullptr, ssm_fft_fwd_split_worker, &split_args[w]))
-    }
-    for(uint64_t w=0; w<split; w++)
-    {
-        TREAT(pthread_join(worker_ids[w], nullptr))
-    }
+            TREAT(pthread_create(&worker_ids[w], nullptr, ssm_fft_fwd_split_worker, &split_args[w]))
+        }
+        for(uint64_t w=0; w<split; w++)
+        {
+            TREAT(pthread_join(worker_ids[w], nullptr))
+        }
 
-    free(split_args);
+        free(split_args);
+    }
 
     ssm_fft_fwd_pass_worker_t * worker_args = malloc(workers * sizeof(*worker_args));
     assert(worker_args)
 
-    uint64_t stages_left = (uint64_t)stdc_bit_width(split) - 1;
-    uint64_t stride_hi = split / 2;
+    uint64_t span = staged ? K : split;
+    uint64_t stages_left = (uint64_t)stdc_bit_width(span) - 1;
+    uint64_t stride_hi = span / 2;
+    // a staged pass keeps at least split blocks, one per worker
+    uint64_t r_cap = (uint64_t)stdc_bit_width(K / split) - 1;
+    bool first = staged;
 
     while(stages_left)
     {
         uint64_t r = ssm_fft_fuse_bits(n, stages_left, budget);
+        if(staged && r > r_cap)
+        {
+            r = r_cap;
+        }
         uint64_t gl = stride_hi >> (r - 1);
         uint64_t blocks = K >> r;
         uint64_t pass_workers = workers < blocks ? workers : blocks;
@@ -3514,8 +3550,11 @@ static void num_ssm_fft_fwd_rec(
                 .n = n,
                 .K = K,
                 .bits = bits,
+                .Q = Q,
                 .gl = gl,
                 .r = r,
+                .pad = first ? pad : nullptr,
+                .first = first,
                 .num_stage = worker_stage[w],
                 .idx_start = idx_start,
                 .idx_end = idx_end,
@@ -3528,6 +3567,7 @@ static void num_ssm_fft_fwd_rec(
             TREAT(pthread_join(worker_ids[w], nullptr))
         }
 
+        first = false;
         stages_left -= r;
         stride_hi = gl / 2;
     }
@@ -3923,6 +3963,7 @@ typedef struct
     uint64_t k_;
     uint64_t lim;
     bool postloop;
+    ssm_fft_inv_pointwise_t * pw;
     num_p num_stage;
     uint64_t idx_start;
     uint64_t idx_end;
@@ -3932,35 +3973,46 @@ static void * ssm_fft_inv_pass_worker(void * arg)
 {
     ssm_fft_inv_pass_worker_t * w = arg;
 
+    // a non-recursive pointwise pass reads num_fft_2 at array offsets, so it
+    // stays on the mapping
+    num_p num_stage = (w->pw && !w->pw->p_next) ? nullptr : w->num_stage;
+
     for(uint64_t idx = w->idx_start; idx < w->idx_end; idx++)
     {
         uint64_t a = idx % w->gl;
         uint64_t c = idx / w->gl;
 
-        if(w->num_stage)
+        if(num_stage)
         {
             ssm_stage_io(
-                w->num_stage, w->num, w->pos, 1, w->n, w->gl, w->r, a, c, false
+                num_stage, w->num, w->pos, 1, w->n, w->gl, w->r, a, c, false
+            );
+        }
+
+        if(w->pw)
+        {
+            ssm_fft_inv_pointwise_block(
+                w->pw, w->num_aux, w->num, num_stage, w->pos, w->n, w->gl, w->r, a, c
             );
         }
 
         ssm_fft_inv_block(
-            w->num_aux, w->num, w->num_stage, w->pos,
+            w->num_aux, w->num, num_stage, w->pos,
             w->n, w->k, w->bits, w->gl, w->r, a, c
         );
 
         if(w->postloop)
         {
             ssm_fft_inv_postloop_block(
-                w->num_aux, w->num, w->num_stage, w->pos,
+                w->num_aux, w->num, num_stage, w->pos,
                 w->n, w->Q, w->k_, w->lim, w->gl, w->r, a, c
             );
         }
 
-        if(w->num_stage)
+        if(num_stage)
         {
             ssm_stage_io(
-                w->num_stage, w->num, w->pos, 1, w->n, w->gl, w->r, a, c, true
+                num_stage, w->num, w->pos, 1, w->n, w->gl, w->r, a, c, true
             );
         }
     }
@@ -4037,6 +4089,10 @@ static void num_ssm_fft_inv_rec(
 
     uint64_t split = B(stdc_bit_width(workers) - 1);
 
+    // a staged array runs every stage as barrier separated passes, so the
+    // stages above the split get no sweep of their own
+    bool staged = stage_limbs != 0;
+
     num_p * worker_aux = malloc(workers * sizeof(*worker_aux));
     assert(worker_aux)
     pthread_t * worker_ids = malloc(workers * sizeof(*worker_ids));
@@ -4051,57 +4107,81 @@ static void num_ssm_fft_inv_rec(
         worker_stage[w] = stage_limbs ? ssm_stage_create(stage_limbs) : nullptr;
     }
 
-    ssm_fft_inv_split_worker_t * split_args = malloc(split * sizeof(*split_args));
-    assert(split_args)
-    ssm_fft_inv_pointwise_t * split_pw = malloc(split * sizeof(*split_pw));
-    assert(split_pw)
-
-    for(uint64_t w=0; w<split; w++)
+    // the pass workers' pointwise state; the split workers build their own
+    uint64_t pw_count = (staged && num_fft_2) ? workers : 0;
+    ssm_fft_inv_pointwise_t * worker_pw = nullptr;
+    if(pw_count)
     {
-        split_pw[w] = ssm_fft_inv_pointwise_create(num_fft_2, pw_recursive ? &p_next : nullptr, n);
-
-        split_args[w] = (ssm_fft_inv_split_worker_t)
+        worker_pw = malloc(pw_count * sizeof(*worker_pw));
+        assert(worker_pw)
+        for(uint64_t w=0; w<pw_count; w++)
         {
-            .num_aux = worker_aux[w],
-            .num = num,
-            .pos = pos,
-            .n = n,
-            .k = k,
-            .bits = bits,
-            .Q = Q,
-            .k_ = k_,
-            .lim = lim,
-            .postloop = false,
-            .pw = num_fft_2 ? &split_pw[w] : nullptr,
-            .num_stage = worker_stage[w],
-            .budget = budget,
-            .worker = w,
-            .workers = split,
-        };
-
-        TREAT(pthread_create(&worker_ids[w], nullptr, ssm_fft_inv_split_worker, &split_args[w]))
-    }
-    for(uint64_t w=0; w<split; w++)
-    {
-        TREAT(pthread_join(worker_ids[w], nullptr))
+            worker_pw[w] = ssm_fft_inv_pointwise_create(num_fft_2, pw_recursive ? &p_next : nullptr, n);
+        }
     }
 
-    for(uint64_t w=0; w<split; w++)
+    if(!staged)
     {
-        ssm_fft_inv_pointwise_free(&split_pw[w]);
+        ssm_fft_inv_split_worker_t * split_args = malloc(split * sizeof(*split_args));
+        assert(split_args)
+        ssm_fft_inv_pointwise_t * split_pw = malloc(split * sizeof(*split_pw));
+        assert(split_pw)
+
+        for(uint64_t w=0; w<split; w++)
+        {
+            split_pw[w] = ssm_fft_inv_pointwise_create(num_fft_2, pw_recursive ? &p_next : nullptr, n);
+
+            split_args[w] = (ssm_fft_inv_split_worker_t)
+            {
+                .num_aux = worker_aux[w],
+                .num = num,
+                .pos = pos,
+                .n = n,
+                .k = k,
+                .bits = bits,
+                .Q = Q,
+                .k_ = k_,
+                .lim = lim,
+                .postloop = false,
+                .pw = num_fft_2 ? &split_pw[w] : nullptr,
+                .num_stage = worker_stage[w],
+                .budget = budget,
+                .worker = w,
+                .workers = split,
+            };
+
+            TREAT(pthread_create(&worker_ids[w], nullptr, ssm_fft_inv_split_worker, &split_args[w]))
+        }
+        for(uint64_t w=0; w<split; w++)
+        {
+            TREAT(pthread_join(worker_ids[w], nullptr))
+        }
+
+        for(uint64_t w=0; w<split; w++)
+        {
+            ssm_fft_inv_pointwise_free(&split_pw[w]);
+        }
+        free(split_pw);
+        free(split_args);
     }
-    free(split_pw);
-    free(split_args);
 
     ssm_fft_inv_pass_worker_t * worker_args = malloc(workers * sizeof(*worker_args));
     assert(worker_args)
 
-    uint64_t stages_left = (uint64_t)stdc_bit_width(split) - 1;
-    uint64_t gl = k / split;
+    uint64_t span = staged ? k : split;
+    uint64_t stages_left = (uint64_t)stdc_bit_width(span) - 1;
+    uint64_t gl = k / span;
+    // a staged pass keeps at least split blocks, one per worker
+    uint64_t r_cap = (uint64_t)stdc_bit_width(k / split) - 1;
+    bool first = staged;
 
     while(stages_left)
     {
         uint64_t r = ssm_fft_fuse_bits(n, stages_left, budget);
+        if(staged && r > r_cap)
+        {
+            r = r_cap;
+        }
         uint64_t blocks = k >> r;
         uint64_t pass_workers = workers < blocks ? workers : blocks;
 
@@ -4124,6 +4204,7 @@ static void num_ssm_fft_inv_rec(
                 .k_ = k_,
                 .lim = lim,
                 .postloop = (stages_left == r),
+                .pw = (first && worker_pw) ? &worker_pw[w] : nullptr,
                 .num_stage = worker_stage[w],
                 .idx_start = idx_start,
                 .idx_end = idx_end,
@@ -4136,8 +4217,18 @@ static void num_ssm_fft_inv_rec(
             TREAT(pthread_join(worker_ids[w], nullptr))
         }
 
+        first = false;
         stages_left -= r;
         gl <<= r;
+    }
+
+    if(worker_pw)
+    {
+        for(uint64_t w=0; w<pw_count; w++)
+        {
+            ssm_fft_inv_pointwise_free(&worker_pw[w]);
+        }
+        free(worker_pw);
     }
 
     for(uint64_t w=0; w<workers; w++)
