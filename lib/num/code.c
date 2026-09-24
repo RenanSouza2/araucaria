@@ -3078,7 +3078,8 @@ static void ssm_stage_free(num_p num)
 }
 
 // Element b of a fused block sits at (pos + step*x)*n in the array and at b*n in
-// the stage.
+// the stage. With step*gl == 1 the block is one contiguous run and moves in a
+// single transfer.
 static void ssm_stage_io(
     num_p num_stage,
     num_p num_fft,
@@ -3095,6 +3096,18 @@ static void ssm_stage_io(
     uint64_t width = U64(1) << r;
     uint64_t base = a + ((gl << r) * c);
     assert(num_stage->size >= width * n);
+
+    if(step * gl == 1)
+    {
+        uint64_t off = (pos + base) * n;
+        if(write)
+        {
+            num_block_write(num_fft, off, num_stage->chunk, width * n);
+            return;
+        }
+        num_block_read(num_stage->chunk, num_fft, off, width * n);
+        return;
+    }
 
     for(uint64_t b = 0; b < width; b++)
     {
