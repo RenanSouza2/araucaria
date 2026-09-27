@@ -133,6 +133,13 @@ Scratch space is the binding constraint out of core. A transform array is
 about twice the product, and a multiply holds two of them plus an operand, so
 budget roughly **9× one operand**: 8 GB operands need ~72 GB of `disk_path`.
 
+Every Schönhage–Strassen product is checked for length on the way out: a
+product of `c1` and `c2` limbs has at most `c1 + c2` limbs, and at least
+`c1 + c2 - 1` when both operands' top limbs are nonzero. A product that breaks
+this aborts through `assert`, which stays live in production, instead of being
+returned. The check catches a corrupted transform, which leaves garbage in the
+zero padding above the product, but not damage confined below its top limbs.
+
 ## Threading
 
 Every heavy operation has a `*_threads` counterpart taking a thread count as
