@@ -5382,6 +5382,14 @@ static num_p num_ssm_prepare_no_wrap(
     return num_fft;
 }
 
+// A product has at most count_max limbs, and at least count_max - 1 when both
+// operands' top limbs are nonzero
+static void ssm_product_count_check(num_p num_res, uint64_t count_max, bool tops)
+{
+    assert(num_res->count <= count_max)
+    assert(!tops || (num_res->count + 1 >= count_max))
+}
+
 // KEEPS NUM_1 NUM_2
 num_p num_mul_ssm(num_p num_1, num_p num_2, bool free_inputs, uint64_t threads)
 {
@@ -5389,6 +5397,10 @@ num_p num_mul_ssm(num_p num_1, num_p num_2, bool free_inputs, uint64_t threads)
     CLU_HANDLER_IS_SAFE(num_2)
     assert(num_1)
     assert(num_2)
+
+    uint64_t count_max = num_1->count + num_2->count;
+    bool tops = num_1->count && num_2->count
+        && num_1->chunk[num_1->count - 1] && num_2->chunk[num_2->count - 1];
 
     ssm_params_t p = ssm_get_params(num_1->count + num_2->count);
     num_p num_aux_2 = num_create_dirty(CLU_ARGS(2 * p.n, 0));
@@ -5399,7 +5411,9 @@ num_p num_mul_ssm(num_p num_1, num_p num_2, bool free_inputs, uint64_t threads)
     num_free(num_fft_2);
     num_free(num_aux_2);
 
-    return num_ssm_depad_no_wrap(num_fft_1, &p, threads);
+    num_p num_res = num_ssm_depad_no_wrap(num_fft_1, &p, threads);
+    ssm_product_count_check(num_res, count_max, tops);
+    return num_res;
 }
 
 
@@ -5888,6 +5902,9 @@ num_p num_sqr_ssm(num_p num, uint64_t threads)
     CLU_HANDLER_IS_SAFE(num)
     assert(num)
 
+    uint64_t count_max = 2 * num->count;
+    bool tops = num->count && num->chunk[num->count - 1];
+
     ssm_params_t p = ssm_get_params(2 * num->count);
     num_p num_aux_1 = num_create_dirty(CLU_ARGS(p.n, 0));
     num_p num_aux_2 = num_create_dirty(CLU_ARGS(2 * p.n, 0));
@@ -5899,7 +5916,9 @@ num_p num_sqr_ssm(num_p num, uint64_t threads)
     num_ssm_fft_inv(num_aux_2, num_fft, &p, threads);
     num_free(num_aux_2);
 
-    return num_ssm_depad_no_wrap(num_fft, &p, threads);
+    num_p num_res = num_ssm_depad_no_wrap(num_fft, &p, threads);
+    ssm_product_count_check(num_res, count_max, tops);
+    return num_res;
 }
 
 // Returns quotient
