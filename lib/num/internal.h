@@ -1,6 +1,8 @@
 #ifndef NUM_INTERNAL_H
 #define NUM_INTERNAL_H
 
+#include <stdio.h>
+
 #include "header.h"
 #include "../../mods/clu/header.h"
 
@@ -12,10 +14,13 @@ void num_head_trim(num_p num, uint64_t count);
 void num_break(num_p *out_num_hi, num_p *out_num_lo, num_p num, uint64_t count);
 
 void num_dec_dump(
+    FILE *fp,
     const uint64_t chunk[],
     uint64_t count,
     uint64_t zeros,
+    uint64_t digits,
     uint64_t threads
 );
+void num_dec_write(FILE *fp, num_p num, uint64_t threads);
 
 #endif
