@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "debug.h"
 #include "../../mods/clu/header.h"
@@ -10,6 +11,7 @@
 #include "../sig/header.h"
 #include "../sig/internal.h"
 #include "../num/header.h"
+#include "../num/internal.h"
 #include "../num/struct.h"
 #include "header.h"
 
@@ -166,6 +168,21 @@ void flt_num_display_full(flt_num_t flt)
     printf(" | exponent: " D64P() "", flt.exponent);
 }
 
+// top SIZE limbs of FLT, without copying the rest
+static flt_num_t flt_num_copy_top(flt_num_t flt, uint64_t size)
+{
+    uint64_t count = flt.sig.num->count;
+    if(count <= size)
+    {
+        return flt_num_set_size(flt_num_copy(flt), size);
+    }
+
+    num_p num = num_create(CLU_ARGS(size, size));
+    memcpy(num->chunk, &flt.sig.num->chunk[count - size], size * sizeof(uint64_t));
+    sig_num_t sig = sig_num_create(flt.sig.signal, num);
+    return flt_num_create(int64_add(flt.exponent, (int64_t)(count - size)), size, sig);
+}
+
 static void flt_num_display_dec_core(FILE *fp, flt_num_t flt_0, uint64_t threads)
 {
     if(flt_num_is_zero(flt_0))
@@ -174,8 +191,7 @@ static void flt_num_display_dec_core(FILE *fp, flt_num_t flt_0, uint64_t threads
         return;
     }
 
-    flt_num_t flt_1 = flt_num_copy(flt_0);
-    flt_1 = flt_num_set_size(flt_1, 2);
+    flt_num_t flt_1 = flt_num_copy_top(flt_0, 2);
 
     uint64_t signal = flt_1.sig.signal;
     flt_1.sig.signal = POSITIVE;
@@ -247,6 +263,7 @@ static void flt_num_display_dec_core(FILE *fp, flt_num_t flt_0, uint64_t threads
         base += add;
     }
     flt_num_free(flt_ten);
+    flt_num_free(flt_1);
 
     flt_num_free(flt_base);
     if(base != 0)
@@ -267,6 +284,11 @@ static void flt_num_display_dec_core(FILE *fp, flt_num_t flt_0, uint64_t threads
     };
     fxd_num_display_dec_core(fp, fxd, threads, false);
     fprintf(fp, " * 10 ^ " D64P() "", base);
+
+    if(base != 0)
+    {
+        flt_num_free(flt_0);
+    }
 }
 
 void flt_num_display_dec(flt_num_t flt) // TODO TEST
