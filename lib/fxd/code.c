@@ -8,6 +8,7 @@
 #include "../../mods/macros/uint.h"
 
 #include "../file/header.h"
+#include "internal.h"
 #include "../num/header.h"
 #include "../num/internal.h"
 #include "../num/struct.h"
@@ -130,7 +131,7 @@ static uint64_t fxd_dec_digits(uint64_t pos)
 
 // BARE writes only the digits: no sign, no point, and only the fraction
 // digits fxd_dec_digits vouches for
-static void fxd_num_display_dec_core(FILE *fp, fxd_num_t fxd, uint64_t threads, bool bare)
+void fxd_num_display_dec_core(FILE *fp, fxd_num_t fxd, uint64_t threads, bool bare)
 {
     if(!bare)
     {

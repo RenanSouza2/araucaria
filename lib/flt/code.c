@@ -6,6 +6,7 @@
 #include "../../mods/macros/assert.h" // IWYU pragma: keep
 
 #include "../file/header.h"
+#include "../fxd/internal.h"
 #include "../sig/header.h"
 #include "../sig/internal.h"
 #include "../num/header.h"
@@ -165,11 +166,11 @@ void flt_num_display_full(flt_num_t flt)
     printf(" | exponent: " D64P() "", flt.exponent);
 }
 
-static void flt_num_display_dec_core(flt_num_t flt_0, uint64_t threads)
+static void flt_num_display_dec_core(FILE *fp, flt_num_t flt_0, uint64_t threads)
 {
     if(flt_num_is_zero(flt_0))
     {
-        printf("0");
+        fprintf(fp, "0");
         return;
     }
 
@@ -264,15 +265,15 @@ static void flt_num_display_dec_core(flt_num_t flt_0, uint64_t threads)
             .num = flt_0.sig.num
         }
     };
-    fxd_num_display_dec_threads(fxd, threads);
-    printf(" * 10 ^ " D64P() "", base);
+    fxd_num_display_dec_core(fp, fxd, threads, false);
+    fprintf(fp, " * 10 ^ " D64P() "", base);
 }
 
 void flt_num_display_dec(flt_num_t flt) // TODO TEST
 {
     CLU_FLT_IS_SAFE(flt);
 
-    flt_num_display_dec_core(flt, 1);
+    flt_num_display_dec_core(stdout, flt, 1);
 }
 
 void flt_num_display_dec_threads(flt_num_t flt, uint64_t threads) // TODO TEST
@@ -280,7 +281,16 @@ void flt_num_display_dec_threads(flt_num_t flt, uint64_t threads) // TODO TEST
     CLU_FLT_IS_SAFE(flt);
     assert(threads);
 
-    flt_num_display_dec_core(flt, threads);
+    flt_num_display_dec_core(stdout, flt, threads);
+}
+
+void flt_num_write_dec_threads(FILE *fp, flt_num_t flt, uint64_t threads) // TODO TEST
+{
+    CLU_FLT_IS_SAFE(flt);
+    assert(fp);
+    assert(threads);
+
+    flt_num_display_dec_core(fp, flt, threads);
 }
 
 
