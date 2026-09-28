@@ -277,7 +277,7 @@ void file_write_sig_num_raw(file_p fp, sig_num_t sig)
 {
     file_write_uint64(fp, sig.signal);
     file_write_uint64(fp, sig.num->count);
-    fwrite(sig.num->chunk, sizeof(uint64_t), sig.num->count, fp->fp);
+    assert(fwrite(sig.num->chunk, sizeof(uint64_t), sig.num->count, fp->fp) == sig.num->count);
 }
 
 void file_write_sig_num(file_p fp, sig_num_t sig)
