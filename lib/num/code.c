@@ -309,18 +309,47 @@ static void * num_dec_worker(void * arg)
     return nullptr;
 }
 
+static void dec_write(FILE *fp, const char out[], uint64_t bytes, uint64_t *left)
+{
+    if(bytes > *left)
+    {
+        bytes = *left;
+    }
+    fwrite(out, 1, bytes, fp);
+    *left -= bytes;
+}
+
 // Writes COUNT base 1e18 limbs, highest index first, as zero padded fields,
-// after ZEROS all zero ones. One write per chunk, its fields at fixed offsets
+// after ZEROS all zero ones, stopping after DIGITS characters. One write per
+// chunk, its fields at fixed offsets
 void num_dec_dump(
+    FILE *fp,
     const uint64_t chunk[],
     uint64_t count,
     uint64_t zeros,
+    uint64_t digits,
     uint64_t threads
 )
 {
     assert(threads);
 
     uint64_t total = zeros + count;
+    uint64_t fields_need = digits / dec_digits_per_limb + (digits % dec_digits_per_limb != 0);
+    if(total > fields_need)
+    {
+        if(zeros >= fields_need)
+        {
+            zeros = fields_need;
+            count = 0;
+        }
+        else
+        {
+            chunk += count - (fields_need - zeros);
+            count = fields_need - zeros;
+        }
+        total = fields_need;
+    }
+
     if(total == 0)
     {
         return;
@@ -339,7 +368,7 @@ void num_dec_dump(
     {
         uint64_t fields = left < fields_max ? left : fields_max;
         memset(out, '0', fields * dec_digits_per_limb);
-        fwrite(out, 1, fields * dec_digits_per_limb, stdout);
+        dec_write(fp, out, fields * dec_digits_per_limb, &digits);
         left -= fields;
     }
 
@@ -378,7 +407,7 @@ void num_dec_dump(
             TREAT(pthread_join(worker_ids[w], nullptr))
         }
 
-        fwrite(out, 1, fields * dec_digits_per_limb, stdout);
+        dec_write(fp, out, fields * dec_digits_per_limb, &digits);
     }
 
     free(worker_args);
@@ -386,18 +415,18 @@ void num_dec_dump(
     free(out);
 }
 
-static void num_display_dec_core(num_p num, uint64_t threads)
+void num_dec_write(FILE *fp, num_p num, uint64_t threads)
 {
     if(num->count == 0)
     {
-        printf("0");
+        fprintf(fp, "0");
         return;
     }
 
     constexpr uint64_t base = 1'000'000'000'000'000'000;
     num = num_base_to_threads(num_copy(num), base, threads);
-    printf(U64P(), num->chunk[num->count-1]);
-    num_dec_dump(num->chunk, num->count - 1, 0, threads);
+    fprintf(fp, U64P(), num->chunk[num->count-1]);
+    num_dec_dump(fp, num->chunk, num->count - 1, 0, UINT64_MAX, threads);
 
     num_free(num);
 }
@@ -407,7 +436,7 @@ void num_display_dec(num_p num)
     CLU_HANDLER_IS_SAFE(num);
     assert(num);
 
-    num_display_dec_core(num, 1);
+    num_dec_write(stdout, num, 1);
 }
 
 void num_display_dec_threads(num_p num, uint64_t threads)
@@ -416,7 +445,7 @@ void num_display_dec_threads(num_p num, uint64_t threads)
     assert(num);
     assert(threads);
 
-    num_display_dec_core(num, threads);
+    num_dec_write(stdout, num, threads);
 }
 
 void num_display_opts(num_p num, const char tag[], bool length, bool full)
