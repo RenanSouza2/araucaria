@@ -43,7 +43,12 @@ allocation strategy: `test_1_ram` (heap only), `test_2_disk`
 (`disk_threshold_bytes = 0`, everything on disk), `test_3_mist`
 (`disk_threshold_bytes = 8192`, mixed) and `test_4_stage` (mist plus
 `ram_budget_bytes = 8 MiB`, so disk-backed transforms run staged and fused).
-`test_4_stage` is the only suite that reaches the staged path.
+`test_4_stage` is the only suite that reaches the staged path. After the shared
+cases, which stop at 6 threads, it raises the budget to 32 MiB and runs cases
+of its own at 12 and 16 threads (`test_fuzz_num_ssm_stage_wide`): a worker's
+share has to stay above 1 MiB for its transform to stage. Their operands are
+too long for the classic multiply as an oracle, so the product is checked by
+its residue mod 2^64 - 59.
 
 Fuzz cases derive their RNG seed from the case tag, so a failure is
 reproducible by rerunning the runner binary directly with the seed it
