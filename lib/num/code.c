@@ -1,3 +1,4 @@
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -3111,6 +3112,19 @@ static void ssm_stage_free(num_p num)
     free(num);
 }
 
+// Next block of a pass: off the counter the workers share when there is one, off
+// the worker's own range otherwise. False once the pass has none left
+static bool ssm_pass_take(
+    _Atomic uint64_t * idx_next,
+    uint64_t * idx_own,
+    uint64_t idx_end,
+    uint64_t * out_idx
+)
+{
+    *out_idx = idx_next ? atomic_fetch_add(idx_next, 1) : (*idx_own)++;
+    return (bool)(*out_idx < idx_end);
+}
+
 // Element b of a fused block sits at (pos + step*x)*n in the array and at b*n in
 // the stage. With step*gl == 1 the block is one contiguous run and moves in a
 // single transfer.
@@ -3376,7 +3390,8 @@ static void * ssm_fft_fwd_split_worker(void * arg)
     return nullptr;
 }
 
-// idx numbers the K >> r blocks of one pass as (c, a) flattened c*gl + a.
+// idx numbers the K >> r blocks of one pass as (c, a) flattened c*gl + a. A staged
+// pass hands them out through idx_next; any other gives each worker its own range.
 typedef struct
 {
     num_p num_aux;
@@ -3392,6 +3407,7 @@ typedef struct
     ssm_fft_fwd_pad_t * pad;
     bool first;
     num_p num_stage;
+    _Atomic uint64_t * idx_next;
     uint64_t idx_start;
     uint64_t idx_end;
 } ssm_fft_fwd_pass_worker_t;
@@ -3400,7 +3416,8 @@ static void * ssm_fft_fwd_pass_worker(void * arg)
 {
     ssm_fft_fwd_pass_worker_t * w = arg;
 
-    for(uint64_t idx = w->idx_start; idx < w->idx_end; idx++)
+    uint64_t idx;
+    while(ssm_pass_take(w->idx_next, &w->idx_start, w->idx_end, &idx))
     {
         uint64_t a = idx % w->gl;
         uint64_t c = idx / w->gl;
@@ -3561,6 +3578,7 @@ static void num_ssm_fft_fwd_rec(
     // a staged pass keeps at least split blocks, one per worker
     uint64_t r_cap = (uint64_t)stdc_bit_width(K / split) - 1;
     bool first = staged;
+    _Atomic uint64_t idx_next;
 
     while(stages_left)
     {
@@ -3573,10 +3591,15 @@ static void num_ssm_fft_fwd_rec(
         uint64_t blocks = K >> r;
         uint64_t pass_workers = workers < blocks ? workers : blocks;
 
+        atomic_store(&idx_next, 0);
         for(uint64_t w=0; w<pass_workers; w++)
         {
-            uint64_t idx_start, idx_end;
-            ssm_worker_range(w, pass_workers, blocks, &idx_start, &idx_end);
+            uint64_t idx_start = 0;
+            uint64_t idx_end = blocks;
+            if(!staged)
+            {
+                ssm_worker_range(w, pass_workers, blocks, &idx_start, &idx_end);
+            }
 
             worker_args[w] = (ssm_fft_fwd_pass_worker_t)
             {
@@ -3593,6 +3616,7 @@ static void num_ssm_fft_fwd_rec(
                 .pad = first ? pad : nullptr,
                 .first = first,
                 .num_stage = worker_stage[w],
+                .idx_next = staged ? &idx_next : nullptr,
                 .idx_start = idx_start,
                 .idx_end = idx_end,
             };
@@ -4038,7 +4062,8 @@ static void * ssm_fft_inv_split_worker(void * arg)
     return nullptr;
 }
 
-// idx numbers the k >> r blocks of one pass as (c, a) flattened c*gl + a.
+// idx numbers the k >> r blocks of one pass as (c, a) flattened c*gl + a, handed
+// out as in the forward pass.
 typedef struct
 {
     num_p num_aux;
@@ -4055,6 +4080,7 @@ typedef struct
     bool postloop;
     ssm_fft_inv_pointwise_t * pw;
     num_p num_stage;
+    _Atomic uint64_t * idx_next;
     uint64_t idx_start;
     uint64_t idx_end;
 } ssm_fft_inv_pass_worker_t;
@@ -4067,7 +4093,8 @@ static void * ssm_fft_inv_pass_worker(void * arg)
     // stays on the mapping
     num_p num_stage = (w->pw && !w->pw->p_next) ? nullptr : w->num_stage;
 
-    for(uint64_t idx = w->idx_start; idx < w->idx_end; idx++)
+    uint64_t idx;
+    while(ssm_pass_take(w->idx_next, &w->idx_start, w->idx_end, &idx))
     {
         uint64_t a = idx % w->gl;
         uint64_t c = idx / w->gl;
@@ -4264,6 +4291,7 @@ static void num_ssm_fft_inv_rec(
     // a staged pass keeps at least split blocks, one per worker
     uint64_t r_cap = (uint64_t)stdc_bit_width(k / split) - 1;
     bool first = staged;
+    _Atomic uint64_t idx_next;
 
     while(stages_left)
     {
@@ -4275,10 +4303,15 @@ static void num_ssm_fft_inv_rec(
         uint64_t blocks = k >> r;
         uint64_t pass_workers = workers < blocks ? workers : blocks;
 
+        atomic_store(&idx_next, 0);
         for(uint64_t w=0; w<pass_workers; w++)
         {
-            uint64_t idx_start, idx_end;
-            ssm_worker_range(w, pass_workers, blocks, &idx_start, &idx_end);
+            uint64_t idx_start = 0;
+            uint64_t idx_end = blocks;
+            if(!staged)
+            {
+                ssm_worker_range(w, pass_workers, blocks, &idx_start, &idx_end);
+            }
 
             worker_args[w] = (ssm_fft_inv_pass_worker_t)
             {
@@ -4296,6 +4329,7 @@ static void num_ssm_fft_inv_rec(
                 .postloop = (stages_left == r),
                 .pw = (first && worker_pw) ? &worker_pw[w] : nullptr,
                 .num_stage = worker_stage[w],
+                .idx_next = staged ? &idx_next : nullptr,
                 .idx_start = idx_start,
                 .idx_end = idx_end,
             };
