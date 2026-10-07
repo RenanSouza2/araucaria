@@ -3244,7 +3244,11 @@ static void ssm_fft_fwd_pad_block(
             copy = pad->tail;
         }
 
-        if(copy)
+        if(copy && num_stage && pad->num->is_mmap)
+        {
+            num_block_read(dest, pad->num, pad->M * x, copy);
+        }
+        else if(copy)
         {
             memcpy(dest, &src[pad->M * x], copy * sizeof(uint64_t));
         }
