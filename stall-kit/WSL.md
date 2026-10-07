@@ -17,18 +17,19 @@ be found and then fixed in `lib/num/code.c`, on these terms:
 Everything so far was done on a MacBook Air M2 (8 cores, 8 GB RAM, APFS on the
 internal NVMe), which reproduces stalls of its own but is not the machine the
 complaint is about. **This branch has never run on this box, on WSL, or on
-x86-64 at more than 6 threads or beyond the size of a unit test.** Its only
-contact with Linux is CI, which builds it with GCC and passes the test suite on
-Ubuntu x86-64 (see step 1). Of its code, only the three commits it brings back
-have run on this box, in September.
+x86-64 beyond the size of a unit test.** Its only contact with Linux is CI,
+which builds it with GCC and passes the test suite on Ubuntu x86-64 (see step
+1). Of its code, only the three commits it brings back have run on this box, in
+September.
 
 ## What is on this branch
 
-`stall-fixes` is `omg` at `ae5e242` plus seven commits. Each message carries its
-own measurements:
+`stall-followup` is `omg` at `ae5e242` plus nine commits: the seven of
+`stall-fixes`, then a test and this file's update. Each message carries its own
+measurements:
 
 ```bash
-git log --reverse ae5e242..stall-fixes
+git log --reverse ae5e242..stall-followup
 ```
 
 | # | Commit | Why |
@@ -40,11 +41,13 @@ git log --reverse ae5e242..stall-fixes
 | 5 | Staged pass workers take blocks off a shared counter | With fixed shares one slow worker idled the rest |
 | 6 | The squaring kernel zeroes only the limbs it writes | It zeroed the whole scratch buffer on every call |
 | 7 | This directory | |
+| 8 | Products at 12 and 16 threads in the stage test runner | Nothing in `make test` staged a transform with more than 6 threads |
+| 9 | This file brought up to date | |
 
 Mac results, 8 threads, threshold 1024 MB, budget 2048 MB, AC power, low power
 mode off, every product checked. Operands of 2^28, 2^30 and 3 x 2^30 limbs:
 
-| Test | `ae5e242` | `stall-fixes` |
+| Test | `ae5e242` | this branch |
 | --- | --- | --- |
 | 2 GB x 2 GB | 162 s | 100-103 s |
 | 8 GB x 8 GB | 751 s | 457 s |
@@ -56,6 +59,20 @@ Share of the threads' time spent neither on a CPU nor inside `pread`/`pwrite`:
 14%, 21% and 20% before, 1% after. What is left on the Mac is the device itself
 (strided passes at 0.7-1.0 GB/s each way with every thread inside a read or a
 write) and one CPU-bound pass, the pointwise multiply.
+
+Two commits whose messages say they were not timed apart were timed later, at
+8 GB, one run each, back to back. The machine was warm by then (the tip squared
+8 GB in 346 s, against 301 s in the table), so these compare with each other
+only:
+
+| Commit | Without it | With it | Page-ins |
+| --- | --- | --- | --- |
+| 2, the pad read (8 GB x 8 GB) | 519 s | 516 s | 1,058,250 to 265 |
+| 4, the fused square (8 GB squared, commit 6 in both) | 676 s | 346 s | 2,130,087 to 128 |
+
+So the pad read does not change the total on the Mac; it only stops the operand
+coming in by page faults. A likely reason, not checked: that pass waits on the
+device whichever way the operand is read.
 
 ## What is not known
 
@@ -82,9 +99,11 @@ In order of how much it matters:
    with the x86-64 assembly and without. That includes commit 6 through the
    assembly of `num_sqr_classic_buffer`, which the Mac could only read. So step
    1 should pass, and a failure there would be about this box.
-3. **Whether the staged path is right at 16 threads on x86-64.** Neither CI nor
-   `make test` goes past 6 threads staged; pinhao runs 16. *Small products
-   first* in step 3 is the first check of it.
+3. **Whether the staged path is right at 16 threads on this box.** Until commit
+   8 nothing in `make test` staged a transform with more than 6 threads, and
+   pinhao runs 16. Commit 8 adds products at 12 and 16 threads to the stage
+   runner, 131K to 400K limbs, and CI passes them on x86-64. *Small products
+   first* in step 3 goes to 30M limbs and more budgets.
 4. **Whether any of it is faster here.** In the same September runs the three
    commits were no faster on this box: 5780 s for af08b71, 6143-6579 s with
    them, and the depad took 345-460 s staged or not.
@@ -110,7 +129,7 @@ In order of how much it matters:
 Work in a clone of its own, so pinhao's `mods/araucaria` stays as it is:
 
 ```bash
-git clone -b stall-fixes --recurse-submodules \
+git clone -b stall-followup --recurse-submodules \
     https://github.com/RenanSouza2/araucaria.git ~/araucaria-stall
 cd ~/araucaria-stall
 cat > ~/stall-env.sh <<'END'
@@ -151,11 +170,11 @@ guest has already been told succeeded.
 make clean && make build && make dbg && make test && make lint
 ```
 
-All of it must pass. `make test` takes 14 minutes on the Mac and 6 to 10 in
+All of it must pass. `make test` takes 15 minutes on the Mac and 5 to 10 in
 CI, which runs these same targets on every push (`.github/workflows/test.yml`):
-on Ubuntu x86-64 with GCC, the six code commits of this branch build and pass,
-assembly and portable. CI's macOS test jobs run into their 45-minute limit, on
-`omg` as well; that is not a failure of the branch.
+on Ubuntu x86-64 with GCC, the first eight commits of this branch build and
+pass, assembly and portable. CI's macOS test jobs run into their 45-minute
+limit, on `omg` as well; that is not a failure of the branch.
 
 - A GCC warning that stops the build means this box's GCC differs from CI's:
   note both versions, fix it in the smallest way, keep the change as a diff to
@@ -163,10 +182,12 @@ assembly and portable. CI's macOS test jobs run into their 45-minute limit, on
 - A failing test: note the runner (`ram`, `disk`, `mist`, `stage`), the case and
   the seed it printed, then stop. A squaring case points at commit 6.
 - Every commit builds and passes `make test` on the Mac, so a bisect is
-  meaningful: `git bisect start stall-fixes ae5e242`, then
-  `git bisect run make test -C lib/num`.
-- Passing is not the whole answer for this box: the suite stages a transform
-  with 6 threads at most, and pinhao runs 16. Step 3 covers that.
+  meaningful: `git bisect start stall-followup ae5e242`, then
+  `git bisect run make test -C lib/num`. The 12- and 16-thread cases exist
+  from commit 8 on, so a bisect over the first seven does not run them.
+- The stage runner's last cases, `test_fuzz_num_ssm_stage_wide`, are the ones
+  at 12 and 16 threads. If they are what fails here, that is *A wrong product*
+  below, on a product small enough to repeat in a minute.
 
 ## Step 2: what the scratch volume does
 
@@ -401,9 +422,10 @@ What the Mac could not test, each with what would show it:
 - **The VHDX.** Blocks the file never had may cost more than rewrites: step 2's
   first `w` against its second. And a host drive that fills up loses writes,
   which would also explain the wrong products: `dmesg` and `PROBE_IOVERIFY`.
-- **16 workers.** Nothing in `make test` stages a transform with more than 6
-  threads. On the Mac 12 to 32 threads give right products; on x86-64 that is
-  what *Small products first* is for.
+- **16 workers.** Until commit 8 nothing in `make test` staged a transform with
+  more than 6 threads. On the Mac 12 to 32 threads give right products, and CI
+  passes the new 12- and 16-thread cases on x86-64; *Small products first*
+  takes it further on this box.
 
 ## What to report
 
