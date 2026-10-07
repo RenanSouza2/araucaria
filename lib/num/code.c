@@ -1663,6 +1663,7 @@ num_p num_mul_classic(num_p num_1, num_p num_2)
     return num_normalize(num_res);
 }
 
+// writes the 2 * num->count limbs of the square and no other limb of NUM_RES
 static void num_sqr_classic_buffer(num_p num_res, num_p num)
 {
     CLU_HANDLER_IS_SAFE(num_res)
@@ -1675,7 +1676,7 @@ static void num_sqr_classic_buffer(num_p num_res, num_p num)
     uint64_t * restrict dest = num_res->chunk;
     const uint64_t * restrict src = num->chunk;
 
-    memset(dest, 0, num_res->size * sizeof(uint64_t));
+    memset(dest, 0, 2 * count * sizeof(uint64_t));
     num_res->count = 2 * count;
 
     if(count == 0)
@@ -5978,6 +5979,10 @@ static void num_ssm_sqr_mod_span(num_p num_aux, num_p num, uint64_t pos, uint64_
     num_span(&num_aux_piece, num, pos, pos + n);
 
     num_sqr_classic_buffer(num_aux, &num_aux_piece);
+
+    // the reduction reads 2 * n limbs, past the square of a shorter piece
+    uint64_t filled = 2 * num_aux_piece.count;
+    memset(&num_aux->chunk[filled], 0, ((2 * n) - filled) * sizeof(uint64_t));
 
     memmove(&num_aux->chunk[n], &num_aux->chunk[n-1], n * sizeof(uint64_t));
     num_aux->chunk[n-1] = 0;
