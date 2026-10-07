@@ -981,6 +981,9 @@ static off_t num_file_offset(uint64_t pos)
     return (off_t)(sizeof(num_t) + (pos * sizeof(uint64_t)));
 }
 
+// bytes one pread or pwrite is asked for; macOS fails a request past INT_MAX
+constexpr uint64_t block_io_max_bytes = U64(1) << 30;
+
 static void num_block_read(uint64_t * dest, num_p num, uint64_t pos, uint64_t limbs)
 {
     assert(num->fd >= 0);
@@ -991,7 +994,8 @@ static void num_block_read(uint64_t * dest, num_p num, uint64_t pos, uint64_t li
     char * dst = (char *)dest;
     while(left)
     {
-        ssize_t got = pread(num->fd, dst, left, off);
+        uint64_t part = left < block_io_max_bytes ? left : block_io_max_bytes;
+        ssize_t got = pread(num->fd, dst, part, off);
         assert(got > 0);
         left -= (uint64_t)got;
         dst += got;
@@ -1009,7 +1013,8 @@ static void num_block_write(num_p num, uint64_t pos, const uint64_t * src, uint6
     const char * s = (const char *)src;
     while(left)
     {
-        ssize_t put = pwrite(num->fd, s, left, off);
+        uint64_t part = left < block_io_max_bytes ? left : block_io_max_bytes;
+        ssize_t put = pwrite(num->fd, s, part, off);
         assert(put > 0);
         left -= (uint64_t)put;
         s += put;
