@@ -3773,9 +3773,22 @@ static void num_ssm_mul_wrap_at(
     ssm_params_p p
 );
 
+static void num_ssm_sqr_mod_span(num_p num_aux, num_p num, uint64_t pos, uint64_t n);
+
+static void num_ssm_sqr_wrap(
+    num_p num_aux_1,
+    num_p num_aux_2,
+    num_p num_fft,
+    num_p num,
+    uint64_t pos,
+    ssm_params_p p
+);
+
 typedef struct
 {
     num_p num_fft_2;
+    // the array is its own second operand
+    bool sqr;
     ssm_params_p p_next;
     num_p num_aux_1;
     num_p num_fft_1_next;
@@ -3786,6 +3799,7 @@ typedef struct
 
 static ssm_fft_inv_pointwise_t ssm_fft_inv_pointwise_create(
     num_p num_fft_2,
+    bool sqr,
     ssm_params_p p_next,
     uint64_t n
 )
@@ -3797,17 +3811,19 @@ static ssm_fft_inv_pointwise_t ssm_fft_inv_pointwise_create(
 
     if(!p_next)
     {
-        return (ssm_fft_inv_pointwise_t){ .num_fft_2 = num_fft_2 };
+        return (ssm_fft_inv_pointwise_t){ .num_fft_2 = num_fft_2, .sqr = sqr };
     }
 
+    bool elem = !sqr && num_fft_2->is_mmap;
     return (ssm_fft_inv_pointwise_t)
     {
         .num_fft_2 = num_fft_2,
+        .sqr = sqr,
         .p_next = p_next,
         .num_aux_1 = num_create_dirty(CLU_ARGS(n, 0)),
         .num_fft_1_next = num_create_dirty(CLU_ARGS(p_next->n * p_next->K, 0)),
-        .num_fft_2_next = num_create_dirty(CLU_ARGS(p_next->n * p_next->K, 0)),
-        .num_elem_2 = num_fft_2->is_mmap ? num_create_dirty(CLU_ARGS(n, 0)) : nullptr,
+        .num_fft_2_next = sqr ? nullptr : num_create_dirty(CLU_ARGS(p_next->n * p_next->K, 0)),
+        .num_elem_2 = elem ? num_create_dirty(CLU_ARGS(n, 0)) : nullptr,
     };
 }
 
@@ -3820,7 +3836,10 @@ static void ssm_fft_inv_pointwise_free(ssm_fft_inv_pointwise_t * pw)
 
     num_free(pw->num_aux_1);
     num_free(pw->num_fft_1_next);
-    num_free(pw->num_fft_2_next);
+    if(pw->num_fft_2_next)
+    {
+        num_free(pw->num_fft_2_next);
+    }
     if(pw->num_elem_2)
     {
         num_free(pw->num_elem_2);
@@ -3850,6 +3869,21 @@ static void ssm_fft_inv_pointwise_block(
         uint64_t x = base + (gl * b);
         uint64_t pos_x = (pos + x) * n;
 
+        if(num_stage && pw->sqr)
+        {
+            assert(pw->p_next)
+
+            num_ssm_sqr_wrap(
+                pw->num_aux_1,
+                num_aux,
+                pw->num_fft_1_next,
+                num_stage,
+                b * n,
+                pw->p_next
+            );
+            continue;
+        }
+
         if(num_stage)
         {
             assert(pw->p_next)
@@ -3877,6 +3911,19 @@ static void ssm_fft_inv_pointwise_block(
             continue;
         }
 
+        if(pw->p_next && pw->sqr)
+        {
+            num_ssm_sqr_wrap(
+                pw->num_aux_1,
+                num_aux,
+                pw->num_fft_1_next,
+                num,
+                pos_x,
+                pw->p_next
+            );
+            continue;
+        }
+
         if(pw->p_next)
         {
             // NOLINTNEXTLINE(readability-suspicious-call-argument)
@@ -3890,6 +3937,12 @@ static void ssm_fft_inv_pointwise_block(
                 pos_x,
                 pw->p_next
             );
+            continue;
+        }
+
+        if(pw->sqr)
+        {
+            num_ssm_sqr_mod_span(num_aux, num, pos_x, n);
             continue;
         }
 
@@ -4057,8 +4110,8 @@ static void * ssm_fft_inv_pass_worker(void * arg)
 }
 
 // num_aux->size >= 2 * n
-// num_fft_2 non-null fuses the convolution's pointwise multiply into the first pass
-// (see ssm_fft_inv_pointwise_block).
+// num_fft_2 non-null fuses the convolution's pointwise multiply into the first pass,
+// a square when it is num itself (see ssm_fft_inv_pointwise_block).
 static void num_ssm_fft_inv_rec(
     num_p num_aux,
     num_p num,
@@ -4082,6 +4135,7 @@ static void num_ssm_fft_inv_rec(
 
     ssm_params_t p_next;
     bool pw_recursive = false;
+    bool sqr = num_fft_2 == num;
     if(num_fft_2)
     {
         pw_recursive = ssm_is_recursive(n);
@@ -4097,7 +4151,7 @@ static void num_ssm_fft_inv_rec(
 
     if(workers <= 1)
     {
-        ssm_fft_inv_pointwise_t pw = ssm_fft_inv_pointwise_create(num_fft_2, pw_recursive ? &p_next : nullptr, n);
+        ssm_fft_inv_pointwise_t pw = ssm_fft_inv_pointwise_create(num_fft_2, sqr, pw_recursive ? &p_next : nullptr, n);
         num_p num_stage = stage_limbs ? ssm_stage_create(stage_limbs) : nullptr;
 
         ssm_fft_inv_split_worker_t serial =
@@ -4152,7 +4206,7 @@ static void num_ssm_fft_inv_rec(
         assert(worker_pw)
         for(uint64_t w=0; w<pw_count; w++)
         {
-            worker_pw[w] = ssm_fft_inv_pointwise_create(num_fft_2, pw_recursive ? &p_next : nullptr, n);
+            worker_pw[w] = ssm_fft_inv_pointwise_create(num_fft_2, sqr, pw_recursive ? &p_next : nullptr, n);
         }
     }
 
@@ -4165,7 +4219,7 @@ static void num_ssm_fft_inv_rec(
 
         for(uint64_t w=0; w<split; w++)
         {
-            split_pw[w] = ssm_fft_inv_pointwise_create(num_fft_2, pw_recursive ? &p_next : nullptr, n);
+            split_pw[w] = ssm_fft_inv_pointwise_create(num_fft_2, sqr, pw_recursive ? &p_next : nullptr, n);
 
             split_args[w] = (ssm_fft_inv_split_worker_t)
             {
@@ -4291,7 +4345,8 @@ void num_ssm_fft_inv(num_p num_aux, num_p num_fft, ssm_params_p p, uint64_t thre
 }
 
 // num_ssm_fft_inv with the convolution's pointwise multiply against num_fft_2 folded
-// into its first pass. num_fft_2 is only read, and is left untouched.
+// into its first pass. num_fft_2 is only read, and is left untouched; num_fft itself
+// as num_fft_2 squares it.
 // num_aux->size >= 2 * p->n
 static void num_ssm_fft_inv_pointwise(
     num_p num_aux,
@@ -6112,14 +6167,10 @@ num_p num_sqr_ssm(num_p num, uint64_t threads)
     bool tops = num->count && num->chunk[num->count - 1];
 
     ssm_params_t p = ssm_get_params(2 * num->count);
-    num_p num_aux_1 = num_create_dirty(CLU_ARGS(p.n, 0));
     num_p num_aux_2 = num_create_dirty(CLU_ARGS(2 * p.n, 0));
     num_p num_fft = num_ssm_prepare_no_wrap(num_aux_2, num, &p, true, threads);
 
-    num_ssm_sqr_pointwise(num_aux_1, num_aux_2, num_fft, &p, threads);
-    num_free(num_aux_1);
-
-    num_ssm_fft_inv(num_aux_2, num_fft, &p, threads);
+    num_ssm_fft_inv_pointwise(num_aux_2, num_fft, num_fft, &p, threads);
     num_free(num_aux_2);
 
     num_p num_res = num_ssm_depad_no_wrap(num_fft, &p, threads);
