@@ -1,0 +1,337 @@
+diff --git a/lib/num/code.c b/lib/num/code.c
+index 4a047bf..5156b51 100644
+--- a/lib/num/code.c
++++ b/lib/num/code.c
+@@ -1,3 +1,4 @@
++#include <fcntl.h>
+ #include <stdatomic.h>
+ #include <stdint.h>
+ #include <stdio.h>
+@@ -3088,9 +3089,48 @@ static uint64_t ssm_fft_stage_limbs(num_p num_fft, uint64_t budget)
+     return budget / sizeof(uint64_t);
+ }
+ 
+-static num_p ssm_stage_create(uint64_t limbs)
++// A direct array keeps element x at limb ssm_direct_base + x*stride, the stride
++// being the element rounded up to whole pages: each element starts a page of the
++// backing file, and a transfer of stride limbs covers whole pages.
++constexpr uint64_t ssm_direct_page_limbs = 2048;
++constexpr uint64_t ssm_direct_base = ssm_direct_page_limbs - (sizeof(num_t) / sizeof(uint64_t));
++
++static uint64_t ssm_direct_stride(uint64_t n)
++{
++    return ((n + ssm_direct_page_limbs - 1) / ssm_direct_page_limbs) * ssm_direct_page_limbs;
++}
++
++// limbs a worker's stage keeps for the page aligned buffer its transfers go through
++static uint64_t ssm_direct_bounce(num_p num_fft, uint64_t n)
++{
++    return num_fft->is_direct ? ssm_direct_stride(n) : 0;
++}
++
++static uint64_t * ssm_page_align(uint64_t * limbs)
++{
++    uintptr_t page = ssm_direct_page_limbs * sizeof(uint64_t);
++    return (uint64_t *)((((uintptr_t)limbs + page) - 1) / page * page);
++}
++
++// transfers on the backing file bypass the page cache from here on
++static void num_set_direct(num_p num)
+ {
+-    num_p num = malloc(sizeof(num_t) + (limbs * sizeof(uint64_t)));
++#if defined(F_NOCACHE)
++    int res = fcntl(num->fd, F_NOCACHE, 1);
++#elif defined(O_DIRECT)
++    int res = fcntl(num->fd, F_SETFL, fcntl(num->fd, F_GETFL) | O_DIRECT);
++#else
++    int res = 0;
++#endif
++    assert(res != -1);
++    num->is_direct = true;
++}
++
++// bounce > 0 leaves room past the stage for one page aligned element of that size
++static num_p ssm_stage_create(uint64_t limbs, uint64_t bounce)
++{
++    uint64_t extra = bounce ? bounce + ssm_direct_page_limbs : 0;
++    num_p num = malloc(sizeof(num_t) + ((limbs + extra) * sizeof(uint64_t)));
+     assert(num);
+ 
+     *num = (num_t)
+@@ -3113,6 +3153,39 @@ static void ssm_stage_free(num_p num)
+     free(num);
+ }
+ 
++static uint64_t * ssm_stage_bounce(num_p num_stage)
++{
++    return ssm_page_align(&num_stage->chunk[num_stage->size]);
++}
++
++// Element x of a disk backed transform array into dest. bounce is the page aligned
++// buffer a direct array needs, unused otherwise
++static void ssm_elem_read(uint64_t * dest, num_p num_fft, uint64_t x, uint64_t n, uint64_t * bounce)
++{
++    if(!num_fft->is_direct)
++    {
++        num_block_read(dest, num_fft, x * n, n);
++        return;
++    }
++
++    uint64_t stride = ssm_direct_stride(n);
++    num_block_read(bounce, num_fft, ssm_direct_base + (x * stride), stride);
++    memcpy(dest, bounce, n * sizeof(uint64_t));
++}
++
++static void ssm_elem_write(num_p num_fft, uint64_t x, const uint64_t * src, uint64_t n, uint64_t * bounce)
++{
++    if(!num_fft->is_direct)
++    {
++        num_block_write(num_fft, x * n, src, n);
++        return;
++    }
++
++    uint64_t stride = ssm_direct_stride(n);
++    memcpy(bounce, src, n * sizeof(uint64_t));
++    num_block_write(num_fft, ssm_direct_base + (x * stride), bounce, stride);
++}
++
+ // Next block of a pass: off the counter the workers share when there is one, off
+ // the worker's own range otherwise. False once the pass has none left
+ static bool ssm_pass_take(
+@@ -3128,7 +3201,7 @@ static bool ssm_pass_take(
+ 
+ // Element b of a fused block sits at (pos + step*x)*n in the array and at b*n in
+ // the stage. With step*gl == 1 the block is one contiguous run and moves in a
+-// single transfer.
++// single transfer, unless the array is direct.
+ static void ssm_stage_io(
+     num_p num_stage,
+     num_p num_fft,
+@@ -3146,7 +3219,7 @@ static void ssm_stage_io(
+     uint64_t base = a + ((gl << r) * c);
+     assert(num_stage->size >= width * n);
+ 
+-    if(step * gl == 1)
++    if(!num_fft->is_direct && (step * gl == 1))
+     {
+         uint64_t off = (pos + base) * n;
+         if(write)
+@@ -3158,17 +3231,17 @@ static void ssm_stage_io(
+         return;
+     }
+ 
++    uint64_t * bounce = ssm_stage_bounce(num_stage);
+     for(uint64_t b = 0; b < width; b++)
+     {
+-        uint64_t x = base + (gl * b);
+-        uint64_t off = (pos + (step * x)) * n;
++        uint64_t x = pos + (step * (base + (gl * b)));
+ 
+         if(write)
+         {
+-            num_block_write(num_fft, off, &num_stage->chunk[b * n], n);
++            ssm_elem_write(num_fft, x, &num_stage->chunk[b * n], n, bounce);
+             continue;
+         }
+-        num_block_read(&num_stage->chunk[b * n], num_fft, off, n);
++        ssm_elem_read(&num_stage->chunk[b * n], num_fft, x, n, bounce);
+     }
+ }
+ 
+@@ -3489,10 +3562,12 @@ static void num_ssm_fft_fwd_rec(
+     uint64_t workers = ssm_worker_count(threads, K / 2);
+     uint64_t budget = ssm_fft_budget_bytes(num_fft, workers);
+     uint64_t stage_limbs = ssm_fft_stage_limbs(num_fft, budget);
++    uint64_t bounce = ssm_direct_bounce(num_fft, n);
++    assert(!num_fft->is_direct || stage_limbs)
+ 
+     if(workers <= 1)
+     {
+-        num_p num_stage = stage_limbs ? ssm_stage_create(stage_limbs) : nullptr;
++        num_p num_stage = stage_limbs ? ssm_stage_create(stage_limbs, bounce) : nullptr;
+ 
+         ssm_fft_fwd_split_worker_t serial =
+         {
+@@ -3532,7 +3607,7 @@ static void num_ssm_fft_fwd_rec(
+     for(uint64_t w=0; w<workers; w++)
+     {
+         worker_aux[w] = num_create_dirty(CLU_ARGS(2 * n, 0));
+-        worker_stage[w] = stage_limbs ? ssm_stage_create(stage_limbs) : nullptr;
++        worker_stage[w] = stage_limbs ? ssm_stage_create(stage_limbs, bounce) : nullptr;
+     }
+ 
+     if(!staged)
+@@ -3917,7 +3992,7 @@ static void ssm_fft_inv_pointwise_block(
+             uint64_t pos_2 = pos_x;
+             if(pw->num_elem_2)
+             {
+-                num_block_read(pw->num_elem_2->chunk, pw->num_fft_2, pos_x, n);
++                ssm_elem_read(pw->num_elem_2->chunk, pw->num_fft_2, pos + x, n, ssm_stage_bounce(num_stage));
+                 num_2 = pw->num_elem_2;
+                 pos_2 = 0;
+             }
+@@ -4176,11 +4251,13 @@ static void num_ssm_fft_inv_rec(
+     uint64_t workers = ssm_worker_count(threads, k / 2);
+     uint64_t budget = ssm_fft_budget_bytes(num, workers);
+     uint64_t stage_limbs = ssm_fft_stage_limbs(num, budget);
++    uint64_t bounce = ssm_direct_bounce(num, n);
++    assert(!num->is_direct || stage_limbs)
+ 
+     if(workers <= 1)
+     {
+         ssm_fft_inv_pointwise_t pw = ssm_fft_inv_pointwise_create(num_fft_2, sqr, pw_recursive ? &p_next : nullptr, n);
+-        num_p num_stage = stage_limbs ? ssm_stage_create(stage_limbs) : nullptr;
++        num_p num_stage = stage_limbs ? ssm_stage_create(stage_limbs, bounce) : nullptr;
+ 
+         ssm_fft_inv_split_worker_t serial =
+         {
+@@ -4222,7 +4299,7 @@ static void num_ssm_fft_inv_rec(
+     for(uint64_t w=0; w<workers; w++)
+     {
+         worker_aux[w] = num_create_dirty(CLU_ARGS(2 * n, 0));
+-        worker_stage[w] = stage_limbs ? ssm_stage_create(stage_limbs) : nullptr;
++        worker_stage[w] = stage_limbs ? ssm_stage_create(stage_limbs, bounce) : nullptr;
+     }
+ 
+     // the pass workers' pointwise state; the split workers build their own
+@@ -5538,10 +5615,15 @@ static void * ssm_depad_worker_staged(void * arg)
+     uint64_t range = w->pos_max - w->pos_init;
+     uint64_t chunk_limbs = range < ssm_depad_stage_limbs ? range : ssm_depad_stage_limbs;
+ 
++    // a direct array gives up whole elements, into a page aligned buffer
++    bool direct = w->num_fft->is_direct;
++    uint64_t stride = direct ? ssm_direct_stride(n) : n;
++
+     uint64_t * res = malloc(chunk_limbs * sizeof(uint64_t));
+     assert(res)
+-    uint64_t * elem = malloc(n * sizeof(uint64_t));
+-    assert(elem)
++    uint64_t * elem_buf = malloc((stride + ssm_direct_page_limbs) * sizeof(uint64_t));
++    assert(elem_buf)
++    uint64_t * elem = ssm_page_align(elem_buf);
+ 
+     uint64_t carry = 0;
+     for(uint64_t p_0 = w->pos_init; p_0 < w->pos_max; p_0 += chunk_limbs)
+@@ -5565,6 +5647,13 @@ static void * ssm_depad_worker_staged(void * arg)
+             uint64_t lo = block > p_0 ? block : p_0;
+             uint64_t hi = block + n < p_1 ? block + n : p_1;
+ 
++            if(direct)
++            {
++                num_block_read(elem, w->num_fft, ssm_direct_base + (i * stride), stride);
++                carry += ssm_depad_add(&res[lo - p_0], &elem[lo - block], hi - lo, p_1 - lo);
++                continue;
++            }
++
+             num_block_read(elem, w->num_fft, (n * i) + (lo - block), hi - lo);
+             carry += ssm_depad_add(&res[lo - p_0], elem, hi - lo, p_1 - lo);
+         }
+@@ -5579,7 +5668,7 @@ static void * ssm_depad_worker_staged(void * arg)
+         }
+     }
+ 
+-    free(elem);
++    free(elem_buf);
+     free(res);
+ 
+     w->carry = carry;
+@@ -5652,6 +5741,22 @@ num_p num_ssm_depad_no_wrap(num_p num, ssm_params_p p, uint64_t threads)
+     return num_normalize(num_res);
+ }
+ 
++// Whether a multiply's transform arrays take the direct layout: only when they
++// land on disk, every pass of theirs is staged, and the pointwise multiply is the
++// recursive one, which runs staged too
++static bool ssm_array_is_direct(ssm_params_p p, uint64_t threads)
++{
++    araucaria_disk_config_p config = &s_araucaria_disk_config;
++    uint64_t bytes = sizeof(num_t) + (p->n * p->K * sizeof(uint64_t));
++    if(!config->direct_io || (bytes <= config->disk_threshold_bytes) || !ssm_is_recursive(p->n))
++    {
++        return false;
++    }
++
++    uint64_t workers = ssm_worker_count(threads, p->K / 2);
++    return (bool)((config->ram_budget_bytes / workers) > ssm_fft_block_bytes);
++}
++
+ // num_aux->size >= 2 * n
+ static num_p num_ssm_prepare_no_wrap(
+     num_p num_aux,
+@@ -5667,7 +5772,13 @@ static num_p num_ssm_prepare_no_wrap(
+     assert(num)
+     assert(num_aux->size >= 2 * p->n)
+ 
+-    num_p num_fft = num_create_dirty(CLU_ARGS(p->n * p->K, 0));
++    bool direct = ssm_array_is_direct(p, threads);
++    uint64_t size = direct ? ssm_direct_base + (p->K * ssm_direct_stride(p->n)) : p->n * p->K;
++    num_p num_fft = num_create_dirty(CLU_ARGS(size, 0));
++    if(direct)
++    {
++        num_set_direct(num_fft);
++    }
+ 
+     num_ssm_fft_fwd_pad(num_aux, num_fft, num, p, threads);
+ 
+diff --git a/lib/num/struct.h b/lib/num/struct.h
+index c44152c..6ce47c8 100644
+--- a/lib/num/struct.h
++++ b/lib/num/struct.h
+@@ -19,6 +19,8 @@ STRUCT(araucaria_disk_config)
+     // RAM one worker may hold resident over a disk backed transform; 0 blocks
+     // the FFT passes for cache instead of for RAM
+     uint64_t ram_budget_bytes;
++    // a staged transform array is moved past the page cache
++    bool direct_io;
+ };
+ 
+ STRUCT(num)
+@@ -26,6 +28,8 @@ STRUCT(num)
+     uint64_t size;
+     uint64_t count;
+     bool is_mmap;
++    // a transform array with elements on page aligned strides, moved uncached
++    bool is_direct;
+     // backing file, kept open for the FFT's explicit block I/O; -1 when on heap
+     int fd;
+     chunk_p chunk;
+diff --git a/lib/num/test/test_5_direct.c b/lib/num/test/test_5_direct.c
+new file mode 100644
+index 0000000..228412d
+--- /dev/null
++++ b/lib/num/test/test_5_direct.c
+@@ -0,0 +1,34 @@
++#define NAME "direct"
++#include "behavior.c"
++
++
++
++static void test_num_direct()
++{
++    TEST_LIB
++
++    bool show = false;
++
++    araucaria_disk_config_t config = {
++        .disk_path = "./cache",
++        .disk_threshold_bytes = 8192,
++        .ram_budget_bytes = U64(8) * 1024 * 1024,
++        .direct_io = true
++    };
++    araucaria_disk_config_set(&config);
++
++    test_all(show);
++
++    TEST_ASSERT_MEM_EMPTY
++}
++
++
++
++int main()
++{
++    setvbuf(stdout, nullptr, _IONBF, 0);
++    test_seed_init();
++    test_num_direct();
++    printf("\n\n\tTest successful\n\n");
++    return 0;
++}

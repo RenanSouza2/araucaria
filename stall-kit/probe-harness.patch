@@ -1,0 +1,1438 @@
+diff --git a/src/main.c b/src/main.c
+index 522659f..f1ff3e6 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -1533,10 +1533,18 @@ static void time_smt_mul()
+ 
+ 
+ // int main(int argc, char** argv)
+-int main()
++#include "probe.c"
++
++int main(int argc, char ** argv)
+ {
+     setvbuf(stdout, nullptr, _IONBF, 0);
+     srand((unsigned int)time(nullptr)); // NOLINT(cert-msc51-cpp, cert-msc32-c)
++
++    if(argc > 1 && strcmp(argv[1], "probe") == 0)
++    {
++        return probe_main(argc, argv);
++    }
++
+     printf("\nbegin\n\n");
+ 
+     // clu_log_level_set(CLU_LOG_ALL);
+diff --git a/src/probe.c b/src/probe.c
+new file mode 100644
+index 0000000..d769d3d
+--- /dev/null
++++ b/src/probe.c
+@@ -0,0 +1,1028 @@
++// Out-of-core multiply probe: one num_mul_threads under a sampler that logs where
++// the wall time goes. Included by main.c.
++
++#include <errno.h>
++#include <fcntl.h>
++#include <pthread.h>
++#include <stdatomic.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/resource.h>
++#include <unistd.h>
++
++#ifdef __APPLE__
++#include <libproc.h>
++#include <mach/mach.h>
++#include <notify.h>
++#include <sys/sysctl.h>
++#endif
++
++#include "../mods/macros/assert.h"
++#include "../mods/macros/threads.h"
++#include "../mods/macros/time.h"
++#include "../mods/macros/uint.h"
++
++#include "../lib/num/internal.h"
++#include "../lib/num/struct.h"
++
++#ifdef ARAUCARIA_PROF
++#include "../lib/num/prof.h"
++#endif
++
++
++
++// 2^64 - 59, the largest prime below 2^64
++constexpr uint64_t probe_prime = 0xffffffffffffffc5;
++constexpr uint64_t probe_prime_gap = 59;
++
++// (res * 2^64 + value) mod probe_prime, not canonical
++static uint64_t probe_fold(uint64_t res, uint64_t value)
++{
++    uint128_t t = (U128(res) * probe_prime_gap) + value;
++    uint64_t lo = LOW(t);
++    uint64_t sum = lo + (HIGH(t) * probe_prime_gap);
++    return sum < lo ? sum + probe_prime_gap : sum;
++}
++
++static uint64_t probe_canon(uint64_t res)
++{
++    return res >= probe_prime ? res - probe_prime : res;
++}
++
++static uint64_t probe_mul_mod(uint64_t a, uint64_t b)
++{
++    uint128_t t = U128(a) * b;
++    return probe_canon(probe_fold(probe_fold(0, HIGH(t)), LOW(t)));
++}
++
++static uint64_t probe_splitmix(uint64_t * state)
++{
++    uint64_t z = (*state += 0x9e3779b97f4a7c15);
++    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9;
++    z = (z ^ (z >> 27)) * 0x94d049bb133111eb;
++    return z ^ (z >> 31);
++}
++
++// limbs moved per transfer when a number is on disk
++constexpr uint64_t probe_chunk_limbs = U64(8) * 1024 * 1024;
++
++static void probe_pwrite(int fd, const uint64_t * src, uint64_t limbs, uint64_t pos)
++{
++    const char * s = (const char *)src;
++    uint64_t left = limbs * sizeof(uint64_t);
++    off_t off = (off_t)(sizeof(num_t) + (pos * sizeof(uint64_t)));
++    while(left)
++    {
++        ssize_t put = pwrite(fd, s, left, off);
++        assert(put > 0);
++        left -= (uint64_t)put;
++        s += put;
++        off += put;
++    }
++}
++
++static void probe_pread(int fd, uint64_t * dest, uint64_t limbs, uint64_t pos)
++{
++    char * d = (char *)dest;
++    uint64_t left = limbs * sizeof(uint64_t);
++    off_t off = (off_t)(sizeof(num_t) + (pos * sizeof(uint64_t)));
++    while(left)
++    {
++        ssize_t got = pread(fd, d, left, off);
++        assert(got > 0);
++        left -= (uint64_t)got;
++        d += got;
++        off += got;
++    }
++}
++
++// COUNT random limbs with the top one nonzero, filled from the top down.
++// out_residue receives the value mod probe_prime
++static num_p probe_generate(uint64_t count, uint64_t seed, uint64_t * out_residue)
++{
++    num_p num = num_create_dirty(CLU_ARGS(count, count));
++    uint64_t * buf = nullptr;
++    if(num->is_mmap)
++    {
++        buf = malloc(probe_chunk_limbs * sizeof(uint64_t));
++        assert(buf);
++    }
++
++    uint64_t state = seed;
++    uint64_t res = 0;
++    for(uint64_t end = count; end > 0;)
++    {
++        uint64_t len = end < probe_chunk_limbs ? end : probe_chunk_limbs;
++        uint64_t start = end - len;
++        uint64_t * dst = buf ? buf : &num->chunk[start];
++
++        for(uint64_t i = len; i-- > 0;)
++        {
++            uint64_t value = probe_splitmix(&state);
++            if(start + i == count - 1)
++            {
++                value |= B(63);
++            }
++            dst[i] = value;
++            res = probe_fold(res, value);
++        }
++
++        if(buf)
++        {
++            probe_pwrite(num->fd, buf, len, start);
++        }
++        end = start;
++    }
++
++    free(buf);
++    *out_residue = probe_canon(res);
++    return num;
++}
++
++static uint64_t probe_residue(num_p num)
++{
++    uint64_t * buf = nullptr;
++    if(num->is_mmap)
++    {
++        buf = malloc(probe_chunk_limbs * sizeof(uint64_t));
++        assert(buf);
++    }
++
++    uint64_t res = 0;
++    for(uint64_t end = num->count; end > 0;)
++    {
++        uint64_t len = end < probe_chunk_limbs ? end : probe_chunk_limbs;
++        uint64_t start = end - len;
++        const uint64_t * src = &num->chunk[start];
++        if(buf)
++        {
++            probe_pread(num->fd, buf, len, start);
++            src = buf;
++        }
++
++        for(uint64_t i = len; i-- > 0;)
++        {
++            res = probe_fold(res, src[i]);
++        }
++        end = start;
++    }
++
++    free(buf);
++    return probe_canon(res);
++}
++
++
++
++constexpr uint64_t probe_text_max = 16384;
++
++// whole file into buf, NUL terminated; empty when it cannot be read
++[[maybe_unused]]
++static void probe_slurp(const char * path, char * buf, uint64_t cap)
++{
++    buf[0] = '\0';
++    FILE * fp = fopen(path, "r");
++    if(!fp)
++    {
++        return;
++    }
++
++    size_t got = fread(buf, 1, cap - 1, fp);
++    buf[got] = '\0';
++    fclose(fp);
++}
++
++// number after KEY where KEY starts a line, 0 when absent
++[[maybe_unused]]
++static uint64_t probe_field(const char * text, const char * key)
++{
++    size_t len = strlen(key);
++    const char * line = text;
++    while(line && *line)
++    {
++        if(strncmp(line, key, len) == 0)
++        {
++            return strtoull(line + len, nullptr, 10);
++        }
++
++        line = strchr(line, '\n');
++        if(line)
++        {
++            line++;
++        }
++    }
++    return 0;
++}
++
++// total= of the KIND line ("some" or "full") of a /proc/pressure file, in usec
++[[maybe_unused]]
++static uint64_t probe_pressure(const char * text, const char * kind)
++{
++    size_t len = strlen(kind);
++    const char * line = text;
++    while(line && *line)
++    {
++        if(strncmp(line, kind, len) == 0)
++        {
++            const char * total = strstr(line, "total=");
++            return total ? strtoull(total + 6, nullptr, 10) : 0;
++        }
++
++        line = strchr(line, '\n');
++        if(line)
++        {
++            line++;
++        }
++    }
++    return 0;
++}
++
++typedef struct
++{
++    uint64_t user_ns;
++    uint64_t sys_ns;
++    uint64_t majflt;
++    uint64_t minflt;
++    uint64_t disk_rd;
++    uint64_t disk_wr;
++    uint64_t pageins;
++    uint64_t footprint;
++} probe_proc_t;
++
++// compiled on every platform so the Linux reader is at least type checked here
++[[maybe_unused]]
++static void probe_proc_read_linux(probe_proc_t * out)
++{
++    char text[probe_text_max];
++    probe_slurp("/proc/self/io", text, sizeof(text));
++    out->disk_rd = probe_field(text, "read_bytes:");
++    out->disk_wr = probe_field(text, "write_bytes:");
++    out->pageins = out->majflt;
++
++    probe_slurp("/proc/self/status", text, sizeof(text));
++    out->footprint = probe_field(text, "VmRSS:") * 1024;
++}
++
++static uint64_t probe_tv_ns(struct timeval tv)
++{
++    return ((uint64_t)tv.tv_sec * nanosecs_in_sec) + ((uint64_t)tv.tv_usec * 1000);
++}
++
++static probe_proc_t probe_proc_read()
++{
++    struct rusage ru;
++    int res = getrusage(RUSAGE_SELF, &ru);
++    assert(res == 0);
++
++    probe_proc_t out =
++    {
++        .user_ns = probe_tv_ns(ru.ru_utime),
++        .sys_ns = probe_tv_ns(ru.ru_stime),
++        .majflt = (uint64_t)ru.ru_majflt,
++        .minflt = (uint64_t)ru.ru_minflt,
++    };
++
++#ifdef __APPLE__
++    struct rusage_info_v4 ri;
++    if(proc_pid_rusage(getpid(), RUSAGE_INFO_V4, (rusage_info_t *)&ri) == 0)
++    {
++        out.disk_rd = ri.ri_diskio_bytesread;
++        out.disk_wr = ri.ri_diskio_byteswritten;
++        out.pageins = ri.ri_pageins;
++        out.footprint = ri.ri_phys_footprint;
++    }
++#else
++    probe_proc_read_linux(&out);
++#endif
++
++    return out;
++}
++
++constexpr uint64_t probe_cpu_max = 64;
++
++[[maybe_unused]]
++static uint64_t probe_page_bytes;
++
++constexpr uint64_t probe_dev_max = 32;
++
++// cpu times in 10 ms ticks; a field the platform cannot report stays 0
++typedef struct
++{
++    uint64_t cpus;
++    uint64_t busy[probe_cpu_max];
++    uint64_t kern_ticks;
++    uint64_t busy_ticks;
++    uint64_t iowait_ticks;
++    uint64_t free_bytes;
++    uint64_t file_bytes;
++    uint64_t anon_bytes;
++    uint64_t comp_bytes;
++    uint64_t dirty_bytes;
++    uint64_t writeback_bytes;
++    uint64_t swap_used;
++    uint64_t pagein_bytes;
++    uint64_t pageout_bytes;
++    uint64_t compressions;
++    uint64_t decompressions;
++    uint64_t swapins;
++    uint64_t swapouts;
++    uint64_t scan_direct;
++    uint64_t allocstall;
++    uint64_t psi_io_some;
++    uint64_t psi_io_full;
++    uint64_t psi_mem_some;
++    uint64_t psi_mem_full;
++    uint64_t dev_rd_bytes;
++    uint64_t dev_wr_bytes;
++    uint64_t dev_queue_ms;
++    uint64_t devs;
++    uint64_t dev_busy_ms[probe_dev_max];
++    uint64_t mem_level;
++    uint64_t thermal;
++    uint64_t lpm;
++} probe_sys_t;
++
++#ifdef __APPLE__
++
++static uint64_t probe_notify_state(const char * key, int * token)
++{
++    if(*token < 0 && notify_register_check(key, token) != NOTIFY_STATUS_OK)
++    {
++        *token = -1;
++        return UINT64_MAX;
++    }
++
++    uint64_t state = 0;
++    if(notify_get_state(*token, &state) != NOTIFY_STATUS_OK)
++    {
++        return UINT64_MAX;
++    }
++    return state;
++}
++
++#endif
++
++static bool probe_is_digit(char c)
++{
++    return (bool)(c >= '0' && c <= '9');
++}
++
++// whole disks only: partitions and stacked devices would count the same I/O twice
++[[maybe_unused]]
++static bool probe_dev_is_disk(const char * name)
++{
++    const char * skip[] = { "loop", "ram", "zram", "dm-", "md", "sr", "fd" };
++    for(uint64_t i=0; i<sizeof(skip)/sizeof(skip[0]); i++)
++    {
++        if(strncmp(name, skip[i], strlen(skip[i])) == 0)
++        {
++            return false;
++        }
++    }
++
++    size_t len = strlen(name);
++    if(len == 0)
++    {
++        return false;
++    }
++    if(!probe_is_digit(name[len - 1]))
++    {
++        return true;
++    }
++
++    // nvme0n1 and mmcblk0 end in a digit themselves; their partitions add pN
++    if(strncmp(name, "nvme", 4) != 0 && strncmp(name, "mmcblk", 6) != 0)
++    {
++        return false;
++    }
++    const char * part = strrchr(name, 'p');
++    if(!part || part == name || !probe_is_digit(part[-1]) || part[1] == '\0')
++    {
++        return true;
++    }
++    return (bool)(strspn(part + 1, "0123456789") != strlen(part + 1));
++}
++
++static const char * probe_next_line(const char * line)
++{
++    const char * next = strchr(line, '\n');
++    return next ? next + 1 : nullptr;
++}
++
++// compiled on every platform so the Linux reader is at least type checked here
++[[maybe_unused]]
++static void probe_sys_read_linux(probe_sys_t * out)
++{
++    constexpr uint64_t kb = 1024;
++    constexpr uint64_t sector = 512;
++    char text[probe_text_max];
++
++    // cpu[N] user nice system idle iowait irq softirq steal
++    probe_slurp("/proc/stat", text, sizeof(text));
++    const char * line = text;
++    while(line && strncmp(line, "cpu", 3) == 0)
++    {
++        const char * cursor = line + 3;
++        char * end = nullptr;
++        bool total = (bool)(*cursor == ' ');
++        if(!total)
++        {
++            (void)strtoull(cursor, &end, 10);
++            cursor = end;
++        }
++
++        uint64_t v[8] = {0};
++        for(uint64_t i=0; i<8; i++)
++        {
++            v[i] = strtoull(cursor, &end, 10);
++            cursor = end;
++        }
++
++        uint64_t kern = v[2] + v[5] + v[6];
++        uint64_t busy = kern + v[0] + v[1] + v[7];
++        if(total)
++        {
++            out->kern_ticks = kern;
++            out->busy_ticks = busy;
++            out->iowait_ticks = v[4];
++        }
++        else if(out->cpus < probe_cpu_max)
++        {
++            out->busy[out->cpus] = busy;
++            out->cpus++;
++        }
++        line = probe_next_line(line);
++    }
++
++    probe_slurp("/proc/meminfo", text, sizeof(text));
++    out->free_bytes = probe_field(text, "MemFree:") * kb;
++    out->file_bytes = probe_field(text, "Cached:") * kb;
++    out->anon_bytes = probe_field(text, "AnonPages:") * kb;
++    out->dirty_bytes = probe_field(text, "Dirty:") * kb;
++    out->writeback_bytes = probe_field(text, "Writeback:") * kb;
++    out->swap_used = (probe_field(text, "SwapTotal:") - probe_field(text, "SwapFree:")) * kb;
++
++    probe_slurp("/proc/vmstat", text, sizeof(text));
++    out->pagein_bytes = probe_field(text, "pgpgin ") * kb;
++    out->pageout_bytes = probe_field(text, "pgpgout ") * kb;
++    out->swapins = probe_field(text, "pswpin ");
++    out->swapouts = probe_field(text, "pswpout ");
++    out->scan_direct = probe_field(text, "pgscan_direct ");
++    out->allocstall = probe_field(text, "allocstall_normal ")
++        + probe_field(text, "allocstall_movable ")
++        + probe_field(text, "allocstall_dma32 ");
++
++    probe_slurp("/proc/pressure/io", text, sizeof(text));
++    out->psi_io_some = probe_pressure(text, "some");
++    out->psi_io_full = probe_pressure(text, "full");
++
++    probe_slurp("/proc/pressure/memory", text, sizeof(text));
++    out->psi_mem_some = probe_pressure(text, "some");
++    out->psi_mem_full = probe_pressure(text, "full");
++
++    // major minor name, then 11 counters: sectors read is the 3rd, sectors written
++    // the 7th, ms busy the 10th, weighted ms queued the 11th
++    probe_slurp("/proc/diskstats", text, sizeof(text));
++    line = text;
++    while(line && *line)
++    {
++        unsigned int dev_major, dev_minor;
++        char name[64];
++        uint64_t f[11] = {0};
++        int got = sscanf(
++            line,
++            " %u %u %63s %" SCNu64 " %" SCNu64 " %" SCNu64 " %" SCNu64 " %" SCNu64 " %" SCNu64
++            " %" SCNu64 " %" SCNu64 " %" SCNu64 " %" SCNu64 " %" SCNu64,
++            &dev_major, &dev_minor, name,
++            &f[0], &f[1], &f[2], &f[3], &f[4], &f[5], &f[6], &f[7], &f[8], &f[9], &f[10]
++        );
++        if(got == 14 && probe_dev_is_disk(name) && out->devs < probe_dev_max)
++        {
++            out->dev_rd_bytes += f[2] * sector;
++            out->dev_wr_bytes += f[6] * sector;
++            out->dev_queue_ms += f[10];
++            out->dev_busy_ms[out->devs] = f[9];
++            out->devs++;
++        }
++        line = probe_next_line(line);
++    }
++}
++
++static probe_sys_t probe_sys_read()
++{
++    probe_sys_t out = {0};
++
++#ifdef __APPLE__
++    static host_t host = MACH_PORT_NULL;
++    static int token_lpm = -1;
++    static int token_thermal = -1;
++    if(host == MACH_PORT_NULL)
++    {
++        host = mach_host_self();
++    }
++
++    natural_t cpus = 0;
++    processor_info_array_t info = nullptr;
++    mach_msg_type_number_t info_count = 0;
++    kern_return_t kr = host_processor_info(host, PROCESSOR_CPU_LOAD_INFO, &cpus, &info, &info_count);
++    if(kr == KERN_SUCCESS)
++    {
++        out.cpus = cpus < probe_cpu_max ? cpus : probe_cpu_max;
++        for(uint64_t i=0; i<out.cpus; i++)
++        {
++            const integer_t * ticks = &info[i * CPU_STATE_MAX];
++            uint64_t kern = (uint64_t)(uint32_t)ticks[CPU_STATE_SYSTEM];
++            uint64_t user = (uint64_t)(uint32_t)ticks[CPU_STATE_USER]
++                + (uint64_t)(uint32_t)ticks[CPU_STATE_NICE];
++            out.busy[i] = kern + user;
++            out.kern_ticks += kern;
++            out.busy_ticks += kern + user;
++        }
++        vm_deallocate(mach_task_self(), (vm_address_t)info, info_count * sizeof(integer_t));
++    }
++
++    vm_statistics64_data_t vm;
++    mach_msg_type_number_t vm_count = HOST_VM_INFO64_COUNT;
++    kr = host_statistics64(host, HOST_VM_INFO64, (host_info64_t)&vm, &vm_count);
++    if(kr == KERN_SUCCESS)
++    {
++        out.free_bytes = vm.free_count * probe_page_bytes;
++        out.file_bytes = vm.external_page_count * probe_page_bytes;
++        out.anon_bytes = vm.internal_page_count * probe_page_bytes;
++        out.comp_bytes = vm.compressor_page_count * probe_page_bytes;
++        out.pagein_bytes = vm.pageins * probe_page_bytes;
++        out.pageout_bytes = vm.pageouts * probe_page_bytes;
++        out.compressions = vm.compressions;
++        out.decompressions = vm.decompressions;
++        out.swapins = vm.swapins;
++        out.swapouts = vm.swapouts;
++    }
++
++    struct xsw_usage swap;
++    size_t len = sizeof(swap);
++    if(sysctlbyname("vm.swapusage", &swap, &len, nullptr, 0) == 0)
++    {
++        out.swap_used = swap.xsu_used;
++    }
++
++    int level = 0;
++    len = sizeof(level);
++    if(sysctlbyname("kern.memorystatus_vm_pressure_level", &level, &len, nullptr, 0) == 0)
++    {
++        out.mem_level = (uint64_t)level;
++    }
++
++    out.lpm = probe_notify_state("com.apple.system.lowpowermode", &token_lpm);
++    out.thermal = probe_notify_state("com.apple.system.thermalpressurelevel", &token_thermal);
++#else
++    probe_sys_read_linux(&out);
++#endif
++
++    return out;
++}
++
++typedef struct
++{
++    const char * stage;
++    const char * phase;
++    uint64_t units;
++    uint64_t active;
++    uint64_t in_rd;
++    uint64_t in_wr;
++    uint64_t rd_bytes;
++    uint64_t rd_ns;
++    uint64_t wr_bytes;
++    uint64_t wr_ns;
++} probe_prof_t;
++
++static probe_prof_t probe_prof_read()
++{
++    probe_prof_t out = { .stage = "-", .phase = "-" };
++
++#ifdef ARAUCARIA_PROF
++    const char * stage = atomic_load(&g_num_prof.stage);
++    const char * phase = atomic_load(&g_num_prof.phase);
++    out.stage = stage ? stage : "-";
++    out.phase = phase ? phase : "-";
++    out.units = atomic_load(&g_num_prof.units_done);
++    out.active = atomic_load(&g_num_prof.active_workers);
++    out.in_rd = atomic_load(&g_num_prof.in_rd);
++    out.in_wr = atomic_load(&g_num_prof.in_wr);
++    out.rd_bytes = atomic_load(&g_num_prof.rd_bytes);
++    out.rd_ns = atomic_load(&g_num_prof.rd_ns);
++    out.wr_bytes = atomic_load(&g_num_prof.wr_bytes);
++    out.wr_ns = atomic_load(&g_num_prof.wr_ns);
++#endif
++
++    return out;
++}
++
++
++
++static uint64_t probe_t0;
++static _Atomic(const char *) probe_label = "-";
++
++static double probe_mb(uint64_t bytes)
++{
++    return (double)bytes / (1024.0 * 1024.0);
++}
++
++static double probe_gb(uint64_t bytes)
++{
++    return (double)bytes / (1024.0 * 1024.0 * 1024.0);
++}
++
++// busiest whole disk, as the fraction of the interval it had I/O in flight
++static double probe_dev_util(const probe_sys_t * sys, const probe_sys_t * prev, double dt)
++{
++    double util = 0.0;
++    for(uint64_t i=0; i<sys->devs && i<prev->devs; i++)
++    {
++        double busy = (double)(sys->dev_busy_ms[i] - prev->dev_busy_ms[i]) / (1e3 * dt);
++        if(busy > util)
++        {
++            util = busy;
++        }
++    }
++    return util;
++}
++
++typedef struct
++{
++    FILE * fp;
++    uint64_t period_ns;
++    atomic_bool stop;
++} probe_sampler_t;
++
++constexpr uint64_t probe_sub_samples = 20;
++
++static void probe_sleep(uint64_t ns)
++{
++    struct timespec ts =
++    {
++        .tv_sec = (time_t)(ns / nanosecs_in_sec),
++        .tv_nsec = (long)(ns % nanosecs_in_sec),
++    };
++    nanosleep(&ts, nullptr);
++}
++
++static void * probe_sampler(void * arg)
++{
++    probe_sampler_t * s = arg;
++
++    fprintf(
++        s->fp,
++        "t\tepoch\tlabel\tstage\tphase\tunits_s\tact\tin_rd\tin_wr\tcpu\tcpu_sys"
++        "\tapp_rd_mb\tapp_wr_mb\tdsk_rd_mb\tdsk_wr_mb\tpgin_s\tmajflt_s"
++        "\tsys_busy\tsys_kern\tfree_mb\tfile_mb\tanon_mb\tcomp_mb\tswap_mb"
++        "\tvm_in_mb\tvm_out_mb\tcomp_s\tdecomp_s\tswapin_s\tswapout_s"
++        "\tmemlvl\ttherm\tlpm\tfootprint_mb"
++        "\tiowait\tdirty_mb\twback_mb\tpsi_io_some\tpsi_io_full\tpsi_mem_some\tpsi_mem_full"
++        "\tscan_direct_s\tallocstall_s\tdev_rd_mb\tdev_wr_mb\tdev_util\tdev_queue\tcores\n"
++    );
++
++    probe_proc_t proc_0 = probe_proc_read();
++    probe_sys_t sys_0 = probe_sys_read();
++    probe_prof_t prof_0 = probe_prof_read();
++    uint64_t t_prev = get_time();
++
++    while(!atomic_load(&s->stop))
++    {
++        uint64_t acc_active = 0;
++        uint64_t acc_rd = 0;
++        uint64_t acc_wr = 0;
++        uint64_t taken = 0;
++        for(uint64_t i=0; i<probe_sub_samples && !atomic_load(&s->stop); i++)
++        {
++            probe_sleep(s->period_ns / probe_sub_samples);
++            probe_prof_t sub = probe_prof_read();
++            acc_active += sub.active;
++            acc_rd += sub.in_rd;
++            acc_wr += sub.in_wr;
++            taken++;
++        }
++
++        uint64_t t_now = get_time();
++        double dt = dtime(t_now - t_prev);
++        probe_proc_t proc = probe_proc_read();
++        probe_sys_t sys = probe_sys_read();
++        probe_prof_t prof = probe_prof_read();
++
++        fprintf(
++            s->fp,
++            "%.2f\t%.2f\t%s\t%s\t%s\t%.0f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f"
++            "\t%.1f\t%.1f\t%.1f\t%.1f\t%.0f\t%.0f"
++            "\t%.2f\t%.2f\t%.0f\t%.0f\t%.0f\t%.0f\t%.0f"
++            "\t%.1f\t%.1f\t%.0f\t%.0f\t%.0f\t%.0f"
++            "\t" U64P() "\t" U64P() "\t" U64P() "\t%.0f"
++            "\t%.2f\t%.0f\t%.0f\t%.3f\t%.3f\t%.3f\t%.3f"
++            "\t%.0f\t%.0f\t%.1f\t%.1f\t%.2f\t%.2f\t",
++            dtime(t_now - probe_t0),
++            get_wall_time(),
++            atomic_load(&probe_label),
++            prof.stage,
++            prof.phase,
++            (double)(prof.units - prof_0.units) / dt,
++            (double)acc_active / (double)taken,
++            (double)acc_rd / (double)taken,
++            (double)acc_wr / (double)taken,
++            dtime((proc.user_ns - proc_0.user_ns) + (proc.sys_ns - proc_0.sys_ns)) / dt,
++            dtime(proc.sys_ns - proc_0.sys_ns) / dt,
++            probe_mb(prof.rd_bytes - prof_0.rd_bytes) / dt,
++            probe_mb(prof.wr_bytes - prof_0.wr_bytes) / dt,
++            probe_mb(proc.disk_rd - proc_0.disk_rd) / dt,
++            probe_mb(proc.disk_wr - proc_0.disk_wr) / dt,
++            (double)(proc.pageins - proc_0.pageins) / dt,
++            (double)(proc.majflt - proc_0.majflt) / dt,
++            (double)(sys.busy_ticks - sys_0.busy_ticks) / (100.0 * dt),
++            (double)(sys.kern_ticks - sys_0.kern_ticks) / (100.0 * dt),
++            probe_mb(sys.free_bytes),
++            probe_mb(sys.file_bytes),
++            probe_mb(sys.anon_bytes),
++            probe_mb(sys.comp_bytes),
++            probe_mb(sys.swap_used),
++            probe_mb(sys.pagein_bytes - sys_0.pagein_bytes) / dt,
++            probe_mb(sys.pageout_bytes - sys_0.pageout_bytes) / dt,
++            (double)(sys.compressions - sys_0.compressions) / dt,
++            (double)(sys.decompressions - sys_0.decompressions) / dt,
++            (double)(sys.swapins - sys_0.swapins) / dt,
++            (double)(sys.swapouts - sys_0.swapouts) / dt,
++            sys.mem_level,
++            sys.thermal,
++            sys.lpm,
++            probe_mb(proc.footprint),
++            (double)(sys.iowait_ticks - sys_0.iowait_ticks) / (100.0 * dt),
++            probe_mb(sys.dirty_bytes),
++            probe_mb(sys.writeback_bytes),
++            (double)(sys.psi_io_some - sys_0.psi_io_some) / (1e6 * dt),
++            (double)(sys.psi_io_full - sys_0.psi_io_full) / (1e6 * dt),
++            (double)(sys.psi_mem_some - sys_0.psi_mem_some) / (1e6 * dt),
++            (double)(sys.psi_mem_full - sys_0.psi_mem_full) / (1e6 * dt),
++            (double)(sys.scan_direct - sys_0.scan_direct) / dt,
++            (double)(sys.allocstall - sys_0.allocstall) / dt,
++            probe_mb(sys.dev_rd_bytes - sys_0.dev_rd_bytes) / dt,
++            probe_mb(sys.dev_wr_bytes - sys_0.dev_wr_bytes) / dt,
++            probe_dev_util(&sys, &sys_0, dt),
++            (double)(sys.dev_queue_ms - sys_0.dev_queue_ms) / (1e3 * dt)
++        );
++        for(uint64_t i=0; i<sys.cpus; i++)
++        {
++            double busy = (double)(sys.busy[i] - sys_0.busy[i]) / dt;
++            fprintf(s->fp, "%s%.0f", i ? "," : "", busy);
++        }
++        fprintf(s->fp, "\n");
++
++        if(sys.lpm == 1)
++        {
++            fprintf(s->fp, "ABORT low power mode enabled\n");
++            fflush(s->fp);
++            printf("\n\n*** LOW POWER MODE ENABLED at t=%.1f s -- run aborted ***\n\n", dtime(t_now - probe_t0));
++            _exit(77);
++        }
++
++        proc_0 = proc;
++        sys_0 = sys;
++        prof_0 = prof;
++        t_prev = t_now;
++    }
++
++    return nullptr;
++}
++
++
++
++#ifdef ARAUCARIA_PROF
++
++static FILE * probe_rounds_fp;
++static FILE * probe_marks_fp;
++
++typedef struct
++{
++    uint64_t t;
++    probe_proc_t proc;
++    probe_prof_t prof;
++} probe_mark_t;
++
++static probe_mark_t probe_mark_prev;
++
++static probe_mark_t probe_mark_now()
++{
++    return (probe_mark_t)
++    {
++        .t = get_time(),
++        .proc = probe_proc_read(),
++        .prof = probe_prof_read(),
++    };
++}
++
++static void probe_on_mark(const char * label)
++{
++    probe_mark_t now = probe_mark_now();
++    probe_mark_t * prev = &probe_mark_prev;
++
++    double wall = dtime(now.t - prev->t);
++    double user = dtime(now.proc.user_ns - prev->proc.user_ns);
++    double sys = dtime(now.proc.sys_ns - prev->proc.sys_ns);
++    double rd_gb = probe_gb(now.prof.rd_bytes - prev->prof.rd_bytes);
++    double wr_gb = probe_gb(now.prof.wr_bytes - prev->prof.wr_bytes);
++    double rd_s = dtime(now.prof.rd_ns - prev->prof.rd_ns);
++    double wr_s = dtime(now.prof.wr_ns - prev->prof.wr_ns);
++    double dsk_rd = probe_gb(now.proc.disk_rd - prev->proc.disk_rd);
++    double dsk_wr = probe_gb(now.proc.disk_wr - prev->proc.disk_wr);
++    uint64_t pageins = now.proc.pageins - prev->proc.pageins;
++    uint64_t majflt = now.proc.majflt - prev->proc.majflt;
++
++    printf(
++        "\n[%9.2f] %-5s %-13s wall %8.2f  cpu %8.2f (u %8.2f s %7.2f)  "
++        "rd %7.2f GB %7.1f s  wr %7.2f GB %7.1f s  dsk %6.2f/%6.2f GB  pgin " U64P(8),
++        dtime(now.t - probe_t0), now.prof.stage, label, wall, user + sys, user, sys,
++        rd_gb, rd_s, wr_gb, wr_s, dsk_rd, dsk_wr, pageins
++    );
++    fprintf(
++        probe_marks_fp,
++        "%.3f\t%s\t%s\t%.3f\t%.3f\t%.3f\t%.3f\t%.1f\t%.3f\t%.1f\t%.3f\t%.3f\t" U64P() "\t" U64P() "\n",
++        dtime(now.t - probe_t0), now.prof.stage, label, wall, user, sys,
++        rd_gb, rd_s, wr_gb, wr_s, dsk_rd, dsk_wr, pageins, majflt
++    );
++
++    probe_mark_prev = now;
++}
++
++static void probe_on_round(
++    const char * kind,
++    uint64_t worker,
++    uint64_t round,
++    uint64_t r,
++    uint64_t gl,
++    const num_prof_round_t * stat
++)
++{
++    const char * stage = atomic_load(&g_num_prof.stage);
++    fprintf(
++        probe_rounds_fp,
++        "%.3f\t%s\t%s\t" U64P() "\t" U64P() "\t" U64P() "\t" U64P()
++        "\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\n",
++        dtime(get_time() - probe_t0), stage ? stage : "-", kind, worker, round, r, gl,
++        dtime(stat->wall_ns), dtime(stat->cpu_ns), dtime(stat->rd_ns), dtime(stat->wr_ns),
++        dtime(stat->pad_ns), dtime(stat->pw_ns),
++        probe_gb(stat->rd_bytes), probe_gb(stat->wr_bytes)
++    );
++}
++
++#endif
++
++
++
++static FILE * probe_open(const char * prefix, const char * suffix)
++{
++    constexpr uint64_t path_max = 1024;
++    char path[path_max];
++    snprintf(path, sizeof(path), "%s.%s", prefix, suffix);
++    FILE * fp = fopen(path, "w");
++    assert(fp);
++    setvbuf(fp, nullptr, _IOLBF, 0);
++    return fp;
++}
++
++static uint64_t probe_arg(const char * str)
++{
++    char * end = nullptr;
++    errno = 0;
++    uint64_t value = strtoull(str, &end, 10);
++    assert(errno == 0 && end != str && *end == '\0');
++    return value;
++}
++
++// probe <log prefix> <limbs per operand> <threads> <threshold MB> <budget MB> [seed] [mul|sqr]
++// a threshold of 0 keeps everything in RAM
++static int probe_main(int argc, char ** argv)
++{
++    constexpr uint64_t mb = U64(1) * 1024 * 1024;
++
++    if(argc < 7)
++    {
++        printf("usage: %s probe <log prefix> <limbs> <threads> <threshold MB> <budget MB> [seed] [mul|sqr]\n", argv[0]);
++        return 2;
++    }
++
++    const char * prefix = argv[2];
++    uint64_t count = probe_arg(argv[3]);
++    uint64_t threads = probe_arg(argv[4]);
++    uint64_t threshold_mb = probe_arg(argv[5]);
++    uint64_t budget_mb = probe_arg(argv[6]);
++    uint64_t seed = argc > 7 ? probe_arg(argv[7]) : 1;
++    bool sqr = (bool)(argc > 8 && strcmp(argv[8], "sqr") == 0);
++
++    const char * disk_path = getenv("PROBE_DISK_PATH");
++    const char * period_ms = getenv("PROBE_PERIOD_MS");
++
++    araucaria_disk_config_t config =
++    {
++        .disk_path = disk_path ? disk_path : "./cache",
++        .disk_threshold_bytes = threshold_mb ? threshold_mb * mb : UINT64_MAX,
++        .ram_budget_bytes = budget_mb * mb,
++    };
++#ifdef PROBE_HAS_DIRECT_IO
++    config.direct_io = (bool)(getenv("PROBE_DIRECT") != nullptr);
++#endif
++    araucaria_disk_config_set(&config);
++
++    probe_t0 = get_time();
++    probe_page_bytes = (uint64_t)sysconf(_SC_PAGESIZE);
++
++    printf(
++        "probe: %s  limbs " U64P() " (%.2f GB/operand)  threads " U64P()
++        "  threshold " U64P() " MB  budget " U64P() " MB  seed " U64P() "  disk %s\n",
++        sqr ? "sqr" : "mul", count, probe_gb(count * sizeof(uint64_t)), threads, threshold_mb,
++        budget_mb, seed, config.disk_path
++    );
++
++    probe_sampler_t sampler =
++    {
++        .fp = probe_open(prefix, "samples.tsv"),
++        .period_ns = (period_ms ? probe_arg(period_ms) : 1000) * 1'000'000,
++    };
++    pthread_t sampler_id;
++    TREAT(pthread_create(&sampler_id, nullptr, probe_sampler, &sampler))
++
++#ifdef ARAUCARIA_PROF
++    probe_rounds_fp = probe_open(prefix, "rounds.tsv");
++    probe_marks_fp = probe_open(prefix, "marks.tsv");
++    fprintf(
++        probe_rounds_fp,
++        "t\tstage\tkind\tworker\tround\tr\tgl\twall\tcpu\trd_s\twr_s\tpad_s\tpw_s\trd_gb\twr_gb\n"
++    );
++    fprintf(
++        probe_marks_fp,
++        "t\tstage\tlabel\twall\tuser\tsys\trd_gb\trd_s\twr_gb\twr_s\tdsk_rd_gb\tdsk_wr_gb\tpageins\tmajflt\n"
++    );
++#endif
++
++    atomic_store(&probe_label, "generate");
++    uint64_t t_gen = get_time();
++    uint64_t res_1;
++    num_p num_1 = probe_generate(count, seed, &res_1);
++    uint64_t res_2 = res_1;
++    num_p num_2 = nullptr;
++    if(!sqr)
++    {
++        num_2 = probe_generate(count, seed ^ 0x5851f42d4c957f2d, &res_2);
++    }
++    uint64_t expected = probe_mul_mod(res_1, res_2);
++    printf("generate: %.2f s\n", dtime(get_time() - t_gen));
++
++#ifdef ARAUCARIA_PROF
++    probe_mark_prev = probe_mark_now();
++    g_num_prof.on_mark = probe_on_mark;
++    g_num_prof.on_round = probe_on_round;
++    atomic_store(&g_num_prof_verify_on, getenv("PROBE_IOVERIFY") != nullptr);
++    atomic_store(&g_num_prof.static_ranges, getenv("PROBE_STATIC") != nullptr);
++    const char * slow_ms = getenv("PROBE_SLOW_MS");
++    atomic_store(&g_num_prof.slow_ns, slow_ms ? probe_arg(slow_ms) * 1'000'000 : 0);
++#endif
++
++    atomic_store(&probe_label, "multiply");
++    probe_proc_t proc_0 = probe_proc_read();
++    uint64_t t_mul = get_time();
++    num_p num_res = sqr ? num_sqr_threads(num_1, threads) : num_mul_threads(num_1, num_2, threads);
++    uint64_t mul_ns = get_time() - t_mul;
++    probe_proc_t proc_1 = probe_proc_read();
++
++#ifdef ARAUCARIA_PROF
++    g_num_prof.on_mark = nullptr;
++    g_num_prof.on_round = nullptr;
++    if(atomic_load(&g_num_prof_verify_on))
++    {
++        printf(
++            "\nIOVERIFY ok: " U64P() " staged element reads matched what was written",
++            atomic_load(&g_num_prof_verify_checked)
++        );
++    }
++#endif
++
++    double cpu = dtime((proc_1.user_ns - proc_0.user_ns) + (proc_1.sys_ns - proc_0.sys_ns));
++    printf(
++        "\n\nRESULT multiply %.3f s  cpu %.1f s (sys %.1f)  avg cores %.2f  "
++        "disk rd %.1f GB wr %.1f GB  pageins " U64P() "  product limbs " U64P() "\n",
++        dtime(mul_ns), cpu, dtime(proc_1.sys_ns - proc_0.sys_ns), cpu / dtime(mul_ns),
++        probe_gb(proc_1.disk_rd - proc_0.disk_rd), probe_gb(proc_1.disk_wr - proc_0.disk_wr),
++        proc_1.pageins - proc_0.pageins, num_res->count
++    );
++
++    atomic_store(&probe_label, "verify");
++    uint64_t t_ver = get_time();
++    uint64_t got = probe_residue(num_res);
++    bool ok = got == expected;
++    printf(
++        "VERIFY %s  residue " U64PX " expected " U64PX "  (%.2f s)\n",
++        ok ? "ok" : "FAIL", got, expected, dtime(get_time() - t_ver)
++    );
++
++    num_free(num_res);
++
++    atomic_store(&sampler.stop, true);
++    TREAT(pthread_join(sampler_id, nullptr))
++    fclose(sampler.fp);
++
++    return ok ? 0 : 1;
++}
+diff --git a/lib/num/prof.h b/lib/num/prof.h
+new file mode 100644
+index 0000000..ab7233a
+--- /dev/null
++++ b/lib/num/prof.h
+@@ -0,0 +1,374 @@
++#ifndef NUM_PROF_H
++#define NUM_PROF_H
++
++// TEMPORARY: stall investigation hooks. Not to be committed; every use in
++// code.c carries PROF_ so it can be stripped with a grep.
++
++#ifdef ARAUCARIA_PROF
++
++#include <stdatomic.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <time.h>
++
++typedef struct
++{
++    uint64_t wall_ns;
++    uint64_t cpu_ns;
++    uint64_t rd_ns;
++    uint64_t wr_ns;
++    uint64_t rd_bytes;
++    uint64_t wr_bytes;
++    uint64_t pad_ns;
++    uint64_t pw_ns;
++} num_prof_round_t;
++
++typedef struct
++{
++    _Atomic(const char *) stage;
++    _Atomic(const char *) phase;
++    _Atomic uint64_t units_done;
++    _Atomic uint64_t active_workers;
++    _Atomic uint64_t in_rd;
++    _Atomic uint64_t in_wr;
++    _Atomic uint64_t rd_bytes;
++    _Atomic uint64_t rd_ns;
++    _Atomic uint64_t rd_calls;
++    _Atomic uint64_t wr_bytes;
++    _Atomic uint64_t wr_ns;
++    _Atomic uint64_t wr_calls;
++    // experiment: the first worker to enter each pass sleeps this long per block
++    _Atomic uint64_t slow_ns;
++    _Atomic uint64_t slow_claim;
++    // experiment: nonzero gives staged pass workers fixed ranges again
++    _Atomic uint64_t static_ranges;
++    void (*on_mark)(const char * label);
++    void (*on_round)(
++        const char * kind,
++        uint64_t worker,
++        uint64_t round,
++        uint64_t r,
++        uint64_t gl,
++        const num_prof_round_t * stat
++    );
++} num_prof_t;
++
++extern num_prof_t g_num_prof;
++extern thread_local num_prof_round_t t_num_prof;
++
++// Optional check that a staged element reads back as it was last written: one
++// hash per element of each transform array, kept in RAM. Valid only while every
++// write of the array goes through the staged transfers.
++constexpr uint64_t num_prof_verify_max = 4;
++
++typedef struct
++{
++    const void * key;
++    uint64_t count;
++    uint64_t * sums;
++} num_prof_verify_t;
++
++extern atomic_bool g_num_prof_verify_on;
++extern num_prof_verify_t g_num_prof_verify[num_prof_verify_max];
++extern _Atomic uint64_t g_num_prof_verify_checked;
++
++[[maybe_unused]]
++static inline uint64_t num_prof_hash(const uint64_t * limbs, uint64_t n)
++{
++    uint64_t h = UINT64_C(0x9e3779b97f4a7c15);
++    for(uint64_t i = 0; i < n; i++)
++    {
++        h = (h ^ limbs[i]) * UINT64_C(0xff51afd7ed558ccd);
++        h ^= h >> 29;
++    }
++    return h | 1;
++}
++
++// tables are created by the thread that starts the multiply, before any worker
++[[maybe_unused]]
++static inline void num_prof_verify_begin(const void * key, uint64_t count)
++{
++    if(!atomic_load(&g_num_prof_verify_on))
++    {
++        return;
++    }
++
++    uint64_t slot = num_prof_verify_max;
++    for(uint64_t i = 0; i < num_prof_verify_max; i++)
++    {
++        if(g_num_prof_verify[i].key == key || (slot == num_prof_verify_max && !g_num_prof_verify[i].key))
++        {
++            slot = i;
++        }
++        if(g_num_prof_verify[i].key == key)
++        {
++            break;
++        }
++    }
++    if(slot == num_prof_verify_max)
++    {
++        return;
++    }
++
++    free(g_num_prof_verify[slot].sums);
++    g_num_prof_verify[slot] = (num_prof_verify_t)
++    {
++        .key = key,
++        .count = count,
++        .sums = calloc(count, sizeof(uint64_t)),
++    };
++}
++
++[[maybe_unused]]
++static inline void num_prof_verify_end(const void * key)
++{
++    for(uint64_t i = 0; i < num_prof_verify_max; i++)
++    {
++        if(g_num_prof_verify[i].key == key)
++        {
++            free(g_num_prof_verify[i].sums);
++            g_num_prof_verify[i] = (num_prof_verify_t){0};
++        }
++    }
++}
++
++[[maybe_unused]]
++static inline uint64_t * num_prof_verify_slot(const void * key, uint64_t elem)
++{
++    for(uint64_t i = 0; i < num_prof_verify_max; i++)
++    {
++        if(g_num_prof_verify[i].key == key && g_num_prof_verify[i].sums && elem < g_num_prof_verify[i].count)
++        {
++            return &g_num_prof_verify[i].sums[elem];
++        }
++    }
++    return nullptr;
++}
++
++[[maybe_unused]]
++static inline void num_prof_verify_wrote(const void * key, uint64_t elem, const uint64_t * limbs, uint64_t n)
++{
++    uint64_t * sum = num_prof_verify_slot(key, elem);
++    if(sum)
++    {
++        *sum = num_prof_hash(limbs, n);
++    }
++}
++
++[[maybe_unused]]
++static inline void num_prof_verify_read(const void * key, uint64_t elem, const uint64_t * limbs, uint64_t n)
++{
++    uint64_t * sum = num_prof_verify_slot(key, elem);
++    if(!sum || !*sum)
++    {
++        return;
++    }
++
++    atomic_fetch_add_explicit(&g_num_prof_verify_checked, 1, memory_order_relaxed);
++    uint64_t got = num_prof_hash(limbs, n);
++    if(got != *sum)
++    {
++        const char * stage = atomic_load(&g_num_prof.stage);
++        const char * phase = atomic_load(&g_num_prof.phase);
++        uint64_t zeros = 0;
++        for(uint64_t i = 0; i < n; i++)
++        {
++            zeros += limbs[i] == 0;
++        }
++        fprintf(
++            stderr,
++            "\n\n*** IOVERIFY: element %llu of array %llx read back differently from what was written"
++            " (stage %s, phase %s, %llu limbs of which %llu are zero, hash %016llx, expected %016llx) ***\n\n",
++            (unsigned long long)elem, (unsigned long long)(uintptr_t)key,
++            stage ? stage : "-", phase ? phase : "-",
++            (unsigned long long)n, (unsigned long long)zeros,
++            (unsigned long long)got, (unsigned long long)*sum
++        );
++        exit(99);
++    }
++}
++
++[[maybe_unused]]
++static inline uint64_t num_prof_clock(clockid_t id)
++{
++    struct timespec ts;
++    clock_gettime(id, &ts);
++    return ((uint64_t)ts.tv_sec * UINT64_C(1000000000)) + (uint64_t)ts.tv_nsec;
++}
++
++[[maybe_unused]]
++static inline num_prof_round_t num_prof_round_now(void)
++{
++    num_prof_round_t now = t_num_prof;
++    now.wall_ns = num_prof_clock(CLOCK_MONOTONIC);
++    now.cpu_ns = num_prof_clock(CLOCK_THREAD_CPUTIME_ID);
++    return now;
++}
++
++[[maybe_unused]]
++static inline void num_prof_round_end(
++    const char * kind,
++    uint64_t worker,
++    uint64_t round,
++    uint64_t r,
++    uint64_t gl,
++    const num_prof_round_t * begin
++)
++{
++    if(!g_num_prof.on_round)
++    {
++        return;
++    }
++
++    num_prof_round_t now = num_prof_round_now();
++    num_prof_round_t d =
++    {
++        .wall_ns = now.wall_ns - begin->wall_ns,
++        .cpu_ns = now.cpu_ns - begin->cpu_ns,
++        .rd_ns = now.rd_ns - begin->rd_ns,
++        .wr_ns = now.wr_ns - begin->wr_ns,
++        .rd_bytes = now.rd_bytes - begin->rd_bytes,
++        .wr_bytes = now.wr_bytes - begin->wr_bytes,
++        .pad_ns = now.pad_ns - begin->pad_ns,
++        .pw_ns = now.pw_ns - begin->pw_ns,
++    };
++    g_num_prof.on_round(kind, worker, round, r, gl, &d);
++}
++
++#define PROF_DEFINE                                                 \
++    num_prof_t g_num_prof;                                          \
++    thread_local num_prof_round_t t_num_prof;                       \
++    atomic_bool g_num_prof_verify_on;                               \
++    num_prof_verify_t g_num_prof_verify[num_prof_verify_max];       \
++    _Atomic uint64_t g_num_prof_verify_checked;
++
++#define PROF_VERIFY_BEGIN(KEY, COUNT) num_prof_verify_begin(KEY, COUNT);
++#define PROF_VERIFY_END(KEY) num_prof_verify_end(KEY);
++#define PROF_VERIFY_WROTE(KEY, ELEM, LIMBS, N, WIDTH)                                   \
++    for(uint64_t _prof_e = 0; _prof_e < (WIDTH); _prof_e++)                             \
++    {                                                                                   \
++        num_prof_verify_wrote(KEY, (ELEM) + _prof_e, &(LIMBS)[_prof_e * (N)], N);       \
++    }
++
++#define PROF_VERIFY_READ(KEY, ELEM, LIMBS, N, WIDTH)                                    \
++    for(uint64_t _prof_e = 0; _prof_e < (WIDTH); _prof_e++)                             \
++    {                                                                                   \
++        num_prof_verify_read(KEY, (ELEM) + _prof_e, &(LIMBS)[_prof_e * (N)], N);        \
++    }
++
++[[maybe_unused]]
++static const char * const num_prof_fwd_names[] =
++{
++    "fwd-p0", "fwd-p1", "fwd-p2", "fwd-p3", "fwd-p4", "fwd-p5", "fwd-p6", "fwd-p7",
++};
++
++[[maybe_unused]]
++static const char * const num_prof_inv_names[] =
++{
++    "inv-p0", "inv-p1", "inv-p2", "inv-p3", "inv-p4", "inv-p5", "inv-p6", "inv-p7",
++};
++
++#define PROF_COUNTER(NAME) uint64_t NAME = 0;
++#define PROF_COUNT(NAME) NAME++;
++#define PROF_PASS_NAME(DIR, IDX) num_prof_##DIR##_names[(IDX) < 8 ? (IDX) : 7]
++
++#define PROF_STAGE(NAME) atomic_store(&g_num_prof.stage, NAME);
++#define PROF_PHASE(NAME)                                \
++    atomic_store(&g_num_prof.phase, NAME);              \
++    atomic_store(&g_num_prof.slow_claim, 0);
++
++#define PROF_DYNAMIC(COND) ((COND) && !atomic_load(&g_num_prof.static_ranges))
++
++#define PROF_SLOW_ENTER \
++    bool _prof_slow = (bool)(atomic_exchange(&g_num_prof.slow_claim, 1) == 0);
++
++#define PROF_SLOW_BLOCK                                                         \
++    if(_prof_slow && atomic_load(&g_num_prof.slow_ns))                          \
++    {                                                                           \
++        uint64_t _prof_ns = atomic_load(&g_num_prof.slow_ns);                   \
++        struct timespec _prof_ts =                                              \
++        {                                                                       \
++            .tv_sec = (time_t)(_prof_ns / UINT64_C(1000000000)),                \
++            .tv_nsec = (long)(_prof_ns % UINT64_C(1000000000)),                 \
++        };                                                                      \
++        nanosleep(&_prof_ts, nullptr);                                          \
++    }
++#define PROF_MARK(LABEL) { if(g_num_prof.on_mark) { g_num_prof.on_mark(LABEL); } }
++#define PROF_UNITS(ON, COUNT)                                                           \
++    if(ON)                                                                              \
++    {                                                                                   \
++        atomic_fetch_add_explicit(&g_num_prof.units_done, COUNT, memory_order_relaxed); \
++    }
++
++#define PROF_WORKER_ENTER(ON) if(ON) { atomic_fetch_add(&g_num_prof.active_workers, 1); }
++#define PROF_WORKER_LEAVE(ON) if(ON) { atomic_fetch_sub(&g_num_prof.active_workers, 1); }
++
++#define PROF_ROUND_BEGIN(ON)                        \
++    bool _prof_on = (bool)(ON);                     \
++    num_prof_round_t _prof_begin = {0};             \
++    if(_prof_on)                                    \
++    {                                               \
++        _prof_begin = num_prof_round_now();         \
++    }
++
++#define PROF_ROUND_END(KIND, WORKER, ROUND, R, GL)                          \
++    if(_prof_on)                                                            \
++    {                                                                       \
++        num_prof_round_end(KIND, WORKER, ROUND, R, GL, &_prof_begin);       \
++    }
++
++// time inside the span, less what its own block reads took
++#define PROF_TIMED_BEGIN                                        \
++    uint64_t _prof_timed = num_prof_clock(CLOCK_MONOTONIC);     \
++    uint64_t _prof_timed_rd = t_num_prof.rd_ns;
++
++#define PROF_TIMED_END(FIELD)                                           \
++    t_num_prof.FIELD += (num_prof_clock(CLOCK_MONOTONIC) - _prof_timed) \
++        - (t_num_prof.rd_ns - _prof_timed_rd);
++
++#define PROF_IO_BEGIN(DIR)                                                  \
++    uint64_t _prof_io = num_prof_clock(CLOCK_MONOTONIC);                    \
++    atomic_fetch_add_explicit(&g_num_prof.in_##DIR, 1, memory_order_relaxed);
++
++#define PROF_IO_END(DIR, BYTES)                                                         \
++    {                                                                                   \
++        uint64_t _prof_dt = num_prof_clock(CLOCK_MONOTONIC) - _prof_io;                 \
++        uint64_t _prof_bytes = (BYTES);                                                 \
++        t_num_prof.DIR##_ns += _prof_dt;                                                \
++        t_num_prof.DIR##_bytes += _prof_bytes;                                          \
++        atomic_fetch_sub_explicit(&g_num_prof.in_##DIR, 1, memory_order_relaxed);       \
++        atomic_fetch_add_explicit(&g_num_prof.DIR##_ns, _prof_dt, memory_order_relaxed);\
++        atomic_fetch_add_explicit(&g_num_prof.DIR##_bytes, _prof_bytes, memory_order_relaxed); \
++        atomic_fetch_add_explicit(&g_num_prof.DIR##_calls, 1, memory_order_relaxed);    \
++    }
++
++#else
++
++#define PROF_DEFINE
++#define PROF_VERIFY_BEGIN(KEY, COUNT)
++#define PROF_VERIFY_END(KEY)
++#define PROF_VERIFY_WROTE(KEY, ELEM, LIMBS, N, WIDTH)
++#define PROF_VERIFY_READ(KEY, ELEM, LIMBS, N, WIDTH)
++#define PROF_COUNTER(NAME)
++#define PROF_COUNT(NAME)
++#define PROF_PASS_NAME(DIR, IDX)
++#define PROF_STAGE(NAME)
++#define PROF_DYNAMIC(COND) (COND)
++#define PROF_SLOW_ENTER
++#define PROF_SLOW_BLOCK
++#define PROF_PHASE(NAME)
++#define PROF_MARK(LABEL)
++#define PROF_UNITS(ON, COUNT)
++#define PROF_WORKER_ENTER(ON)
++#define PROF_WORKER_LEAVE(ON)
++#define PROF_ROUND_BEGIN(ON)
++#define PROF_ROUND_END(KIND, WORKER, ROUND, R, GL)
++#define PROF_TIMED_BEGIN
++#define PROF_TIMED_END(FIELD)
++#define PROF_IO_BEGIN(DIR)
++#define PROF_IO_END(DIR, BYTES)
++
++#endif
++
++#endif
