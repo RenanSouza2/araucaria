@@ -101,7 +101,7 @@ def main():
         print()
         print(
             f"{'stage':6}{'phase':14}{'wall s':>9}{'%':>6}{'cpu':>6}{'in-io':>6}{'idle':>6}"
-            f"{'rd GB':>8}{'wr GB':>8}{'dev rd':>8}{'dev wr':>8}{'infl':>6}{'pgin/s':>9}"
+            f"{'rd GB':>8}{'wr GB':>8}{'dev rd':>8}{'dev wr':>8}{'infl':>9}{'pgin/s':>9}"
         )
         sum_wall = sum(mk["wall"] for mk in marks)
         agg = collections.OrderedDict()
@@ -137,7 +137,7 @@ def main():
             print(
                 f"{stage:6}{label:14}{wall:9.1f}{100 * wall / sum_wall:6.1f}{cpu:6.2f}{io:6.2f}"
                 f"{max(0.0, threads - cpu - io):6.2f}{e['rd_gb']:8.1f}{e['wr_gb']:8.1f}"
-                f"{e['dev_rd'] / n:8.0f}{e['dev_wr'] / n:8.0f}{e['inflight'] / n:6.1f}"
+                f"{e['dev_rd'] / n:8.0f}{e['dev_wr'] / n:8.0f}{e['inflight'] / n:9.1f}"
                 f"{e['pageins'] / wall if wall else 0:9.0f}"
             )
         print(f"{'':6}{'total':14}{sum_wall:9.1f}")
