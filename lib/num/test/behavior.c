@@ -1910,6 +1910,128 @@ static void test_num_ssm_mul_wrap(bool show)
     TEST_FN_CLOSE
 }
 
+static void test_ssm_check_mul(bool show)
+{
+    TEST_FN_OPEN
+
+    #define TEST_SSM_CHECK_MUL(TAG, VALUE_1, VALUE_2, RES)      \
+    {                                                           \
+        TEST_CASE_OPEN(TAG)                                     \
+        {                                                       \
+            uint64_t res = ssm_check_mul(VALUE_1, VALUE_2);     \
+            assert(uint64(res, RES))                            \
+        }                                                       \
+        TEST_CASE_CLOSE                                         \
+    }
+
+    TEST_SSM_CHECK_MUL(1, 0, 5, 0)
+    TEST_SSM_CHECK_MUL(2, 1, 5, 5)
+    TEST_SSM_CHECK_MUL(3, 59, 59, 3481)
+    TEST_SSM_CHECK_MUL(4, B(63), 4, 118)
+    TEST_SSM_CHECK_MUL(5, UINT64_MAX - 59, UINT64_MAX - 59, 1)
+    TEST_SSM_CHECK_MUL(6, UINT64_MAX, UINT64_MAX, 3364)
+    TEST_SSM_CHECK_MUL(7, UINT64_MAX - 58, 7, 0)
+
+    #undef TEST_SSM_CHECK_MUL
+
+    TEST_FN_CLOSE
+}
+
+// RES is the limbs at 2^(64 * POS), modulo 2^64 - 59
+static void test_ssm_check_span(bool show)
+{
+    TEST_FN_OPEN
+
+    #define TEST_SSM_CHECK_SPAN(TAG, POS, RES, ...)                 \
+    {                                                               \
+        TEST_CASE_OPEN(TAG)                                         \
+        {                                                           \
+            uint64_t limbs[] = { __VA_ARGS__ };                     \
+            uint64_t count = sizeof(limbs) / sizeof(uint64_t);      \
+            uint64_t res = ssm_check_span(limbs, count, POS);       \
+            assert(uint64(res, RES))                                \
+        }                                                           \
+        TEST_CASE_CLOSE                                             \
+    }
+
+    TEST_SSM_CHECK_SPAN(1, 0, 1, 1)
+    TEST_SSM_CHECK_SPAN(2, 0, 59, 0, 1)
+    TEST_SSM_CHECK_SPAN(3, 1, 59, 1)
+    TEST_SSM_CHECK_SPAN(4, 0, 58, UINT64_MAX)
+    TEST_SSM_CHECK_SPAN(5, 0, 3480, UINT64_MAX, UINT64_MAX)
+    TEST_SSM_CHECK_SPAN(6, 0, 0, UINT64_MAX - 58)
+    TEST_SSM_CHECK_SPAN(7, 2, 3481, 1)
+    TEST_SSM_CHECK_SPAN(8, 5, 0, 0)
+    TEST_SSM_CHECK_SPAN(9, 3, 3611384336, 2, 3, 5)
+    TEST_SSM_CHECK_SPAN(10, 11, 0xa27f3cc48ae7ee1e, 1)
+    TEST_SSM_CHECK_SPAN(11, 40, 0x503c1d352d80d2f8, UINT64_MAX, UINT64_MAX, UINT64_MAX)
+    TEST_SSM_CHECK_SPAN(12, 1000000007, 0xdf4b5ae519a80724, 0x0123456789abcdef, 0xfedcba9876543210)
+
+    #undef TEST_SSM_CHECK_SPAN
+
+    TEST_FN_CLOSE
+}
+
+static void test_ssm_product_residue_check(bool show)
+{
+    TEST_FN_OPEN
+
+    TEST_CASE_OPEN(1)
+    {
+        ssm_product_residue_check(59, 59, 3481);
+    }
+    TEST_CASE_CLOSE
+
+    TEST_CASE_OPEN(2)
+    {
+        ssm_product_residue_check(UINT64_MAX - 59, UINT64_MAX - 59, 1);
+    }
+    TEST_CASE_CLOSE
+
+    TEST_CASE_OPEN(3)
+    {
+        TEST_REVERT_OPEN
+        {
+            ssm_product_residue_check(59, 59, 3480);
+        }
+        TEST_REVERT_CLOSE
+    }
+    TEST_CASE_CLOSE
+
+    TEST_FN_CLOSE
+}
+
+static void test_fuzz_ssm_check_span(bool show)
+{
+    TEST_FN_OPEN
+
+    #define TEST_FUZZ_SSM_CHECK_SPAN(TAG, COUNT_MIN, COUNT_MAX, RUNS)               \
+    {                                                                               \
+        TEST_FUZZ_CASE_OPEN(TAG, RUNS)                                              \
+        {                                                                           \
+            fuzz_seed(_tag);                                                        \
+            num_p num_1 = num_create_rand(rand_64_range(COUNT_MIN, COUNT_MAX));     \
+            num_p num_2 = num_create_rand(rand_64_range(COUNT_MIN, COUNT_MAX));     \
+            uint64_t res_1 = ssm_check_span(num_1->chunk, num_1->count, 0);         \
+            uint64_t res_2 = ssm_check_span(num_2->chunk, num_2->count, 0);         \
+            num_p num_res = num_mul_classic(num_1, num_2);                          \
+            uint64_t res = ssm_check_span(num_res->chunk, num_res->count, 0);       \
+            assert(uint64(res, ssm_check_mul(res_1, res_2)))                        \
+            num_free(num_1);                                                        \
+            num_free(num_2);                                                        \
+            num_free(num_res);                                                      \
+        }                                                                           \
+        TEST_FUZZ_CASE_CLOSE                                                        \
+    }
+
+    TEST_FUZZ_SSM_CHECK_SPAN(1, 1, 8, 100)
+    TEST_FUZZ_SSM_CHECK_SPAN(2, 8, 200, 20)
+
+    #undef TEST_FUZZ_SSM_CHECK_SPAN
+
+    TEST_FN_CLOSE
+}
+
 
 
 static void test_num_div_normalize(bool show)
@@ -3346,6 +3468,9 @@ static void test_all(bool show)
     test_num_ssm_fft_fwd(show);
     test_num_ssm_depad_wrap(show);
     test_num_ssm_mul_wrap(show);
+    test_ssm_check_mul(show);
+    test_ssm_check_span(show);
+    test_ssm_product_residue_check(show);
 
     test_num_div_normalize(show);
 
@@ -3372,6 +3497,7 @@ static void test_all(bool show)
     test_fuzz_num_ssm_pad_no_wrap_round_trip(show);
     test_fuzz_num_ssm_pad_wrap_round_trip(show);
     test_fuzz_num_ssm_fft(show);
+    test_fuzz_ssm_check_span(show);
     test_fuzz_num_ssm_mul(show);
     test_fuzz_num_ssm_sqr(show);
     test_fuzz_num_bz_div(show);

@@ -3220,6 +3220,68 @@ static void ssm_fft_fwd_block(
     }
 }
 
+// 2^64 - 59, a prime; 2^64 is 59 modulo it
+constexpr uint64_t ssm_check_prime = UINT64_MAX - 58;
+constexpr uint64_t ssm_check_radix = 59;
+
+// VALUE modulo ssm_check_prime
+static uint64_t ssm_check_fold(uint128_t value)
+{
+    uint128_t folded = MUL(HIGH(value), ssm_check_radix) + LOW(value);
+    uint64_t low = LOW(folded);
+    uint64_t res = low + (HIGH(folded) * ssm_check_radix);
+    if(res < low)
+    {
+        res += ssm_check_radix;
+    }
+    return res >= ssm_check_prime ? res - ssm_check_prime : res;
+}
+
+static uint64_t ssm_check_add(uint64_t value_1, uint64_t value_2)
+{
+    return ssm_check_fold(U128(value_1) + value_2);
+}
+
+uint64_t ssm_check_mul(uint64_t value_1, uint64_t value_2)
+{
+    return ssm_check_fold(MUL(value_1, value_2));
+}
+
+// 2^(64 * exp) modulo ssm_check_prime
+static uint64_t ssm_check_pow(uint64_t exp)
+{
+    uint64_t res = 1;
+    uint64_t base = ssm_check_radix;
+    for(; exp; exp >>= 1)
+    {
+        if(exp & 1)
+        {
+            res = ssm_check_mul(res, base);
+        }
+        base = ssm_check_mul(base, base);
+    }
+    return res;
+}
+
+// the COUNT limbs at LIMBS, placed POS limbs up, modulo ssm_check_prime
+uint64_t ssm_check_span(const uint64_t * limbs, uint64_t count, uint64_t pos)
+{
+    uint64_t res = 0;
+    for(uint64_t i=count; i>0; i--)
+    {
+        res = ssm_check_fold(MUL(res, ssm_check_radix) + limbs[i-1]);
+    }
+    return ssm_check_mul(res, ssm_check_pow(pos));
+}
+
+static void ssm_check_accumulate(_Atomic uint64_t * total, uint64_t value)
+{
+    uint64_t old = atomic_load(total);
+    while(!atomic_compare_exchange_weak(total, &old, ssm_check_add(old, value)))
+    {
+    }
+}
+
 typedef struct
 {
     num_p num;
@@ -3227,6 +3289,9 @@ typedef struct
     uint64_t full_chunks;
     uint64_t tail;
     bool extra;
+    // residue collects the operand limbs the pad reads, modulo ssm_check_prime
+    bool check;
+    _Atomic uint64_t residue;
 } ssm_fft_fwd_pad_t;
 
 static void ssm_fft_fwd_pad_block(
@@ -3246,6 +3311,7 @@ static void ssm_fft_fwd_pad_block(
     uint64_t width = U64(1) << r;
     uint64_t base = a + ((gl << r) * c);
     const uint64_t * restrict src = pad->num->chunk;
+    uint64_t residue = 0;
 
     for(uint64_t b = 0; b < width; b++)
     {
@@ -3278,6 +3344,25 @@ static void ssm_fft_fwd_pad_block(
         {
             dest[pad->M] = src[pad->num->count - 1];
         }
+
+        if(!pad->check)
+        {
+            continue;
+        }
+
+        residue = ssm_check_add(residue, ssm_check_span(dest, copy, pad->M * x));
+        if(pad->extra && (x == K - 1))
+        {
+            residue = ssm_check_add(
+                residue,
+                ssm_check_span(&dest[pad->M], 1, pad->num->count - 1)
+            );
+        }
+    }
+
+    if(pad->check)
+    {
+        ssm_check_accumulate(&pad->residue, residue);
     }
 }
 
@@ -3661,11 +3746,13 @@ void num_ssm_fft_fwd(num_p num_aux, num_p num_fft, ssm_params_p p, uint64_t thre
 // num_ssm_fft_fwd over an array that has not been populated yet: the padding of NUM
 // into n-limb blocks happens inside the transform's first pass. NUM is only read.
 // num_fft->size >= p->n * p->K, num_aux->size >= 2 * p->n
+// out_residue non-null receives NUM modulo ssm_check_prime, from the limbs as read
 static void num_ssm_fft_fwd_pad(
     num_p num_aux,
     num_p num_fft,
     num_p num,
     ssm_params_p p,
+    uint64_t * out_residue,
     uint64_t threads
 )
 {
@@ -3691,9 +3778,15 @@ static void num_ssm_fft_fwd_pad(
         .full_chunks = full_chunks,
         .tail = num->count % p->M,
         .extra = (bool)(num->count == (p->M * p->K) + 1),
+        .check = (bool)(out_residue != nullptr),
     };
 
     num_ssm_fft_fwd_rec(num_aux, num_fft, 0, 1, p->n, p->K, 2 * p->Q, p->Q, &pad, threads);
+
+    if(out_residue)
+    {
+        *out_residue = atomic_load(&pad.residue);
+    }
 }
 
 static void ssm_fft_inv_block(
@@ -5486,6 +5579,9 @@ typedef struct
     uint64_t pos_init;
     uint64_t pos_max;
     uint64_t carry;
+    // residue collects the limbs a staged worker assembles, modulo ssm_check_prime
+    bool check;
+    uint64_t residue;
 } ssm_depad_worker_t;
 
 static void * ssm_depad_worker(void * arg)
@@ -5544,6 +5640,7 @@ static void * ssm_depad_worker_staged(void * arg)
     assert(elem)
 
     uint64_t carry = 0;
+    uint64_t residue = 0;
     for(uint64_t p_0 = w->pos_init; p_0 < w->pos_max; p_0 += chunk_limbs)
     {
         uint64_t p_1 = p_0 + chunk_limbs < w->pos_max ? p_0 + chunk_limbs : w->pos_max;
@@ -5569,6 +5666,11 @@ static void * ssm_depad_worker_staged(void * arg)
             carry += ssm_depad_add(&res[lo - p_0], elem, hi - lo, p_1 - lo);
         }
 
+        if(w->check)
+        {
+            residue = ssm_check_add(residue, ssm_check_span(res, p_1 - p_0, p_0));
+        }
+
         if(w->num_res->is_mmap)
         {
             num_block_write(w->num_res, p_0, res, p_1 - p_0);
@@ -5583,16 +5685,25 @@ static void * ssm_depad_worker_staged(void * arg)
     free(res);
 
     w->carry = carry;
+    w->residue = residue;
     return nullptr;
 }
 
 // Blocks below this leave too little per worker to pay for the threads
 constexpr uint64_t ssm_depad_min_limbs_to_thread = 65536;
 
-num_p num_ssm_depad_no_wrap(num_p num, ssm_params_p p, uint64_t threads)
+// out_residue non-null needs a disk backed NUM, and receives the result modulo
+// ssm_check_prime, from the limbs as assembled
+static num_p num_ssm_depad_no_wrap_check(
+    num_p num,
+    ssm_params_p p,
+    uint64_t * out_residue,
+    uint64_t threads
+)
 {
     CLU_HANDLER_IS_SAFE(num)
     assert(num)
+    assert(!out_residue || num->is_mmap)
 
     uint64_t target_count = (p->M * (p->K - 1)) + p->n;
     num_p num_res = num_create(CLU_ARGS(target_count, target_count));
@@ -5621,6 +5732,7 @@ num_p num_ssm_depad_no_wrap(num_p num, ssm_params_p p, uint64_t threads)
             .pos_init = pos_init,
             .pos_max = pos_max,
             .carry = 0,
+            .check = (bool)(out_residue != nullptr),
         };
     }
 
@@ -5646,18 +5758,40 @@ num_p num_ssm_depad_no_wrap(num_p num, ssm_params_p p, uint64_t threads)
         }
     }
 
+    if(out_residue)
+    {
+        uint64_t residue = 0;
+        for(uint64_t w=0; w<workers; w++)
+        {
+            residue = ssm_check_add(residue, worker_args[w].residue);
+            residue = ssm_check_add(
+                residue,
+                ssm_check_span(&worker_args[w].carry, 1, worker_args[w].pos_max)
+            );
+        }
+        *out_residue = residue;
+    }
+
     free(worker_args);
     free(worker_ids);
     num_free(num);
     return num_normalize(num_res);
 }
 
+[[maybe_unused]]
+num_p num_ssm_depad_no_wrap(num_p num, ssm_params_p p, uint64_t threads)
+{
+    return num_ssm_depad_no_wrap_check(num, p, nullptr, threads);
+}
+
 // num_aux->size >= 2 * n
+// a disk backed array leaves NUM modulo ssm_check_prime in out_residue
 static num_p num_ssm_prepare_no_wrap(
     num_p num_aux,
     num_p num,
     ssm_params_p p,
     bool free_inputs,
+    uint64_t * out_residue,
     uint64_t threads
 )
 {
@@ -5669,7 +5803,7 @@ static num_p num_ssm_prepare_no_wrap(
 
     num_p num_fft = num_create_dirty(CLU_ARGS(p->n * p->K, 0));
 
-    num_ssm_fft_fwd_pad(num_aux, num_fft, num, p, threads);
+    num_ssm_fft_fwd_pad(num_aux, num_fft, num, p, num_fft->is_mmap ? out_residue : nullptr, threads);
 
     if(free_inputs)
     {
@@ -5686,6 +5820,12 @@ static void ssm_product_count_check(num_p num_res, uint64_t count_max, bool tops
     assert(!tops || (num_res->count + 1 >= count_max))
 }
 
+// A product modulo ssm_check_prime is the product of its operands modulo it
+void ssm_product_residue_check(uint64_t residue_1, uint64_t residue_2, uint64_t residue_res)
+{
+    assert(ssm_check_mul(residue_1, residue_2) == residue_res)
+}
+
 // KEEPS NUM_1 NUM_2
 num_p num_mul_ssm(num_p num_1, num_p num_2, bool free_inputs, uint64_t threads)
 {
@@ -5698,17 +5838,28 @@ num_p num_mul_ssm(num_p num_1, num_p num_2, bool free_inputs, uint64_t threads)
     bool tops = num_1->count && num_2->count
         && num_1->chunk[num_1->count - 1] && num_2->chunk[num_2->count - 1];
 
+    uint64_t residue_1 = 0;
+    uint64_t residue_2 = 0;
+    uint64_t residue_res = 0;
+
     ssm_params_t p = ssm_get_params(num_1->count + num_2->count);
     num_p num_aux_2 = num_create_dirty(CLU_ARGS(2 * p.n, 0));
-    num_p num_fft_1 = num_ssm_prepare_no_wrap(num_aux_2, num_1, &p, free_inputs, threads);
-    num_p num_fft_2 = num_ssm_prepare_no_wrap(num_aux_2, num_2, &p, free_inputs, threads);
+    num_p num_fft_1 = num_ssm_prepare_no_wrap(num_aux_2, num_1, &p, free_inputs, &residue_1, threads);
+    num_p num_fft_2 = num_ssm_prepare_no_wrap(num_aux_2, num_2, &p, free_inputs, &residue_2, threads);
+
+    // a disk backed transform has its product checked against the operands as read
+    bool check = num_fft_1->is_mmap;
 
     num_ssm_fft_inv_pointwise(num_aux_2, num_fft_1, num_fft_2, &p, threads);
     num_free(num_fft_2);
     num_free(num_aux_2);
 
-    num_p num_res = num_ssm_depad_no_wrap(num_fft_1, &p, threads);
+    num_p num_res = num_ssm_depad_no_wrap_check(num_fft_1, &p, check ? &residue_res : nullptr, threads);
     ssm_product_count_check(num_res, count_max, tops);
+    if(check)
+    {
+        ssm_product_residue_check(residue_1, residue_2, residue_res);
+    }
     return num_res;
 }
 
@@ -6205,15 +6356,24 @@ num_p num_sqr_ssm(num_p num, uint64_t threads)
     uint64_t count_max = 2 * num->count;
     bool tops = num->count && num->chunk[num->count - 1];
 
+    uint64_t residue = 0;
+    uint64_t residue_res = 0;
+
     ssm_params_t p = ssm_get_params(2 * num->count);
     num_p num_aux_2 = num_create_dirty(CLU_ARGS(2 * p.n, 0));
-    num_p num_fft = num_ssm_prepare_no_wrap(num_aux_2, num, &p, true, threads);
+    num_p num_fft = num_ssm_prepare_no_wrap(num_aux_2, num, &p, true, &residue, threads);
+
+    bool check = num_fft->is_mmap;
 
     num_ssm_fft_inv_pointwise(num_aux_2, num_fft, num_fft, &p, threads);
     num_free(num_aux_2);
 
-    num_p num_res = num_ssm_depad_no_wrap(num_fft, &p, threads);
+    num_p num_res = num_ssm_depad_no_wrap_check(num_fft, &p, check ? &residue_res : nullptr, threads);
     ssm_product_count_check(num_res, count_max, tops);
+    if(check)
+    {
+        ssm_product_residue_check(residue, residue, residue_res);
+    }
     return num_res;
 }
 

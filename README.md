@@ -140,6 +140,16 @@ this aborts through `assert`, which stays live in production, instead of being
 returned. The check catches a corrupted transform, which leaves garbage in the
 zero padding above the product, but not damage confined below its top limbs.
 
+A product whose transform arrays are on disk is also checked by value. The
+operands are reduced modulo 2^64 - 59 from the limbs the transform reads, the
+product from the limbs it assembles, and the product of the first two has to
+equal the third; a mismatch aborts the same way. That covers everything between
+reading the operands and assembling the product, whichever layer did the damage:
+a wrong product of the right length included. It does not cover a product chunk
+that was assembled right and written wrong, a number damaged while it sat on
+disk between two operations, or a multiply whose arrays are in RAM, which is
+not checked at all.
+
 ## Threading
 
 Every heavy operation has a `*_threads` counterpart taking a thread count as
