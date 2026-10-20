@@ -198,6 +198,18 @@ set. Past the size where that cap saturates, the charge stops growing with the
 operands — a scheduler comparing two joins on it should expect the larger one
 to charge no more, and sometimes slightly less.
 
+`num_base_to_threads` schedules its own task pool on it. With
+`pool_budget_bytes` set, a task starts only while the tasks running, it
+included, are charged within the budget, each at the estimate of its first
+product; a task always starts when none is running. The default `0` starts
+every outstanding task at once. A piece waiting in the pool is trimmed to its
+count, and one over `ram_budget_bytes` waits in a file-backed mapping, as the
+conversion's powers of the base and their reciprocals do. With the budget set,
+the powers and reciprocals of the levels the pool splits on are held in
+file-backed mappings whatever their size, since only those levels' splits read
+them. Every task, a leaf converting its whole subtree included, runs on its
+share of the threads.
+
 ## Ownership
 
 - **Operations consume their inputs.** `num_add`, `num_mul`, `num_pow`,

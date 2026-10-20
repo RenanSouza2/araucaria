@@ -68,6 +68,41 @@ static void test_fuzz_num_ssm_stage_wide(bool show)
     TEST_FN_CLOSE
 }
 
+// A 1 byte budget starts every task alone; at 48 and 64 KiB some top levels run
+// alone and the leaf tasks run together
+static void test_fuzz_num_base_to_threads_budget(araucaria_disk_config_t config, bool show)
+{
+    TEST_FN_OPEN
+
+    #define TEST_FUZZ_NUM_BASE_TO_BUDGET(TAG, COUNT, RUNS, THREADS, BUDGET)        \
+    {                                                                              \
+        TEST_FUZZ_CASE_OPEN(TAG, RUNS)                                             \
+        {                                                                          \
+            config.pool_budget_bytes = BUDGET;                                     \
+            araucaria_disk_config_set(&config);                                    \
+            fuzz_seed(_tag);                                                       \
+            num_p num = num_create_rand(COUNT);                                    \
+            num_p num_res_1 = num_base_to_threads(num_copy(num), 10, THREADS);     \
+            num_p num_res_2 = num_base_to(num, 10);                                \
+            assert(num_eq_dbg(num_res_1, num_res_2));                              \
+        }                                                                          \
+        TEST_FUZZ_CASE_CLOSE                                                       \
+    }
+
+    TEST_FUZZ_NUM_BASE_TO_BUDGET(1, 5000, 2, 4, 1)
+    TEST_FUZZ_NUM_BASE_TO_BUDGET(2, 5000, 2, 4, U64(48) * 1024)
+    TEST_FUZZ_NUM_BASE_TO_BUDGET(3, 20000, 1, 16, 1)
+    TEST_FUZZ_NUM_BASE_TO_BUDGET(4, 20000, 1, 16, U64(64) * 1024)
+    TEST_FUZZ_NUM_BASE_TO_BUDGET(5, 20000, 1, 8, U64(1) * 1024 * 1024)
+
+    #undef TEST_FUZZ_NUM_BASE_TO_BUDGET
+
+    config.pool_budget_bytes = 0;
+    araucaria_disk_config_set(&config);
+
+    TEST_FN_CLOSE
+}
+
 
 
 static void test_num_stage()
@@ -90,6 +125,7 @@ static void test_num_stage()
     araucaria_disk_config_set(&config);
 
     test_fuzz_num_ssm_stage_wide(show);
+    test_fuzz_num_base_to_threads_budget(config, show);
 
     TEST_ASSERT_MEM_EMPTY
 }

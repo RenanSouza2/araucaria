@@ -19,6 +19,9 @@ STRUCT(araucaria_disk_config)
     // RAM one worker may hold resident over a disk backed transform; 0 blocks
     // the FFT passes for cache instead of for RAM
     uint64_t ram_budget_bytes;
+    // RAM, as num_mul_estimate_memory charges it, that num_base_to_threads'
+    // running tasks may take together; 0 leaves them unbounded
+    uint64_t pool_budget_bytes;
 };
 
 STRUCT(num)

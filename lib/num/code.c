@@ -7180,7 +7180,8 @@ static void num_base_to_rec(
     num_p num,
     num_p num_bases[],
     num_p num_recips[],
-    uint64_t i
+    uint64_t i,
+    uint64_t threads
 )
 {
     CLU_HANDLER_IS_SAFE(num);
@@ -7203,14 +7204,14 @@ static void num_base_to_rec(
 
     if(num_cmp(num, num_bases[i]) < 0)
     {
-        num_base_to_rec(num_res, pos, num, num_bases, num_recips, i - 1);
+        num_base_to_rec(num_res, pos, num, num_bases, num_recips, i - 1, threads);
         return;
     }
 
     num_p num_q, num_r;
-    num_base_to_split(&num_q, &num_r, num, num_bases[i], num_recips[i], 1);
-    num_base_to_rec(num_res, pos, num_r, num_bases, num_recips, i - 1);
-    num_base_to_rec(num_res, pos + B(i), num_q, num_bases, num_recips, i - 1);
+    num_base_to_split(&num_q, &num_r, num, num_bases[i], num_recips[i], threads);
+    num_base_to_rec(num_res, pos, num_r, num_bases, num_recips, i - 1, threads);
+    num_base_to_rec(num_res, pos + B(i), num_q, num_bases, num_recips, i - 1, threads);
 }
 
 // One subtree of the split: a piece below num_bases[level + 1], whose digits go
@@ -7224,7 +7225,7 @@ typedef struct
 
 // Levels do not run in lockstep: a piece is split as soon as any worker is free
 // and its halves join the stack immediately. THREADS is shared out over the
-// tasks outstanding
+// tasks outstanding, or over as many as the budget runs at once
 typedef struct
 {
     pthread_mutex_t lock;
@@ -7237,7 +7238,87 @@ typedef struct
     num_p * num_recips;
     uint64_t leaf;
     uint64_t threads;
+    // split tasks queued or running, by level
+    uint64_t * open;
+    // the highest level whose base and reciprocal are still held
+    uint64_t held;
+    // num_mul_estimate_memory of a task's first split, by level
+    const uint64_t * cost;
+    // cost of the tasks running
+    uint64_t charged;
+    // pool_budget_bytes, 0 for no bound
+    uint64_t budget;
 } num_base_to_pool_t;
+
+// Most levels a conversion's table can have
+constexpr uint64_t base_to_levels_max = 100;
+
+// Over ram_budget_bytes, with a disk path to hold it
+static bool num_base_to_is_big(num_p num)
+{
+    return araucaria_disk_config_is_set()
+        && num->count * sizeof(uint64_t) > s_araucaria_disk_config.ram_budget_bytes;
+}
+
+// Moves a base or reciprocal to a file-backed mapping over the RAM budget, or
+// on a SPLIT level while the pool has a budget
+static num_p num_base_to_offload(num_p num, bool split)
+{
+    bool pooled = split
+        && araucaria_disk_config_is_set()
+        && s_araucaria_disk_config.pool_budget_bytes;
+    return pooled || num_base_to_is_big(num) ? num_realloc_disk(CLU_ARGS(num)) : num;
+}
+
+// A piece waits on the stack at the size num_create gives its count, and in a
+// file-backed mapping once over ram_budget_bytes
+static num_p num_base_to_hold(num_p num)
+{
+    bool big = num_base_to_is_big(num);
+    if(num->size <= (num->count ? num->count : 1) && (num->is_mmap || !big))
+    {
+        return num;
+    }
+
+    num_p num_res = big
+        ? num_create_disk(CLU_ARGS(num->count, num->count))
+        : num_create_dirty(CLU_ARGS(num->count, num->count));
+    memcpy(num_res->chunk, num->chunk, num->count * sizeof(uint64_t));
+    num_free(num);
+    return num_res;
+}
+
+static uint64_t num_base_to_task_cost(const num_base_to_pool_t * pool, uint64_t level)
+{
+    return level == UINT64_MAX ? 0 : pool->cost[level];
+}
+
+// The task on top starts alone, or while the tasks running, it included, are
+// charged within the budget
+static bool num_base_to_task_fits(const num_base_to_pool_t * pool)
+{
+    if(pool->budget == 0 || pool->active == 0)
+    {
+        return true;
+    }
+
+    uint64_t cost = num_base_to_task_cost(pool, pool->task[pool->count - 1].level);
+    return pool->charged + cost <= pool->budget;
+}
+
+// Tasks a started task shares the threads with, itself included
+static uint64_t num_base_to_task_width(const num_base_to_pool_t * pool, uint64_t cost)
+{
+    uint64_t width = pool->count + pool->active;
+    if(pool->budget == 0 || cost == 0)
+    {
+        return width;
+    }
+
+    uint64_t fit = pool->budget / cost;
+    fit = fit ? fit : 1;
+    return width < fit ? width : fit;
+}
 
 static void * num_base_to_pool_worker(void * arg)
 {
@@ -7246,7 +7327,7 @@ static void * num_base_to_pool_worker(void * arg)
     TREAT(pthread_mutex_lock(&pool->lock))
     while(true)
     {
-        while(pool->count == 0 && pool->active)
+        while(pool->active && (pool->count == 0 || !num_base_to_task_fits(pool)))
         {
             TREAT(pthread_cond_wait(&pool->cond, &pool->lock))
         }
@@ -7257,8 +7338,11 @@ static void * num_base_to_pool_worker(void * arg)
         }
 
         num_base_to_task_t task = pool->task[--pool->count];
+        uint64_t cost = num_base_to_task_cost(pool, task.level);
         pool->active++;
-        uint64_t share = pool->threads / (pool->count + pool->active);
+        pool->charged += cost;
+        uint64_t share = pool->threads / num_base_to_task_width(pool, cost);
+        share = share ? share : 1;
         TREAT(pthread_mutex_unlock(&pool->lock))
 
         num_p num_q = nullptr;
@@ -7271,24 +7355,28 @@ static void * num_base_to_pool_worker(void * arg)
                 task.num,
                 pool->num_bases[task.level],
                 pool->num_recips[task.level],
-                share ? share : 1
+                share
             );
+            num_r = num_base_to_hold(num_r);
+            num_q = num_base_to_hold(num_q);
         }
         else
         {
-            // below leaf the whole subtree is cheaper to convert on one thread
+            // below leaf one task converts the whole subtree, on its share
             num_base_to_rec(
                 pool->num_res,
                 task.pos,
                 task.num,
                 pool->num_bases,
                 pool->num_recips,
-                task.level
+                task.level,
+                share
             );
         }
 
         TREAT(pthread_mutex_lock(&pool->lock))
         pool->active--;
+        pool->charged -= cost;
         if(num_r)
         {
             pool->task[pool->count++] = (num_base_to_task_t)
@@ -7303,8 +7391,42 @@ static void * num_base_to_pool_worker(void * arg)
                 .level = task.level - 1,
                 .pos = task.pos + B(task.level),
             };
+            if(task.level - 1 != UINT64_MAX && task.level - 1 >= pool->leaf)
+            {
+                pool->open[task.level - 1] += 2;
+            }
+        }
+
+        // a split level's pair is dead once no task is left at or above it;
+        // the leaf pass keeps the levels below leaf to the end
+        uint64_t dead = 0;
+        num_p num_dead[2];
+        if(num_r)
+        {
+            pool->open[task.level]--;
+            if(pool->held == task.level && pool->open[task.level] == 0)
+            {
+                num_dead[dead++] = pool->num_bases[task.level];
+                pool->num_bases[task.level] = nullptr;
+                if(pool->num_recips[task.level])
+                {
+                    num_dead[dead++] = pool->num_recips[task.level];
+                    pool->num_recips[task.level] = nullptr;
+                }
+                pool->held--;
+            }
         }
         TREAT(pthread_cond_broadcast(&pool->cond))
+
+        if(dead)
+        {
+            TREAT(pthread_mutex_unlock(&pool->lock))
+            for(uint64_t i=0; i<dead; i++)
+            {
+                num_free(num_dead[i]);
+            }
+            TREAT(pthread_mutex_lock(&pool->lock))
+        }
     }
 
     TREAT(pthread_cond_broadcast(&pool->cond))
@@ -7323,8 +7445,11 @@ num_p num_base_to(num_p num, uint64_t base)
 
 // Binary splitting: at level i a piece is divided by base ^ (2 ^ i), remainder
 // low half, quotient high. A piece's digit offset follows from its index, so
-// every worker writes into the one result buffer and nothing is spliced. The
-// reciprocals are freed as the level loop descends past the level using each.
+// every worker writes into the one result buffer and nothing is spliced. A
+// split level's base and reciprocal are freed once the pool is past the level.
+// Any base, reciprocal or waiting piece over ram_budget_bytes is held in a
+// file-backed mapping, as is every split level's base and reciprocal while
+// pool_budget_bytes is set, and tasks start under pool_budget_bytes.
 num_p num_base_to_threads(num_p num, uint64_t base, uint64_t threads)
 {
     CLU_HANDLER_IS_SAFE(num);
@@ -7332,16 +7457,16 @@ num_p num_base_to_threads(num_p num, uint64_t base, uint64_t threads)
     assert(base > 1);
     assert(threads);
 
-    constexpr uint64_t len = 100;
     num_p num_base = num_wrap(base);
-    num_p num_bases[len];
+    num_p num_bases[base_to_levels_max];
 
     // The bit counts end the table without the final square; a null num_base
     // past the loop means the table owns the last one
     uint64_t max = 0;
     while(num_cmp(num_base, num) <= 0)
     {
-        assert(max < len);
+        assert(max < base_to_levels_max);
+        num_base = num_base_to_offload(num_base, false);
         num_bases[max++] = num_base;
 
         if((2 * num_bit_count(num_base)) - 1 > num_bit_count(num))
@@ -7369,35 +7494,47 @@ num_p num_base_to_threads(num_p num, uint64_t base, uint64_t threads)
         leaf--;
     }
 
+    for(uint64_t i=leaf; i<max; i++)
+    {
+        num_bases[i] = num_base_to_offload(num_bases[i], true);
+    }
+
     uint64_t top = num_bases[max-1]->count;
     uint64_t levels = (num->count - top) * base_to_barrett_top_quotient_share < top
         ? max - 1
         : max;
 
-    // One per level, each Newton step doubling the precision of the one below.
-    // The level loop frees them as it descends; the levels the leaf pass runs
-    // concurrently are freed at the end
-    num_p num_recips[len];
+    // One per level, each Newton step doubling the precision of the one below
+    num_p num_recips[base_to_levels_max];
     for(uint64_t i=0; i<max; i++)
     {
         num_recips[i] = nullptr;
     }
     for(uint64_t i=0; i<levels; i++)
     {
-        num_recips[i] = i
+        num_recips[i] = num_base_to_offload(i
             ? num_base_to_recip_next(
                 num_recips[i-1],
                 num_bases[i-1]->count,
                 num_bases[i],
                 threads
             )
-            : num_base_to_recip_seed(base);
+            : num_base_to_recip_seed(base), i >= leaf);
     }
 
     // A task's digits land at an offset fixed by its place in the split, so every
     // worker writes into one result buffer. B(max) is up to twice the digits num
     // needs; the pages past them are never touched
     num_p num_res = num_create(CLU_ARGS(B(max), B(max)));
+
+    // a split's first product: the top n + 1 limbs of its piece by the
+    // reciprocal, n + 1 + g limbs
+    uint64_t costs[base_to_levels_max];
+    for(uint64_t i=0; i<max; i++)
+    {
+        uint64_t n = num_bases[i]->count;
+        costs[i] = num_mul_estimate_memory(n + 1, n + 1 + base_to_recip_guard, 1);
+    }
 
     // never more tasks than the pieces at the deepest level the pool splits to
     num_base_to_pool_t pool =
@@ -7409,8 +7546,13 @@ num_p num_base_to_threads(num_p num, uint64_t base, uint64_t threads)
         .num_recips = num_recips,
         .leaf = leaf,
         .threads = threads,
+        .open = calloc(max, sizeof(uint64_t)),
+        .held = max - 1,
+        .cost = costs,
+        .budget = s_araucaria_disk_config.pool_budget_bytes,
     };
     assert(pool.task);
+    assert(pool.open);
     TREAT(pthread_mutex_init(&pool.lock, nullptr))
     TREAT(pthread_cond_init(&pool.cond, nullptr))
 
@@ -7420,6 +7562,10 @@ num_p num_base_to_threads(num_p num, uint64_t base, uint64_t threads)
         .level = max - 1,
         .pos = 0,
     };
+    if(max - 1 >= leaf)
+    {
+        pool.open[max - 1] = 1;
+    }
 
     pthread_t * worker_ids = malloc(threads * sizeof(pthread_t));
     assert(worker_ids);
@@ -7437,10 +7583,14 @@ num_p num_base_to_threads(num_p num, uint64_t base, uint64_t threads)
     TREAT(pthread_mutex_destroy(&pool.lock))
     free(worker_ids);
     free(pool.task);
+    free(pool.open);
 
     for(uint64_t i=0; i<max; i++)
     {
-        num_free(num_bases[i]);
+        if(num_bases[i])
+        {
+            num_free(num_bases[i]);
+        }
         if(num_recips[i])
         {
             num_free(num_recips[i]);
