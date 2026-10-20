@@ -16,8 +16,8 @@
 // Slot i holds the offset one past entry i, 0 until committed, so entry i
 // spans [i ? end_{i-1} : header, end_i). MAGIC_ENTRY, written after the
 // payload, is what certifies an entry; the slot is not.
-static constexpr uint64_t MAGIC_FILE = 0xd0bbe;
-static constexpr uint64_t MAGIC_ENTRY = 0xe10be;
+static constexpr uint64_t MAGIC_FILE = 0xd0bbe2;
+static constexpr uint64_t MAGIC_ENTRY = 0xe10be2;
 
 static uint64_t file_header_size(uint64_t amount)
 {

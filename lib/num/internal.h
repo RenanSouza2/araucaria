@@ -23,4 +23,6 @@ void num_dec_dump(
 );
 void num_dec_write(FILE *fp, num_p num, uint64_t threads);
 
+uint64_t num_residue_add_span(uint64_t residue, const uint64_t * limbs, uint64_t count, uint64_t pos);
+
 #endif

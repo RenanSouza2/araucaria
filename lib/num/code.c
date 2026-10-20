@@ -3274,6 +3274,12 @@ uint64_t ssm_check_span(const uint64_t * limbs, uint64_t count, uint64_t pos)
     return ssm_check_mul(res, ssm_check_pow(pos));
 }
 
+// RESIDUE plus the COUNT limbs at LIMBS, placed POS limbs up, modulo ssm_check_prime
+uint64_t num_residue_add_span(uint64_t residue, const uint64_t * limbs, uint64_t count, uint64_t pos)
+{
+    return ssm_check_add(residue, ssm_check_span(limbs, count, pos));
+}
+
 static void ssm_check_accumulate(_Atomic uint64_t * total, uint64_t value)
 {
     uint64_t old = atomic_load(total);

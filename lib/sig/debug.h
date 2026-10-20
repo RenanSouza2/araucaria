@@ -5,6 +5,10 @@
 
 #include "header.h" // IWYU pragma: keep
 
+// Limbs a save or a load moves per step, folding each step into the residue
+[[maybe_unused]]
+constexpr uint64_t sig_file_block_limbs = U64(1) << 20;
+
 #ifdef DEBUG
 
 #include <stdarg.h>

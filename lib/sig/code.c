@@ -273,11 +273,22 @@ sig_num_t sig_num_head_trim(sig_num_t sig, uint64_t count) // TODO test
 
 
 
+// [signal][count][limbs][the limbs modulo 2^64 - 59]
 void file_write_sig_num_raw(file_p fp, sig_num_t sig)
 {
+    uint64_t count = sig.num->count;
     file_write_uint64(fp, sig.signal);
-    file_write_uint64(fp, sig.num->count);
-    assert(fwrite(sig.num->chunk, sizeof(uint64_t), sig.num->count, fp->fp) == sig.num->count);
+    file_write_uint64(fp, count);
+
+    uint64_t residue = 0;
+    for(uint64_t p_0 = 0; p_0 < count; p_0 += sig_file_block_limbs)
+    {
+        uint64_t p_1 = p_0 + sig_file_block_limbs < count ? p_0 + sig_file_block_limbs : count;
+        const uint64_t * limbs = &sig.num->chunk[p_0];
+        residue = num_residue_add_span(residue, limbs, p_1 - p_0, p_0);
+        assert(fwrite(limbs, sizeof(uint64_t), p_1 - p_0, fp->fp) == p_1 - p_0);
+    }
+    file_write_uint64(fp, residue);
 }
 
 void file_write_sig_num(file_p fp, sig_num_t sig)
@@ -301,7 +312,16 @@ sig_num_t file_read_sig_num_raw(FILE *fp)
     uint64_t signal = file_read_uint64(fp);
     uint64_t count = file_read_uint64(fp);
     num_p num = num_create(CLU_ARGS(count, count));
-    assert(fread(num->chunk, sizeof(uint64_t), count, fp) == count);
+
+    uint64_t residue = 0;
+    for(uint64_t p_0 = 0; p_0 < count; p_0 += sig_file_block_limbs)
+    {
+        uint64_t p_1 = p_0 + sig_file_block_limbs < count ? p_0 + sig_file_block_limbs : count;
+        uint64_t * limbs = &num->chunk[p_0];
+        assert(fread(limbs, sizeof(uint64_t), p_1 - p_0, fp) == p_1 - p_0);
+        residue = num_residue_add_span(residue, limbs, p_1 - p_0, p_0);
+    }
+    assert(file_read_uint64(fp) == residue);
 
     return sig_num_create(signal, num);
 }
@@ -312,7 +332,7 @@ sig_num_t file_read_sig_num(FILE *fp, uint64_t index)
     return file_read_sig_num_raw(fp);
 }
 
-sig_num_t sig_num_load(char file_path[])
+sig_num_t sig_num_load(const char file_path[])
 {
     FILE *fp = file_read_open(file_path);
     assert(fp);

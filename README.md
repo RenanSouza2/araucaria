@@ -150,6 +150,17 @@ that was assembled right and written wrong, a number damaged while it sat on
 disk between two operations, or a multiply whose arrays are in RAM, which is
 not checked at all.
 
+## Saved numbers
+
+`sig_num_save`, `fxd_num_save`, `flt_num_save` and the `file_write_*_num` calls
+store a number's limbs followed by their residue modulo 2^64 - 59, the same
+reduction the multiply check uses. Loading recomputes the residue from the limbs
+as they are read and aborts through `assert` on a mismatch. That catches limbs
+that changed between the write and the read: a bad write, a file damaged on
+disk, a bad read. It covers the limbs and their count, not the other words
+stored with them (sign, exponent, size), and not a number that was already
+wrong when it was saved.
+
 ## Threading
 
 Every heavy operation has a `*_threads` counterpart taking a thread count as

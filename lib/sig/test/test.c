@@ -2,6 +2,7 @@
 #include "../../../testrc.h"
 #include "../../../mods/macros/test.h"
 
+#include "../../file/header.h"
 #include "../../num/debug.h"
 
 
@@ -769,6 +770,151 @@ static void test_sig_num_div_threads(bool show)
 }
 
 
+
+// 2^64 - 59
+constexpr uint64_t save_residue_prime = UINT64_MAX - 58;
+
+static const char save_path[] = "./cache/sig.bin";
+
+// NUM modulo save_residue_prime
+static uint64_t save_num_residue(num_p num)
+{
+    uint64_t res = 0;
+    for(uint64_t i=num->count; i>0; i--)
+    {
+        res = LOW(U128HL(res, num->chunk[i-1]) % save_residue_prime);
+    }
+    return res;
+}
+
+// file offset of limb INDEX of the number saved at save_path; index count is its residue
+static long save_word_pos(uint64_t index)
+{
+    FILE *fp = file_read_open(save_path);
+    assert(fp);
+    file_read_move_to_index(fp, 0);
+    long pos = ftell(fp);
+    fclose(fp);
+    return pos + (long)((2 + index) * sizeof(uint64_t));
+}
+
+static uint64_t save_word_get(uint64_t index)
+{
+    long pos = save_word_pos(index);
+    FILE *fp = fopen(save_path, "rb");
+    assert(fp);
+    assert(fseek(fp, pos, SEEK_SET) == 0);
+    uint64_t value;
+    assert(fread(&value, sizeof(uint64_t), 1, fp) == 1);
+    fclose(fp);
+    return value;
+}
+
+static void save_word_set(uint64_t index, uint64_t value)
+{
+    long pos = save_word_pos(index);
+    FILE *fp = fopen(save_path, "r+b");
+    assert(fp);
+    assert(fseek(fp, pos, SEEK_SET) == 0);
+    assert(fwrite(&value, sizeof(uint64_t), 1, fp) == 1);
+    fclose(fp);
+}
+
+static void save_word_swap(uint64_t index_1, uint64_t index_2)
+{
+    uint64_t value_1 = save_word_get(index_1);
+    uint64_t value_2 = save_word_get(index_2);
+    save_word_set(index_1, value_2);
+    save_word_set(index_2, value_1);
+}
+
+// saves SIG, checks the residue stored after its limbs, and loads it back
+static sig_num_t save_round_trip(sig_num_t sig)
+{
+    uint64_t count = sig.num->count;
+    uint64_t residue = save_num_residue(sig.num);
+    sig_num_save(save_path, sig);
+    sig_num_free(sig);
+    assert(uint64(save_word_get(count), residue));
+
+    sig_num_t sig_res = sig_num_load(save_path);
+    assert(remove(save_path) == 0);
+    return sig_res;
+}
+
+static void test_sig_num_save_load(bool show)
+{
+    TEST_FN_OPEN
+
+    #define TEST_SIG_NUM_SAVE_LOAD(TAG, ...)                                    \
+    {                                                                           \
+        TEST_CASE_OPEN(TAG)                                                     \
+        {                                                                       \
+            sig_num_t sig = save_round_trip(sig_num_create_immed(__VA_ARGS__)); \
+            assert(sig_num_immed(sig, __VA_ARGS__));                            \
+        }                                                                       \
+        TEST_CASE_CLOSE                                                         \
+    }
+
+    TEST_SIG_NUM_SAVE_LOAD(1, POSITIVE, 0);
+    TEST_SIG_NUM_SAVE_LOAD(2, POSITIVE, 1, 1);
+    TEST_SIG_NUM_SAVE_LOAD(3, NEGATIVE, 2, 1, 2);
+    TEST_SIG_NUM_SAVE_LOAD(4, POSITIVE, 3, UINT64_MAX, UINT64_MAX, UINT64_MAX);
+
+    #undef TEST_SIG_NUM_SAVE_LOAD
+
+    #define TEST_SIG_NUM_SAVE_LOAD_BLOCKS(TAG, THRESHOLD)                       \
+    {                                                                           \
+        TEST_CASE_OPEN(TAG)                                                     \
+        {                                                                       \
+            araucaria_disk_config_t config = {                                  \
+                .disk_path = "./cache",                                         \
+                .disk_threshold_bytes = (THRESHOLD)                             \
+            };                                                                  \
+            araucaria_disk_config_set(&config);                                 \
+                                                                                \
+            uint64_t count = (2 * sig_file_block_limbs) + 3;                    \
+            sig_num_t sig = sig_num_create_rand(count);                         \
+            sig_num_t sig_res = save_round_trip(sig_num_copy(sig));             \
+            assert(sig_num_eq_dbg(sig_res, sig));                               \
+        }                                                                       \
+        TEST_CASE_CLOSE                                                         \
+    }
+
+    TEST_SIG_NUM_SAVE_LOAD_BLOCKS(5, UINT64_MAX);
+    TEST_SIG_NUM_SAVE_LOAD_BLOCKS(6, 0);
+
+    #undef TEST_SIG_NUM_SAVE_LOAD_BLOCKS
+
+    #define TEST_SIG_NUM_LOAD_CORRUPT(TAG, CORRUPT)                             \
+    {                                                                           \
+        TEST_CASE_OPEN(TAG)                                                     \
+        {                                                                       \
+            sig_num_t sig = sig_num_create_immed(POSITIVE, 5, 1, 2, 3, 4, 5);   \
+            sig_num_save(save_path, sig);                                       \
+            sig_num_free(sig);                                                  \
+            CORRUPT;                                                            \
+            TEST_REVERT_OPEN                                                    \
+            {                                                                   \
+                sig_num_load(save_path);                                        \
+            }                                                                   \
+            TEST_REVERT_CLOSE                                                   \
+            assert(remove(save_path) == 0);                                     \
+        }                                                                       \
+        TEST_CASE_CLOSE                                                         \
+    }
+
+    TEST_SIG_NUM_LOAD_CORRUPT(7, save_word_set(1, 7));
+    TEST_SIG_NUM_LOAD_CORRUPT(8, save_word_swap(0, 3));
+    TEST_SIG_NUM_LOAD_CORRUPT(9, save_word_set(5, 0)); // the residue
+
+    #undef TEST_SIG_NUM_LOAD_CORRUPT
+
+    TEST_FN_CLOSE
+}
+
+
+
 static void test_sig_num()
 {
     TEST_LIB
@@ -797,6 +943,8 @@ static void test_sig_num()
 
     test_sig_num_mul_threads(show);
     test_sig_num_div_threads(show);
+
+    test_sig_num_save_load(show);
 
     TEST_ASSERT_MEM_EMPTY
 }
