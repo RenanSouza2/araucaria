@@ -1300,6 +1300,42 @@ static void time_bandwidth_sweep()
 }
 
 
+// REPS out-of-core multiplies of two COUNT-limb operands, one line per rep
+[[maybe_unused]]
+static void time_repro(uint64_t count, uint64_t threads, uint64_t reps, uint64_t threshold, uint64_t budget)
+{
+    araucaria_disk_config_t config =
+    {
+        .disk_path = "./cache",
+        .disk_threshold_bytes = threshold,
+        .ram_budget_bytes = budget,
+    };
+    araucaria_disk_config_set(&config);
+
+    tprintf("REPRO count " U64P(11) "  threads " U64P() "  threshold " U64P() " MB  budget " U64P() " MB",
+        count, threads, threshold >> 20, budget >> 20);
+
+    for(uint64_t r=0; r<reps; r++)
+    {
+        num_p num_1 = num_generate_size(count >> 6, 2);
+        while(num_1->count < count)
+        {
+            num_p num_hi = num_shl(num_copy(num_1), num_1->count * chunk_bits);
+            num_1 = num_add(num_hi, num_1);
+        }
+        num_p num_2 = num_add(num_copy(num_1), num_wrap(1));
+
+        tprintf("  BEGIN " U64P(3) " epoch " U64P(), r, (uint64_t)time(nullptr));
+
+        TIME_SETUP
+        num_p num_res = num_mul_threads(num_1, num_2, threads);
+        TIME_END(t1)
+
+        tprintf("  END   " U64P(3) " time: %10.3f  epoch " U64P(), r, dtime(t1), (uint64_t)time(nullptr));
+        num_free(num_res);
+    }
+}
+
 constexpr uint64_t processor_siblings = 2;
 
 static uint64_t processor_of(uint64_t index)
