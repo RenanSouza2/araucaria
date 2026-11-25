@@ -102,6 +102,10 @@ STATIC void num_ssm_depad_wrap(
     ssm_params_p p
 );
 
+STATIC uint64_t ssm_check_mul(uint64_t value_1, uint64_t value_2);
+STATIC uint64_t ssm_check_span(const uint64_t * limbs, uint64_t count, uint64_t pos);
+STATIC void ssm_product_residue_check(uint64_t residue_1, uint64_t residue_2, uint64_t residue_res);
+
 STATIC num_p num_ssm_pad_no_wrap(num_p num, ssm_params_p p);
 STATIC num_p num_ssm_depad_no_wrap(num_p num_fft, ssm_params_p p, uint64_t threads);
 STATIC void num_ssm_mul_wrap(
@@ -117,7 +121,6 @@ STATIC void num_ssm_mul_wrap(
 
 STATIC num_p num_mul_classic(num_p num_1, num_p num_2);
 STATIC num_p num_mul_ssm(num_p num_1, num_p num_2, bool free_inputs, uint64_t threads);
-STATIC num_p num_mul_karatsuba(num_p num_1, num_p num_2, bool free_inputs, uint64_t threads);
 STATIC num_p num_mul_core(num_p num_1, num_p num_2, bool free_inputs, uint64_t threads);
 
 STATIC num_p num_sqr_classic(num_p num);

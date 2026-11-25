@@ -30,19 +30,25 @@ library's entry point (consumers link `lib/lib.o` directly, see README).
 
 ### Running a single test
 
-`make test` at the root runs every module's suite. To iterate on one module:
+`make test` at the root runs every module's suite. To run one module's suite,
+use its lib folder, never `test/`, which gets its flags only from there:
 
 ```bash
-make dbg -C lib          # rebuild lib/debug_full.o first (test runners link against it)
-make -C lib/num/test      # builds and runs every runner_* in that module
-make run_test_1_ram -C lib/num/test   # build+run just one runner
+make test -C lib/num
 ```
 
 Every module has a single `test.c` → `runner_test`, except `num`, which has
-three runners sharing case bodies from `behavior.c` and differing only in
+four runners sharing case bodies from `behavior.c` and differing only in
 allocation strategy: `test_1_ram` (heap only), `test_2_disk`
 (`disk_threshold_bytes = 0`, everything on disk), `test_3_mist`
-(`disk_threshold_bytes = 8192`, mixed).
+(`disk_threshold_bytes = 8192`, mixed) and `test_4_stage` (mist plus
+`ram_budget_bytes = 8 MiB`, so disk-backed transforms run staged and fused).
+`test_4_stage` is the only suite that reaches the staged path. After the shared
+cases, which stop at 6 threads, it raises the budget to 32 MiB and runs cases
+of its own at 12 and 16 threads (`test_fuzz_num_ssm_stage_wide`): a worker's
+share has to stay above 1 MiB for its transform to stage. Their operands are
+too long for the classic multiply as an oracle, so the product is checked by
+its residue mod 2^64 - 59.
 
 Fuzz cases derive their RNG seed from the case tag, so a failure is
 reproducible by rerunning the runner binary directly with the seed it
@@ -84,13 +90,10 @@ Values are little-endian arrays of 64-bit limbs.
 
 ### Multiplication dispatch (`lib/num/code.c`)
 
-`num_mul_core` dispatches three ways, in this order:
+`num_mul_core` dispatches two ways:
 
-- `mul_is_classic` (`code.c:5149`) — either operand under `256` limbs: classic
+- `mul_is_classic` (`code.c:5355`) — either operand under `256` limbs: classic
   schoolbook.
-- `mul_is_karatsuba` (`code.c:5078`) — the SSM arrays would exceed both
-  `mul_karatsuba_min_bytes` (256 MB) and `disk_threshold_bytes`: split
-  recursively rather than transform a working set that would land on disk.
 - Otherwise `num_mul_ssm`: Schönhage–Strassen, splitting operands into blocks,
   transforming with a negacyclic FFT modulo `2^(64·(n-1)) + 1`, multiplying
   pointwise, transforming back.
@@ -134,7 +137,8 @@ allocations whose backing size exceeds `disk_threshold_bytes` to an
 anonymous `mmap` over a temporary file in `disk_path` (unlinked immediately,
 so it disappears with the number or the process). Default threshold is
 `UINT64_MAX` (nothing goes to disk). This is load-bearing for the `num`/`sig`/`flt` test suites, which
-each run their behavior cases three ways (ram/disk/mist) against the same
+each run their behavior cases three ways (ram/disk/mist; `num` adds a staged
+fourth) against the same
 case bodies — a bug that only reproduces on the disk path is a real category
 here, not a hypothetical.
 

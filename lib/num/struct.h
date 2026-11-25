@@ -16,7 +16,12 @@ STRUCT(araucaria_disk_config)
 {
     uint64_t disk_threshold_bytes;
     const char* disk_path;
-    bool is_set;
+    // RAM one worker may hold resident over a disk backed transform; 0 blocks
+    // the FFT passes for cache instead of for RAM
+    uint64_t ram_budget_bytes;
+    // RAM, as num_mul_estimate_memory charges it, that num_base_to_threads'
+    // running tasks may take together; 0 leaves them unbounded
+    uint64_t pool_budget_bytes;
 };
 
 STRUCT(num)
@@ -24,6 +29,8 @@ STRUCT(num)
     uint64_t size;
     uint64_t count;
     bool is_mmap;
+    // backing file, kept open for the FFT's explicit block I/O; -1 when on heap
+    int fd;
     chunk_p chunk;
 };
 

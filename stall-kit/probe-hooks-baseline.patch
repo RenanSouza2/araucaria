@@ -1,0 +1,376 @@
+diff --git a/lib/num/code.c b/lib/num/code.c
+index a6dfa28..0ad6787 100644
+--- a/lib/num/code.c
++++ b/lib/num/code.c
+@@ -14,6 +14,9 @@
+ #include "../../mods/macros/uint.h"
+ #include "../../mods/clu/header.h"
+ #include "struct.h"
++#include "prof.h" // PROF_
++
++PROF_DEFINE // PROF_
+ 
+ 
+ 
+@@ -989,6 +992,7 @@ static void num_block_read(uint64_t * dest, num_p num, uint64_t pos, uint64_t li
+     uint64_t left = limbs * sizeof(uint64_t);
+     off_t off = num_file_offset(pos);
+     char * dst = (char *)dest;
++    PROF_IO_BEGIN(rd)
+     while(left)
+     {
+         ssize_t got = pread(num->fd, dst, left, off);
+@@ -997,6 +1001,7 @@ static void num_block_read(uint64_t * dest, num_p num, uint64_t pos, uint64_t li
+         dst += got;
+         off += got;
+     }
++    PROF_IO_END(rd, limbs * sizeof(uint64_t))
+ }
+ 
+ static void num_block_write(num_p num, uint64_t pos, const uint64_t * src, uint64_t limbs)
+@@ -1007,6 +1012,7 @@ static void num_block_write(num_p num, uint64_t pos, const uint64_t * src, uint6
+     uint64_t left = limbs * sizeof(uint64_t);
+     off_t off = num_file_offset(pos);
+     const char * s = (const char *)src;
++    PROF_IO_BEGIN(wr)
+     while(left)
+     {
+         ssize_t put = pwrite(num->fd, s, left, off);
+@@ -1015,6 +1021,7 @@ static void num_block_write(num_p num, uint64_t pos, const uint64_t * src, uint6
+         s += put;
+         off += put;
+     }
++    PROF_IO_END(wr, limbs * sizeof(uint64_t))
+ }
+ 
+ void num_add_uint_offset(num_p num, uint64_t pos, uint64_t value)
+@@ -3214,6 +3221,7 @@ static void ssm_fft_fwd_pad_block(
+     uint64_t base = a + ((gl << r) * c);
+     const uint64_t * restrict src = pad->num->chunk;
+ 
++    PROF_TIMED_BEGIN
+     for(uint64_t b = 0; b < width; b++)
+     {
+         uint64_t x = base + (gl * b);
+@@ -3242,6 +3250,7 @@ static void ssm_fft_fwd_pad_block(
+             dest[pad->M] = src[pad->num->count - 1];
+         }
+     }
++    PROF_TIMED_END(pad_ns)
+ }
+ 
+ static void ssm_fft_fwd_preloop_block(
+@@ -3296,12 +3305,14 @@ static void * ssm_fft_fwd_split_worker(void * arg)
+     uint64_t stride_hi = w->K / 2;
+     bool first = true;
+ 
++    PROF_WORKER_ENTER(w->num_fft->is_mmap)
+     while(stages_left)
+     {
+         uint64_t r = ssm_fft_fuse_bits(w->n, stages_left, w->budget);
+         uint64_t gl = stride_hi >> (r - 1);
+         uint64_t blocks = w->K / (gl << r);
+ 
++        PROF_ROUND_BEGIN(w->num_fft->is_mmap)
+         for(uint64_t c = 0; c < blocks; c++)
+         {
+             for(uint64_t a = w->worker; a < gl; a += w->workers)
+@@ -3344,13 +3355,16 @@ static void * ssm_fft_fwd_split_worker(void * arg)
+                         w->n, gl, r, a, c, true
+                     );
+                 }
++                PROF_UNITS(w->num_fft->is_mmap, U64(1) << r)
+             }
+         }
++        PROF_ROUND_END("fwd-split", w->worker, stages_left, r, gl)
+ 
+         first = false;
+         stages_left -= r;
+         stride_hi = gl / 2;
+     }
++    PROF_WORKER_LEAVE(w->num_fft->is_mmap)
+     return nullptr;
+ }
+ 
+@@ -3375,6 +3389,8 @@ static void * ssm_fft_fwd_pass_worker(void * arg)
+ {
+     ssm_fft_fwd_pass_worker_t * w = arg;
+ 
++    PROF_WORKER_ENTER(w->num_fft->is_mmap)
++    PROF_ROUND_BEGIN(w->num_fft->is_mmap)
+     for(uint64_t idx = w->idx_start; idx < w->idx_end; idx++)
+     {
+         uint64_t a = idx % w->gl;
+@@ -3400,7 +3416,10 @@ static void * ssm_fft_fwd_pass_worker(void * arg)
+                 w->n, w->gl, w->r, a, c, true
+             );
+         }
++        PROF_UNITS(w->num_fft->is_mmap, U64(1) << w->r)
+     }
++    PROF_ROUND_END("fwd-pass", w->idx_start, w->idx_end, w->r, w->gl)
++    PROF_WORKER_LEAVE(w->num_fft->is_mmap)
+     return nullptr;
+ }
+ 
+@@ -3474,6 +3493,7 @@ static void num_ssm_fft_fwd_rec(
+     ssm_fft_fwd_split_worker_t * split_args = malloc(split * sizeof(*split_args));
+     assert(split_args)
+ 
++    PROF_PHASE("fwd-split")
+     for(uint64_t w=0; w<split; w++)
+     {
+         split_args[w] = (ssm_fft_fwd_split_worker_t)
+@@ -3500,6 +3520,7 @@ static void num_ssm_fft_fwd_rec(
+     {
+         TREAT(pthread_join(worker_ids[w], nullptr))
+     }
++    PROF_MARK("fwd-split")
+ 
+     free(split_args);
+ 
+@@ -3516,6 +3537,8 @@ static void num_ssm_fft_fwd_rec(
+         uint64_t blocks = K >> r;
+         uint64_t pass_workers = workers < blocks ? workers : blocks;
+ 
++        PROF_PHASE("fwd-pass")
++
+         for(uint64_t w=0; w<pass_workers; w++)
+         {
+             uint64_t idx_start, idx_end;
+@@ -3543,6 +3566,7 @@ static void num_ssm_fft_fwd_rec(
+         {
+             TREAT(pthread_join(worker_ids[w], nullptr))
+         }
++        PROF_MARK("fwd-pass")
+ 
+         stages_left -= r;
+         stride_hi = gl / 2;
+@@ -3784,6 +3808,7 @@ static void ssm_fft_inv_pointwise_block(
+     uint64_t width = U64(1) << r;
+     uint64_t base = a + ((gl << r) * c);
+ 
++    PROF_TIMED_BEGIN
+     for(uint64_t b = 0; b < width; b++)
+     {
+         uint64_t x = base + (gl * b);
+@@ -3834,6 +3859,7 @@ static void ssm_fft_inv_pointwise_block(
+ 
+         num_ssm_mul_mod_span(num_aux, num, pw->num_fft_2, pos_x, n);
+     }
++    PROF_TIMED_END(pw_ns)
+ }
+ 
+ typedef struct
+@@ -3864,6 +3890,7 @@ static void * ssm_fft_inv_split_worker(void * arg)
+     uint64_t gl = 1;
+     bool first = true;
+ 
++    PROF_WORKER_ENTER(w->num->is_mmap)
+     while(stages_left)
+     {
+         uint64_t r = ssm_fft_fuse_bits(w->n, stages_left, w->budget);
+@@ -3871,6 +3898,8 @@ static void * ssm_fft_inv_split_worker(void * arg)
+         uint64_t c_start = (w->worker * chunk) / span;
+         uint64_t c_end = c_start + (chunk / span);
+ 
++        PROF_ROUND_BEGIN(w->num->is_mmap)
++
+         bool last = w->postloop && (stages_left == r);
+ 
+         // a non-recursive pointwise round reads num_fft_2 at array offsets, so
+@@ -3914,13 +3943,16 @@ static void * ssm_fft_inv_split_worker(void * arg)
+                         num_stage, w->num, w->pos, 1, w->n, gl, r, a, c, true
+                     );
+                 }
++                PROF_UNITS(w->num->is_mmap, U64(1) << r)
+             }
+         }
++        PROF_ROUND_END("inv-split", w->worker, stages_left, r, gl)
+ 
+         first = false;
+         stages_left -= r;
+         gl = span;
+     }
++    PROF_WORKER_LEAVE(w->num->is_mmap)
+     return nullptr;
+ }
+ 
+@@ -3948,6 +3980,8 @@ static void * ssm_fft_inv_pass_worker(void * arg)
+ {
+     ssm_fft_inv_pass_worker_t * w = arg;
+ 
++    PROF_WORKER_ENTER(w->num->is_mmap)
++    PROF_ROUND_BEGIN(w->num->is_mmap)
+     for(uint64_t idx = w->idx_start; idx < w->idx_end; idx++)
+     {
+         uint64_t a = idx % w->gl;
+@@ -3979,7 +4013,10 @@ static void * ssm_fft_inv_pass_worker(void * arg)
+                 w->num_stage, w->num, w->pos, 1, w->n, w->gl, w->r, a, c, true
+             );
+         }
++        PROF_UNITS(w->num->is_mmap, U64(1) << w->r)
+     }
++    PROF_ROUND_END("inv-pass", w->idx_start, w->idx_end, w->r, w->gl)
++    PROF_WORKER_LEAVE(w->num->is_mmap)
+     return nullptr;
+ }
+ 
+@@ -4072,6 +4109,7 @@ static void num_ssm_fft_inv_rec(
+     ssm_fft_inv_pointwise_t * split_pw = malloc(split * sizeof(*split_pw));
+     assert(split_pw)
+ 
++    PROF_PHASE("inv-split")
+     for(uint64_t w=0; w<split; w++)
+     {
+         split_pw[w] = ssm_fft_inv_pointwise_create(num_fft_2, pw_recursive ? &p_next : nullptr, n);
+@@ -4101,6 +4139,7 @@ static void num_ssm_fft_inv_rec(
+     {
+         TREAT(pthread_join(worker_ids[w], nullptr))
+     }
++    PROF_MARK("inv-split")
+ 
+     for(uint64_t w=0; w<split; w++)
+     {
+@@ -4121,6 +4160,8 @@ static void num_ssm_fft_inv_rec(
+         uint64_t blocks = k >> r;
+         uint64_t pass_workers = workers < blocks ? workers : blocks;
+ 
++        PROF_PHASE("inv-pass")
++
+         for(uint64_t w=0; w<pass_workers; w++)
+         {
+             uint64_t idx_start, idx_end;
+@@ -4151,6 +4192,7 @@ static void num_ssm_fft_inv_rec(
+         {
+             TREAT(pthread_join(worker_ids[w], nullptr))
+         }
++        PROF_MARK("inv-pass")
+ 
+         stages_left -= r;
+         gl <<= r;
+@@ -5294,6 +5336,9 @@ static void * ssm_depad_worker(void * arg)
+     uint64_t M = w->p->M;
+     uint64_t n = w->p->n;
+ 
++    PROF_WORKER_ENTER(w->num_fft->is_mmap)
++    PROF_ROUND_BEGIN(w->num_fft->is_mmap)
++
+     uint64_t first = w->pos_init < n ? 0 : ((w->pos_init - n) / M) + 1;
+     uint64_t last = (w->pos_max - 1) / M;
+     if(last >= w->p->K)
+@@ -5315,7 +5360,10 @@ static void * ssm_depad_worker(void * arg)
+             end - pos,
+             w->pos_max - pos
+         );
++        PROF_UNITS(w->num_fft->is_mmap, 1)
+     }
++    PROF_ROUND_END("depad", first, last, 0, 0)
++    PROF_WORKER_LEAVE(w->num_fft->is_mmap)
+ 
+     w->carry = carry;
+     return nullptr;
+@@ -5330,7 +5378,10 @@ num_p num_ssm_depad_no_wrap(num_p num, ssm_params_p p, uint64_t threads)
+     assert(num)
+ 
+     uint64_t target_count = (p->M * (p->K - 1)) + p->n;
++    PROF_PHASE("depad-create")
+     num_p num_res = num_create(CLU_ARGS(target_count, target_count));
++    PROF_MARK("depad-create")
++    PROF_PHASE("depad-sum")
+ 
+     uint64_t workers = target_count < ssm_depad_min_limbs_to_thread ? 1 : threads;
+     if(workers > p->K)
+@@ -5368,6 +5419,8 @@ num_p num_ssm_depad_no_wrap(num_p num, ssm_params_p p, uint64_t threads)
+     {
+         TREAT(pthread_join(worker_ids[w], nullptr))
+     }
++    PROF_MARK("depad-sum")
++    PROF_PHASE("depad-carry")
+ 
+     // the result never overflows target_count, so the last range carries nothing
+     assert(worker_args[workers-1].carry == 0);
+@@ -5378,11 +5431,17 @@ num_p num_ssm_depad_no_wrap(num_p num, ssm_params_p p, uint64_t threads)
+             num_add_uint_offset(num_res, worker_args[w].pos_max, worker_args[w].carry);
+         }
+     }
++    PROF_MARK("depad-carry")
++    PROF_PHASE("free-fft1")
+ 
+     free(worker_args);
+     free(worker_ids);
+     num_free(num);
+-    return num_normalize(num_res);
++    PROF_MARK("free-fft1")
++    PROF_PHASE("normalize")
++    num_res = num_normalize(num_res);
++    PROF_MARK("normalize")
++    return num_res;
+ }
+ 
+ // num_aux->size >= 2 * n
+@@ -5400,14 +5459,18 @@ static num_p num_ssm_prepare_no_wrap(
+     assert(num)
+     assert(num_aux->size >= 2 * p->n)
+ 
++    PROF_PHASE("fft-create")
+     num_p num_fft = num_create_dirty(CLU_ARGS(p->n * p->K, 0));
++    PROF_MARK("fft-create")
+ 
+     num_ssm_fft_fwd_pad(num_aux, num_fft, num, p, threads);
+ 
++    PROF_PHASE("free-operand")
+     if(free_inputs)
+     {
+         num_free(num);
+     }
++    PROF_MARK("free-operand")
+     return num_fft;
+ }
+ 
+@@ -5433,15 +5496,24 @@ num_p num_mul_ssm(num_p num_1, num_p num_2, bool free_inputs, uint64_t threads)
+ 
+     ssm_params_t p = ssm_get_params(num_1->count + num_2->count);
+     num_p num_aux_2 = num_create_dirty(CLU_ARGS(2 * p.n, 0));
++    PROF_MARK("setup")
++    PROF_STAGE("fwd1")
+     num_p num_fft_1 = num_ssm_prepare_no_wrap(num_aux_2, num_1, &p, free_inputs, threads);
++    PROF_STAGE("fwd2")
+     num_p num_fft_2 = num_ssm_prepare_no_wrap(num_aux_2, num_2, &p, free_inputs, threads);
+ 
++    PROF_STAGE("inv")
+     num_ssm_fft_inv_pointwise(num_aux_2, num_fft_1, num_fft_2, &p, threads);
++    PROF_PHASE("free-fft2")
+     num_free(num_fft_2);
+     num_free(num_aux_2);
++    PROF_MARK("free-fft2")
+ 
++    PROF_STAGE("depad")
+     num_p num_res = num_ssm_depad_no_wrap(num_fft_1, &p, threads);
+     ssm_product_count_check(num_res, count_max, tops);
++    PROF_STAGE("done")
++    PROF_PHASE("done")
+     return num_res;
+ }
+ 
+@@ -5937,14 +6009,21 @@ num_p num_sqr_ssm(num_p num, uint64_t threads)
+     ssm_params_t p = ssm_get_params(2 * num->count);
+     num_p num_aux_1 = num_create_dirty(CLU_ARGS(p.n, 0));
+     num_p num_aux_2 = num_create_dirty(CLU_ARGS(2 * p.n, 0));
++    PROF_MARK("setup")
++    PROF_STAGE("fwd1")
+     num_p num_fft = num_ssm_prepare_no_wrap(num_aux_2, num, &p, true, threads);
+ 
++    PROF_STAGE("sqr")
++    PROF_PHASE("sqr-map")
+     num_ssm_sqr_pointwise(num_aux_1, num_aux_2, num_fft, &p, threads);
+     num_free(num_aux_1);
++    PROF_MARK("sqr-map")
+ 
++    PROF_STAGE("inv")
+     num_ssm_fft_inv(num_aux_2, num_fft, &p, threads);
+     num_free(num_aux_2);
+ 
++    PROF_STAGE("depad")
+     num_p num_res = num_ssm_depad_no_wrap(num_fft, &p, threads);
+     ssm_product_count_check(num_res, count_max, tops);
+     return num_res;

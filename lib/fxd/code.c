@@ -1,3 +1,4 @@
+#include <stdint.h>
 #include <stdio.h>
 
 #include "debug.h"
@@ -7,6 +8,7 @@
 #include "../../mods/macros/uint.h"
 
 #include "../file/header.h"
+#include "internal.h"
 #include "../num/header.h"
 #include "../num/internal.h"
 #include "../num/struct.h"
@@ -115,21 +117,44 @@ bool fxd_num_immed(
 #endif
 
 
-static void fxd_num_display_dec_core(fxd_num_t fxd, uint64_t threads)
+// fractional digits fixed by all but the last of POS limbs
+static uint64_t fxd_dec_digits(uint64_t pos)
 {
-    printf("%c ", fxd.sig.signal == NEGATIVE ? '-' : '+');
+    if(pos < 2)
+    {
+        return 0;
+    }
+
+    constexpr double LOG10_2 = 0.30102999566398119521;
+    return (uint64_t)((double)(pos - 1) * 64.0 * LOG10_2);
+}
+
+// BARE writes only the digits: no sign, no point, and only the fraction
+// digits fxd_dec_digits vouches for
+void fxd_num_display_dec_core(FILE *fp, fxd_num_t fxd, uint64_t threads, bool bare)
+{
+    if(!bare)
+    {
+        fprintf(fp, "%c ", fxd.sig.signal == NEGATIVE ? '-' : '+');
+    }
 
     num_p num_hi, num_lo;
     num_break(&num_hi, &num_lo, num_copy(fxd.sig.num), fxd.pos);
 
-    num_display_dec_threads(num_hi, threads);
+    num_dec_write(fp, num_hi, threads);
     num_free(num_hi);
 
-    printf(".");
+    if(!bare)
+    {
+        fprintf(fp, ".");
+    }
 
     if(num_lo->count == 0)
     {
-        printf("0");
+        if(!bare)
+        {
+            fprintf(fp, "0");
+        }
         num_free(num_lo);
         return;
     }
@@ -155,7 +180,8 @@ static void fxd_num_display_dec_core(fxd_num_t fxd, uint64_t threads)
     num_free(num);
 
     num_lo = num_base_to_threads(num_lo, FXD_DEC_BASE, threads);
-    num_dec_dump(num_lo->chunk, num_lo->count, t - num_lo->count, threads);
+    uint64_t digits = bare ? fxd_dec_digits(fxd.pos) : UINT64_MAX;
+    num_dec_dump(fp, num_lo->chunk, num_lo->count, t - num_lo->count, digits, threads);
 
     num_free(num_lo);
 }
@@ -164,7 +190,7 @@ void fxd_num_display_dec(fxd_num_t fxd)
 {
     CLU_FXD_IS_SAFE(fxd)
 
-    fxd_num_display_dec_core(fxd, 1);
+    fxd_num_display_dec_core(stdout, fxd, 1, false);
 }
 
 void fxd_num_display_dec_threads(fxd_num_t fxd, uint64_t threads)
@@ -172,7 +198,16 @@ void fxd_num_display_dec_threads(fxd_num_t fxd, uint64_t threads)
     CLU_FXD_IS_SAFE(fxd)
     assert(threads);
 
-    fxd_num_display_dec_core(fxd, threads);
+    fxd_num_display_dec_core(stdout, fxd, threads, false);
+}
+
+void fxd_num_write_dec_threads(FILE *fp, fxd_num_t fxd, uint64_t threads)
+{
+    CLU_FXD_IS_SAFE(fxd)
+    assert(fp);
+    assert(threads);
+
+    fxd_num_display_dec_core(fp, fxd, threads, true);
 }
 
 void fxd_num_display(fxd_num_t fxd)

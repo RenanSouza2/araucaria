@@ -47,6 +47,6 @@ void sig_num_save(const char file_path[], sig_num_t sig);
 
 sig_num_t file_read_sig_num_raw(FILE *fp);
 sig_num_t file_read_sig_num(FILE *fp, uint64_t index);
-sig_num_t sig_num_load(char file_path[]);
+sig_num_t sig_num_load(const char file_path[]);
 
 #endif

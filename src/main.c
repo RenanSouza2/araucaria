@@ -1028,6 +1028,313 @@ static void time_disk_mul_count(uint64_t count, uint64_t threads, uint64_t thres
 }
 
 
+// Staged block I/O against the same multiply worked in place through the
+// mapping. Sized so the stage path engages but the run stays short.
+[[maybe_unused]]
+static void stage_check(uint64_t count, uint64_t threads)
+{
+    constexpr uint64_t threshold = U64(64) * 1024 * 1024;
+    uint64_t budgets[] = {0, U64(64) * 1024 * 1024};
+    const char * labels[] = {"in-place", "staged"};
+
+    araucaria_disk_config_t config =
+    {
+        .disk_path = "./cache",
+        .disk_threshold_bytes = threshold,
+    };
+    araucaria_disk_config_set(&config);
+
+    num_p num_1 = num_generate_size(count, 2);
+    num_p num_2 = num_add(num_copy(num_1), num_wrap(1));
+    num_p num_res_ref = nullptr;
+
+    tprintf("count " U64P(10) "  threads " U64P(), num_1->count, threads);
+
+    for(uint64_t j=0; j<sizeof(budgets)/sizeof(budgets[0]); j++)
+    {
+        config.ram_budget_bytes = budgets[j];
+        araucaria_disk_config_set(&config);
+
+        TIME_SETUP
+        num_p num_res = num_mul_threads(num_copy(num_1), num_copy(num_2), threads);
+        TIME_END(t1)
+
+        tprintf("    %-9s time: %9.3f", labels[j], dtime(t1));
+
+        if(num_res_ref == nullptr)
+        {
+            num_res_ref = num_res;
+            continue;
+        }
+
+        assert(num_cmp(num_res, num_res_ref) == 0)
+        num_free(num_res);
+    }
+
+    num_free(num_res_ref);
+    num_free(num_1);
+    num_free(num_2);
+}
+
+
+typedef struct
+{
+    const char * label;
+    uint64_t ram_budget_bytes;
+} compare_cfg_t;
+
+// ram_budget_bytes 0 works a disk backed array in place with cache sized passes
+[[maybe_unused]]
+static void time_compare(uint64_t count, uint64_t threads, uint64_t threshold)
+{
+    constexpr uint64_t gb = U64(1) * 1024 * 1024 * 1024;
+
+    compare_cfg_t cfgs[] =
+    {
+        { "in-place", 0 },
+        { "staged", 4 * gb },
+    };
+
+    araucaria_disk_config_t config =
+    {
+        .disk_path = "./cache",
+        .disk_threshold_bytes = threshold,
+    };
+    araucaria_disk_config_set(&config);
+
+    num_p num_1 = num_generate_size(count >> 6, 2);
+    while(num_1->count < count)
+    {
+        num_p num_hi = num_shl(num_copy(num_1), num_1->count * chunk_bits);
+        num_1 = num_add(num_hi, num_1);
+    }
+    num_p num_2 = num_add(num_copy(num_1), num_wrap(1));
+    num_p num_res_ref = nullptr;
+
+    tprintf("SIZE operand " U64P(6) " MB  count " U64P(11) "  threshold " U64P() " MB",
+        (num_1->count * sizeof(uint64_t)) >> 20, num_1->count, threshold >> 20);
+
+    for(uint64_t j=0; j<sizeof(cfgs)/sizeof(cfgs[0]); j++)
+    {
+        config.ram_budget_bytes = cfgs[j].ram_budget_bytes;
+        araucaria_disk_config_set(&config);
+
+        TIME_SETUP
+        num_p num_res = num_mul_threads(num_copy(num_1), num_copy(num_2), threads);
+        TIME_END(t1)
+
+        tprintf("RESULT %-11s %10.3f", cfgs[j].label, dtime(t1));
+
+        if(num_res_ref == nullptr)
+        {
+            num_res_ref = num_res;
+            continue;
+        }
+
+        assert(num_cmp(num_res, num_res_ref) == 0)
+        num_free(num_res);
+    }
+
+    num_free(num_res_ref);
+    num_free(num_1);
+    num_free(num_2);
+}
+
+// Small operands with repetitions: at these sizes nothing reaches disk, so the
+// two configs must run the identical path.
+[[maybe_unused]]
+static void time_small_check()
+{
+    constexpr uint64_t gb = U64(1) * 1024 * 1024 * 1024;
+    constexpr uint64_t reps = 20;
+    uint64_t counts[] = { 65'536, 262'144, 1'048'576, 4'194'304, 16'777'216 };
+
+    araucaria_disk_config_t config =
+    {
+        .disk_path = "./cache",
+        .disk_threshold_bytes = 1 * gb,
+    };
+
+    for(uint64_t i=0; i<sizeof(counts)/sizeof(counts[0]); i++)
+    {
+        config.ram_budget_bytes = 0;
+        araucaria_disk_config_set(&config);
+
+        num_p num_1 = num_generate_size(counts[i], 2);
+        num_p num_2 = num_add(num_copy(num_1), num_wrap(1));
+
+        double best[2] = {1e9, 1e9};
+        double tot[2] = {0, 0};
+
+        for(uint64_t r=0; r<reps; r++)
+        {
+            for(uint64_t j=0; j<2; j++)
+            {
+                config.ram_budget_bytes = j ? (4 * gb) : 0;
+                araucaria_disk_config_set(&config);
+
+                TIME_SETUP
+                num_p res = num_mul_threads(num_copy(num_1), num_copy(num_2), 8);
+                TIME_END(t1)
+                num_free(res);
+
+                double d = dtime(t1);
+                tot[j] += d;
+                if(d < best[j]) best[j] = d;
+            }
+        }
+
+        tprintf(
+            "SMALL " U64P(9) " limbs (" U64P(4) " KB)  in-place best %8.4f mean %8.4f | "
+            "staged best %8.4f mean %8.4f | ratio %5.3f",
+            num_1->count, (num_1->count * 8) >> 10,
+            best[0], tot[0]/(double)reps, best[1], tot[1]/(double)reps,
+            (tot[1]/(double)reps) / (tot[0]/(double)reps)
+        );
+
+        num_free(num_1);
+        num_free(num_2);
+    }
+}
+
+[[maybe_unused]]
+static void time_guard_check()
+{
+    constexpr uint64_t mb = U64(1) * 1024 * 1024;
+
+    for(uint64_t r=0; r<3; r++)
+    {
+        time_compare(16'777'216, 8, 256 * mb);
+    }
+    time_compare(67'108'864, 8, 1024 * mb);
+    time_compare(268'435'456, 8, 1024 * mb);
+}
+
+[[maybe_unused]]
+static void time_compare_sweep()
+{
+    uint64_t counts[] =
+    {
+        1'073'741'824,  // 8 GB
+    };
+
+    for(uint64_t i=0; i<sizeof(counts)/sizeof(counts[0]); i++)
+    {
+        time_compare(counts[i], 8, U64(1) * 1024 * 1024 * 1024);
+    }
+}
+
+
+typedef struct
+{
+    const char * label;
+    uint64_t threads;
+    uint64_t ram_budget_bytes;
+} bandwidth_cfg_t;
+
+// One out-of-core SSM per configuration, varying the RAM budget and the worker
+// count. Total fused-block working set tracks the budget, so the b16G row is the
+// only one whose blocks cannot stay resident.
+[[maybe_unused]]
+static void time_bandwidth_sweep()
+{
+    constexpr uint64_t count = 268'435'456;              // 2 GB operands
+    constexpr uint64_t threshold = U64(256) * 1024 * 1024;
+    constexpr uint64_t gb = U64(1) * 1024 * 1024 * 1024;
+
+    bandwidth_cfg_t cfgs[] =
+    {
+        { "t8-b4G", 8, 4 * gb },
+        { "t8-b8G", 8, 8 * gb },
+    };
+
+    araucaria_disk_config_t config =
+    {
+        .disk_path = "./cache",
+        .disk_threshold_bytes = threshold,
+    };
+    araucaria_disk_config_set(&config);
+
+    num_p num_1 = num_generate_size(count >> 6, 2);
+    while(num_1->count < count)
+    {
+        num_p num_hi = num_shl(num_copy(num_1), num_1->count * chunk_bits);
+        num_1 = num_add(num_hi, num_1);
+    }
+    num_p num_2 = num_add(num_copy(num_1), num_wrap(1));
+    num_p num_res_ref = nullptr;
+
+    tprintf("operand " U64P(5) " MB  count " U64P(11),
+        (num_1->count * sizeof(uint64_t)) >> 20, num_1->count);
+
+    for(uint64_t j=0; j<sizeof(cfgs)/sizeof(cfgs[0]); j++)
+    {
+        num_p num_1_c = num_copy(num_1);
+        num_p num_2_c = num_copy(num_2);
+
+        config.ram_budget_bytes = cfgs[j].ram_budget_bytes;
+        araucaria_disk_config_set(&config);
+
+        tprintf("  BEGIN %-8s epoch " U64P(), cfgs[j].label, (uint64_t)time(nullptr));
+
+        TIME_SETUP
+        num_p num_res = num_mul_threads(num_1_c, num_2_c, cfgs[j].threads);
+        TIME_END(t1)
+
+        tprintf("  END   %-8s time: %10.3f  epoch " U64P(),
+            cfgs[j].label, dtime(t1), (uint64_t)time(nullptr));
+
+        if(num_res_ref == nullptr)
+        {
+            num_res_ref = num_res;
+            continue;
+        }
+
+        assert(num_cmp(num_res, num_res_ref) == 0)
+        num_free(num_res);
+    }
+
+    num_free(num_res_ref);
+    num_free(num_1);
+    num_free(num_2);
+}
+
+
+// REPS out-of-core multiplies of two COUNT-limb operands, one line per rep
+[[maybe_unused]]
+static void time_repro(uint64_t count, uint64_t threads, uint64_t reps, uint64_t threshold, uint64_t budget)
+{
+    araucaria_disk_config_t config =
+    {
+        .disk_path = "./cache",
+        .disk_threshold_bytes = threshold,
+        .ram_budget_bytes = budget,
+    };
+    araucaria_disk_config_set(&config);
+
+    tprintf("REPRO count " U64P(11) "  threads " U64P() "  threshold " U64P() " MB  budget " U64P() " MB",
+        count, threads, threshold >> 20, budget >> 20);
+
+    for(uint64_t r=0; r<reps; r++)
+    {
+        num_p num_1 = num_generate_size(count >> 6, 2);
+        while(num_1->count < count)
+        {
+            num_p num_hi = num_shl(num_copy(num_1), num_1->count * chunk_bits);
+            num_1 = num_add(num_hi, num_1);
+        }
+        num_p num_2 = num_add(num_copy(num_1), num_wrap(1));
+
+        tprintf("  BEGIN " U64P(3) " epoch " U64P(), r, (uint64_t)time(nullptr));
+
+        TIME_SETUP
+        num_p num_res = num_mul_threads(num_1, num_2, threads);
+        TIME_END(t1)
+
+        tprintf("  END   " U64P(3) " time: %10.3f  epoch " U64P(), r, dtime(t1), (uint64_t)time(nullptr));
+        num_free(num_res);
+    }
+}
 
 constexpr uint64_t processor_siblings = 2;
 
@@ -1291,6 +1598,9 @@ int main()
     // time_assembly_mul();
     // time_threads_mul();
     // time_disk_mul_count(132'000'000, 16, 3'000'000'000);
+    // time_small_check();
+    // time_guard_check();
+    // time_compare(1'610'612'736, 8, U64(1) * 1024 * 1024 * 1024);
     time_threads_div();
     // time_procs_mul();
     // time_smt_mul();

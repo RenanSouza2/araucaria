@@ -99,6 +99,68 @@ The default threshold is `UINT64_MAX` (nothing goes to disk);
 `num_realloc_disk` (and the `sig` / `flt` equivalents) moves an
 already-allocated value to disk on demand.
 
+The file is created sparse, so a full disk would otherwise surface as `SIGBUS`
+on the first write to an unbacked page. Every disk allocation checks
+`disk_path` for free space first and fails there instead.
+
+### Multiplying past RAM
+
+`ram_budget_bytes` governs a multiply whose Schönhage–Strassen transform arrays
+are disk-backed. It defaults to `0`, which works those arrays in place through
+the mapping.
+
+```c
+araucaria_disk_config_t config = {
+    .disk_path            = "./cache",
+    .disk_threshold_bytes = U64(2) * 1024 * 1024 * 1024,
+    .ram_budget_bytes     = U64(4) * 1024 * 1024 * 1024,
+};
+```
+
+`ram_budget_bytes` is how much RAM one multiply may keep resident. For a
+disk-backed array the FFT passes are fused into blocks of that size (divided by
+the worker count), so the transform sweeps the array a few times instead of once
+per stage, and each block is read into RAM and written back with explicit
+`pread`/`pwrite` rather than faulted through the mapping. Keep it at or below
+**RAM/2**: past what the page cache can hold, blocks are evicted mid-pass and
+I/O multiplies.
+
+`disk_threshold_bytes` decides which arrays reach disk at all. An array that
+fits in RAM is faster left there, and a multiply holds two transform arrays at
+once, so around **RAM/3** keeps every multiply that can run in RAM in RAM.
+
+Scratch space is the binding constraint out of core. A transform array is
+about twice the product, and a multiply holds two of them plus an operand, so
+budget roughly **9× one operand**: 8 GB operands need ~72 GB of `disk_path`.
+
+Every Schönhage–Strassen product is checked for length on the way out: a
+product of `c1` and `c2` limbs has at most `c1 + c2` limbs, and at least
+`c1 + c2 - 1` when both operands' top limbs are nonzero. A product that breaks
+this aborts through `assert`, which stays live in production, instead of being
+returned. The check catches a corrupted transform, which leaves garbage in the
+zero padding above the product, but not damage confined below its top limbs.
+
+A product whose transform arrays are on disk is also checked by value. The
+operands are reduced modulo 2^64 - 59 from the limbs the transform reads, the
+product from the limbs it assembles, and the product of the first two has to
+equal the third; a mismatch aborts the same way. That covers everything between
+reading the operands and assembling the product, whichever layer did the damage:
+a wrong product of the right length included. It does not cover a product chunk
+that was assembled right and written wrong, a number damaged while it sat on
+disk between two operations, or a multiply whose arrays are in RAM, which is
+not checked at all.
+
+## Saved numbers
+
+`sig_num_save`, `fxd_num_save`, `flt_num_save` and the `file_write_*_num` calls
+store a number's limbs followed by their residue modulo 2^64 - 59, the same
+reduction the multiply check uses. Loading recomputes the residue from the limbs
+as they are read and aborts through `assert` on a mismatch. That catches limbs
+that changed between the write and the read: a bad write, a file damaged on
+disk, a bad read. It covers the limbs and their count, not the other words
+stored with them (sign, exponent, size), and not a number that was already
+wrong when it was saved.
+
 ## Threading
 
 Every heavy operation has a `*_threads` counterpart taking a thread count as
@@ -133,15 +195,31 @@ Link with `-pthread`; the bundled makefiles already do.
 
 ### Estimating memory
 
-`num_mul_estimate_memory(count_1, count_2, disk_threshold_bytes, threads)`
-returns the time-weighted average RAM, in bytes, a `num_mul_threads` of that
-shape holds live — a scheduler can use it to decide how many multiplies to
-admit at once. `num_estimate_ram_bytes(count, disk_threshold_bytes)` gives the
-same charge for a single value of `count` limbs.
+`num_mul_estimate_memory(count_1, count_2, threads)` returns the time-weighted
+average RAM, in bytes, a `num_mul_threads` of that shape holds live — a
+scheduler can use it to decide how many multiplies to admit at once.
 
-Both account for `disk_threshold_bytes`: a buffer large enough to be `mmap`-ed
-is charged at a fraction of its size, since the pages past the threshold are
-reclaimable page cache.
+It reads `disk_threshold_bytes` and `ram_budget_bytes` from the configuration
+set by `araucaria_disk_config_set`, so the estimate always describes the
+multiply that would actually run. A buffer large enough to be `mmap`-ed is
+charged at a fraction of its size, since the pages past the threshold are
+reclaimable page cache. When `ram_budget_bytes` is set that fraction is also
+capped by it, since the budget is what bounds a disk-backed buffer's resident
+set. Past the size where that cap saturates, the charge stops growing with the
+operands — a scheduler comparing two joins on it should expect the larger one
+to charge no more, and sometimes slightly less.
+
+`num_base_to_threads` schedules its own task pool on it. With
+`pool_budget_bytes` set, a task starts only while the tasks running, it
+included, are charged within the budget, each at the estimate of its first
+product; a task always starts when none is running. The default `0` starts
+every outstanding task at once. A piece waiting in the pool is trimmed to its
+count, and one over `ram_budget_bytes` waits in a file-backed mapping, as the
+conversion's powers of the base and their reciprocals do. With the budget set,
+the powers and reciprocals of the levels the pool splits on are held in
+file-backed mappings whatever their size, since only those levels' splits read
+them. Every task, a leaf converting its whole subtree included, runs on its
+share of the threads.
 
 ## Ownership
 
@@ -162,14 +240,15 @@ the shared assert/test/integer macros
 
 ## Upgrading
 
-Changes that break a consuming project. Nothing was removed from the public
-headers; these three changed name or meaning.
+Changes that break a consuming project.
 
 | Before | Now | Note |
 | --- | --- | --- |
 | `araucaria_disk_config_t.disk_threshold` | `.disk_threshold_bytes` | **Unit changed from limbs to bytes.** A field initialiser by name stops compiling, but a positional one does not — check any `araucaria_disk_config_t` you build. `1024` limbs is `8192` bytes. |
-| `araucaria_disk_config_get_threshold()` | `araucaria_disk_config_get_threshold_bytes()` | Same unit change; the rename makes it a compile error rather than a silent one. |
-| `num_mul_estimate_memory(count_1, count_2, disk_threshold)` | `num_mul_estimate_memory(count_1, count_2, disk_threshold_bytes, threads)` | Gained a trailing `threads` argument, matching what will be passed to `num_mul_threads`. Pass `1` to keep the old meaning. |
+| `num_mul_estimate_memory(count_1, count_2, disk_threshold)` | `num_mul_estimate_memory(count_1, count_2, threads)` | Lost the threshold argument, which is now read from the configuration; gained a trailing `threads` argument, matching what will be passed to `num_mul_threads`. Pass `1` to keep the old meaning. |
+| `araucaria_disk_config_get_threshold()` | — | Removed; the threshold is read from the configuration internally. |
+| `num_estimate_ram_bytes(count, disk_threshold)` | — | Removed; it had no callers. |
+| `araucaria_disk_config_t.is_set` | — | Removed from the struct. It was internal state in a caller-facing field, and the setter overwrote whatever was put there. `araucaria_disk_config_is_set()` stays, and now reports whether a `disk_path` was given. |
 
 ## Development
 
